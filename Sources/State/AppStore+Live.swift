@@ -376,6 +376,13 @@ extension AppStore {
     /// (e.g. SSH remotes on another server) get their own bridge, then the primary bridge is restored.
     func loadAllWorkspaceTasks(preferredActiveTaskId: String?) async {
         guard !isUITestSeededMode else { return }
+        // Open desktop tabs are only part of the sidebar tree; a loaded tree is refreshed in full instead.
+        if sidebarTreeLoaded {
+            if !(await loadProjectTree(preferredActiveTaskId: preferredActiveTaskId)), isLiveHostConnected {
+                scheduleProjectTreeRefresh(delay: 5)
+            }
+            return
+        }
         let projectList = projects
         guard !projectList.isEmpty else { return }
 

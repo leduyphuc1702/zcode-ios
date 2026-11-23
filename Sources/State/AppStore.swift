@@ -2109,7 +2109,12 @@ public final class AppStore {
             }
         }
 
-        if isResync {
+        // A resync keeps the loaded sidebar tree on screen; `project.readTree` replaces it when it lands.
+        let keepTree = isResync && sidebarTreeLoaded
+        if keepTree {
+            let previousIds = Set(previousSessions.map(\.id))
+            nextSessions = previousSessions + nextSessions.filter { !previousIds.contains($0.id) }
+        } else if isResync {
             let previousById = Dictionary(previousSessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             nextSessions = nextSessions.map { Self.carryingLiveState(into: $0, from: previousById[$0.id]) }
             let nextIds = Set(nextSessions.map(\.id))
@@ -2188,7 +2193,9 @@ public final class AppStore {
         var bridgeReplaced = false
         let treeLoaded = await loadProjectTree(preferredActiveTaskId: preferredActiveTaskId)
         LoadBench.mark("tree loaded=\(treeLoaded) tasks=\(sessions.count)")
-        if !treeLoaded {
+        if !treeLoaded, keepTree {
+            scheduleProjectTreeRefresh(delay: 3)
+        } else if !treeLoaded {
             sidebarTreeLoaded = false
             await subscriptions.value
             let bridgeBefore = await rpcClient.currentBridge()?.bridgeSessionId

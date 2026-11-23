@@ -8,11 +8,14 @@ extension AppStore {
     @discardableResult
     func loadProjectTree(preferredActiveTaskId: String?) async -> Bool {
         guard !isUITestSeededMode else { return true }
+        #if DEBUG
+        if LoadBench.consumeTreeFailure() { return false }
+        #endif
         guard let value = try? await rpcClient.call(
             channel: "project",
             method: "readTree",
             args: [.fromJSONObject(["includeDeleted": true, "includeDeletedTasks": true])],
-            timeoutSec: 15.0
+            timeoutSec: 30.0
         ), let tree = value.decodeJSONDictionary(),
               let rawTasks = tree["tasks"] as? [[String: Any]] else {
             return false
@@ -95,7 +98,11 @@ extension AppStore {
         projectTreeRefreshTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            if !(await self.loadProjectTree(preferredActiveTaskId: self.activeSessionId)) {
+            guard !(await self.loadProjectTree(preferredActiveTaskId: self.activeSessionId)), !Task.isCancelled else { return }
+            if self.sidebarTreeLoaded {
+                // The per-workspace fan-out only covers open desktop tabs; it must not replace a loaded tree.
+                if self.isLiveHostConnected { self.scheduleProjectTreeRefresh(delay: 5) }
+            } else {
                 await self.loadAllWorkspaceTasks(preferredActiveTaskId: self.activeSessionId)
             }
         }

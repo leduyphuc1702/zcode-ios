@@ -38,6 +38,15 @@ enum LoadBench {
     nonisolated static func markAsync(_ event: String) {
         Task { @MainActor in mark(event) }
     }
+
+    /// Forced `project.readTree` failures, to exercise the slow-link fallbacks.
+    static var failTreeLoads = 0
+    static func consumeTreeFailure() -> Bool {
+        guard failTreeLoads > 0 else { return false }
+        failTreeLoads -= 1
+        mark("readTree forced failure")
+        return true
+    }
     #else
     static func mark(_ event: String) {}
     nonisolated static func markAsync(_ event: String) {}
@@ -73,6 +82,54 @@ extension AppStore {
                 LoadBench.mark("select \(title) sameWorkspace=\(sameBridge) cachedMsgs=\(session.messages.count)")
                 self.selectSession(session)
                 await self.benchWaitForContent(session.id, label: title)
+            }
+            for path in (LoadBench.environment["ZCM_BENCH_PREVIEW"] ?? "").split(separator: "|").map(String.init) {
+                for attempt in 0..<2 {
+                    let tab = self.openPreviewTab(path: path)
+                    if var existing = self.previewTabs.tab(id: tab.id) {
+                        existing.binaryData = nil
+                        self.previewTabs.replace(existing)
+                    }
+                    LoadBench.mark("preview \(attempt) begin \(path)")
+                    let begin = Date()
+                    let poll = Task { @MainActor in
+                        while !Task.isCancelled {
+                            if self.previewTabs.tab(id: tab.id)?.binaryData != nil {
+                                LoadBench.mark("preview \(attempt) visible after \(Int(Date().timeIntervalSince(begin) * 1000))ms")
+                                return
+                            }
+                            try? await Task.sleep(nanoseconds: 10_000_000)
+                        }
+                    }
+                    await self.loadPreviewTabContentIfNeeded(id: tab.id)
+                    poll.cancel()
+                    let loaded = self.previewTabs.tab(id: tab.id)
+                    LoadBench.mark("preview \(attempt) end bytes=\(loaded?.binaryData?.count ?? -1) error=\(loaded?.errorMessage ?? "-")")
+                }
+            }
+            let refreshes = Int(LoadBench.environment["ZCM_BENCH_REFRESH"] ?? "") ?? 0
+            for round in 0..<refreshes {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                LoadBench.failTreeLoads = 1
+                let kind = round % 2 == 0 ? "pull-to-refresh" : "resume-resync"
+                LoadBench.mark("refresh \(round) \(kind) begin tasks=\(self.sidebarVisibleTasks.count) tree=\(self.sidebarTreeLoaded)")
+                var lowest = self.sidebarVisibleTasks.count
+                let watch = Task { @MainActor in
+                    while !Task.isCancelled {
+                        lowest = min(lowest, self.sidebarVisibleTasks.count)
+                        try? await Task.sleep(nanoseconds: 20_000_000)
+                    }
+                }
+                if round % 2 == 0 {
+                    await self.refreshWorkspaceAndSessions()
+                } else {
+                    await self.loadAllWorkspaceTasks(preferredActiveTaskId: nil)
+                }
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                watch.cancel()
+                LoadBench.mark("refresh \(round) end tasks=\(self.sidebarVisibleTasks.count) lowest=\(lowest) tree=\(self.sidebarTreeLoaded)")
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                LoadBench.mark("refresh \(round) +3s tasks=\(self.sidebarVisibleTasks.count) tree=\(self.sidebarTreeLoaded) active=\(self.activeSessionId)")
             }
             LoadBench.mark("done")
         }

@@ -207,6 +207,11 @@ extension AppStore {
             }
         }
 
+        if kind == .image {
+            await loadPreviewImage(tab)
+            return
+        }
+
         tab.isLoading = true
         tab.errorMessage = nil
         previewTabs.replace(tab)
@@ -291,7 +296,71 @@ extension AppStore {
         return "Couldn't read \(path) from the host. \(detail)"
     }
 
+    /// Images render from the on-device copy at once and only re-download when `file.stat` reports a change.
+    /// A miss reads the raw bytes straight away (binary frames, no base64), with `stat` running alongside for the cache stamp.
+    private func loadPreviewImage(_ start: InspectorPreviewTab) async {
+        var tab = start
+        let path = tab.path
+        let cacheKey = V4LocalCache.key("file-preview", activeConnectionId, path)
+        let cached = await V4LocalCache.loadAttachment(key: cacheKey)
+        if let cached {
+            tab.binaryData = cached.data
+            tab.textContent = nil
+            tab.sizeBytes = max(tab.sizeBytes, cached.data.count)
+            tab.totalBytes = tab.sizeBytes
+            tab.isLoading = false
+        } else {
+            tab.isLoading = true
+        }
+        tab.errorMessage = nil
+        previewTabs.replace(tab)
+
+        let statTask = Task { @MainActor in try? await self.statHostFileInfo(path: path) }
+        if let cached {
+            // Unreachable host or unchanged file: the cached copy stays.
+            guard let info = await statTask.value, Self.previewCacheStamp(info) != cached.mimeType else { return }
+        }
+
+        do {
+            var data: Data
+            do {
+                data = try await readFileBytesInRanges(path: path, expectedSize: 0, maxBytes: Self.inspectorMaxImagePreviewBytes)
+            } catch {
+                let size = await statTask.value?.size ?? 0
+                data = try await loadHostImageBytes(path: path, expectedSize: size).0
+            }
+            let info = await statTask.value
+            if let size = info?.size, size > Self.inspectorMaxImagePreviewBytes {
+                throw PreviewLoadError.tooLarge(limit: "16 MB")
+            }
+            guard !data.isEmpty else { throw PreviewLoadError.empty }
+            guard var current = previewTabs.tab(id: tab.id) else { return }
+            current.binaryData = data
+            current.textContent = nil
+            current.sizeBytes = max(info?.size ?? 0, data.count)
+            current.totalBytes = current.sizeBytes
+            current.isLoading = false
+            current.errorMessage = nil
+            previewTabs.replace(current)
+            mirrorIntoWorkspaceNode(current)
+            if let info { V4LocalCache.saveAttachment(data, mimeType: Self.previewCacheStamp(info), key: cacheKey) }
+        } catch {
+            guard var current = previewTabs.tab(id: tab.id) else { return }
+            current.isLoading = false
+            if cached == nil { current.errorMessage = previewErrorMessage(for: error, path: current.displayPath) }
+            previewTabs.replace(current)
+        }
+    }
+
+    private static func previewCacheStamp(_ info: (size: Int, mtimeMs: Double?)) -> String {
+        "\(info.size):\(Int64(info.mtimeMs ?? 0))"
+    }
+
     private func statHostFileSize(path: String) async throws -> Int {
+        try await statHostFileInfo(path: path).size
+    }
+
+    private func statHostFileInfo(path: String) async throws -> (size: Int, mtimeMs: Double?) {
         let val = try await rpcClient.call(
             channel: "file",
             method: "stat",
@@ -312,7 +381,7 @@ extension AppStore {
                 userInfo: [NSLocalizedDescriptionKey: "This path is not a regular file."]
             )
         }
-        return Self.jsonInt(dict["size"]) ?? 0
+        return (Self.jsonInt(dict["size"]) ?? 0, ZCodeV4.double(dict["mtimeMs"]))
     }
 
     /// Keeps the Files explorer in sync when a preview tab loads a tree-backed file.
