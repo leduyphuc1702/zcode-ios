@@ -988,7 +988,11 @@ extension AppStore {
 
     public func toggleStageInspectorFile(_ file: GitChangedFile, state: InspectorLiveState) async {
         guard isLiveHostConnected else {
-            toggleStageGitFile(file.id)
+            if isUITestSeededMode {
+                toggleStageGitFile(file.id)
+            } else {
+                showToast("Connect to host to stage changes")
+            }
             return
         }
         let workspacePath = inspectorWorkspacePath
@@ -1017,7 +1021,11 @@ extension AppStore {
 
     public func stageAllInspectorFiles(_ stage: Bool, state: InspectorLiveState) async {
         guard isLiveHostConnected else {
-            stageAllGitChanges(stage)
+            if isUITestSeededMode {
+                stageAllGitChanges(stage)
+            } else {
+                showToast("Connect to host to stage changes")
+            }
             return
         }
         let workspacePath = inspectorWorkspacePath
@@ -1139,6 +1147,8 @@ extension AppStore {
         guard isLiveHostConnected else {
             if isUITestSeededMode {
                 switchGitBranch(branch)
+            } else {
+                showToast("Connect to host to switch branches")
             }
             return
         }

@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Exact ZCode v3.16.3 Settings Navigation Tree (3 Official Groups, 16 Official Sections)
+// MARK: - Exact ZCode v3.16.3 Settings Navigation Tree (3 Official Groups, 18 Official Sections)
 
 public enum SettingsGroupKind: String, CaseIterable, Identifiable {
     case basics
@@ -32,6 +32,7 @@ public enum SettingsSectionKind: String, CaseIterable, Identifiable, Hashable {
     case remoteDevices = "remoteDevices"
     case computerUse = "computerUse"
     case shortcuts = "shortcuts"
+    case workspaceFileSearch = "workspaceFileSearch"
 
     // Group 2: Agent capabilities
     case memory = "memory"
@@ -40,6 +41,7 @@ public enum SettingsSectionKind: String, CaseIterable, Identifiable, Hashable {
     case mcp = "mcp"
     case skill = "skill"
     case commands = "commands"
+    case automations = "automations"
     case hooks = "hooks"
 
     // Group 3: Data and statistics
@@ -50,9 +52,9 @@ public enum SettingsSectionKind: String, CaseIterable, Identifiable, Hashable {
 
     public var group: SettingsGroupKind {
         switch self {
-        case .general, .appearance, .modelProvider, .browser, .remoteDevices, .computerUse, .shortcuts:
+        case .general, .appearance, .modelProvider, .browser, .remoteDevices, .computerUse, .shortcuts, .workspaceFileSearch:
             return .basics
-        case .memory, .subagents, .plugin, .mcp, .skill, .commands, .hooks:
+        case .memory, .subagents, .plugin, .mcp, .skill, .commands, .automations, .hooks:
             return .agentCapabilities
         case .usage, .archives:
             return .dataAndStats
@@ -69,12 +71,14 @@ public enum SettingsSectionKind: String, CaseIterable, Identifiable, Hashable {
         case .remoteDevices: return "Remote devices"
         case .computerUse: return "Computer Use"
         case .shortcuts: return "Keyboard Shortcuts"
+        case .workspaceFileSearch: return "Workspace Search Scope"
         case .memory: return "Memory"
         case .subagents: return "Subagents"
         case .plugin: return "Plugins"
         case .mcp: return "MCP Servers"
         case .skill: return "Skills"
         case .commands: return "Commands"
+        case .automations: return "Automations"
         case .hooks: return "Hooks"
         case .usage: return "Usage stats"
         case .archives: return "Archive management"
@@ -91,12 +95,14 @@ public enum SettingsSectionKind: String, CaseIterable, Identifiable, Hashable {
         case .remoteDevices: return "Manage SSH, WSL, and Docker connections"
         case .computerUse: return "Manage screen access and desktop automation permissions"
         case .shortcuts: return "View and customize global and composer shortcuts"
+        case .workspaceFileSearch: return "Edit .zcodeignore rules that scope workspace file search"
         case .memory: return "Enable or disable agent long-term memory and view memory files"
         case .subagents: return "Manage custom and plugin subagents"
         case .plugin: return "Enable or disable installed plugins"
         case .mcp: return "Manage MCP server configurations"
         case .skill: return "Manage workspace and user skills"
         case .commands: return "Manage custom slash commands"
+        case .automations: return "Schedule recurring agent tasks"
         case .hooks: return "Manage task lifecycle hooks"
         case .usage: return "Local session token, streak, and model summaries"
         case .archives: return "Review and delete archived sessions across projects"
@@ -115,15 +121,17 @@ public enum SettingsSectionKind: String, CaseIterable, Identifiable, Hashable {
         case .browser:
             return "Manage embedded browser rendering, permissions, and certificate policies."
         case .remoteDevices:
-            return "Manage your ZCode Remote workstations, SSH servers, WSL distributions, and Docker containers."
+            return "Manage your servers, WSL distributions, and Docker containers."
         case .computerUse:
             return "Check macOS screen and Accessibility permissions and adjust Computer Use entry visibility."
         case .shortcuts:
             return "Tap any shortcut to customize the key combination for iPad Magic Keyboard and remote desktop."
+        case .workspaceFileSearch:
+            return "Edit .zcodeignore rules (gitignore syntax) that scope workspace file search. Takes effect on the next search after saving."
         case .memory:
-            return "Save and reuse long-term context in workspaces. Applies to new sessions."
+            return "Save and reuse long-term context in workspaces. Applies to new sessions and may increase model requests and token costs."
         case .subagents:
-            return "Manage user-level, workspace, and plugin subagent Markdown files consumed by ZCode Agent."
+            return "Manage user-level subagent Markdown files consumed by ZCode Agent."
         case .plugin:
             return "Enable or disable installed plugins. Plugins bundle skills, commands, hooks, and MCP servers."
         case .mcp:
@@ -132,6 +140,8 @@ public enum SettingsSectionKind: String, CaseIterable, Identifiable, Hashable {
             return "Manage workspace and user skills. Enabled skills can be referenced in chat with $skill-name."
         case .commands:
             return "Manage ZCode Agent .md command files. Commands can be invoked with /command-name in chat."
+        case .automations:
+            return "Schedule recurring tasks or queue background work that runs during idle time."
         case .hooks:
             return "Manage task lifecycle hooks to automatically execute commands on specific events."
         case .usage:
@@ -150,12 +160,14 @@ public enum SettingsSectionKind: String, CaseIterable, Identifiable, Hashable {
         case .remoteDevices: return "laptopcomputer.and.iphone"
         case .computerUse: return "cursorarrow.click.2"
         case .shortcuts: return "keyboard"
+        case .workspaceFileSearch: return "doc.text.magnifyingglass"
         case .memory: return "brain.head.profile"
         case .subagents: return "person.2.badge.gearshape"
         case .plugin: return "puzzlepiece.extension"
         case .mcp: return "point.3.filled.connected.trianglepath.dotted"
         case .skill: return "sparkles.rectangle.stack"
         case .commands: return "slash.circle"
+        case .automations: return "calendar.badge.clock"
         case .hooks: return "bolt.horizontal.circle"
         case .usage: return "chart.bar.xaxis"
         case .archives: return "archivebox"
@@ -419,6 +431,8 @@ public struct EnterpriseSettingsCenterView: View {
             return "\(store.skills.count)"
         case .commands:
             return "\(store.slashCommands.count)"
+        case .automations:
+            return "Beta"
         case .hooks:
             return store.hooks.isEmpty ? nil : "\(store.hooks.count)"
         case .archives:
@@ -817,6 +831,102 @@ struct ZCodeSettingsRow<Control: View>: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+    }
+}
+
+// MARK: - Shared ZCode Settings Select (spec §2.6: 32pt trigger, 8pt radius, check at right, sections)
+
+struct ZCodeSettingsSelectOption<Value: Hashable>: Identifiable {
+    let value: Value
+    let label: String
+    var section: String? = nil
+    var id: Value { value }
+}
+
+struct ZCodeSettingsSelect<Value: Hashable>: View {
+    let options: [ZCodeSettingsSelectOption<Value>]
+    @Binding var selection: Value
+    var isEnabled: Bool = true
+
+    @Environment(\.zcodePalette) private var palette
+
+    private var selectedLabel: String {
+        options.first(where: { $0.value == selection })?.label ?? options.first?.label ?? "—"
+    }
+
+    private var sectionTitles: [String?] {
+        var seen = Set<String>()
+        var result: [String?] = []
+        for option in options {
+            let key = option.section ?? ""
+            if option.section != nil && !seen.contains(key) {
+                seen.insert(key)
+                result.append(option.section)
+            }
+        }
+        if options.contains(where: { $0.section == nil }) { result.insert(nil, at: 0) }
+        return result
+    }
+
+    var body: some View {
+        Menu {
+            if options.isEmpty {
+                Text("No options")
+            } else if sectionTitles.count > 1 {
+                ForEach(Array(sectionTitles.enumerated()), id: \.offset) { _, title in
+                    Section {
+                        menuItems(filtered: options.filter { $0.section == title })
+                    } header: {
+                        if let title { Text(title) }
+                    }
+                }
+            } else {
+                menuItems(filtered: options)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(selectedLabel)
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(isEnabled ? palette.foreground : palette.foregroundMuted)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(palette.foregroundSubtle)
+            }
+            .padding(.horizontal, 12)
+            .frame(minWidth: 120, maxWidth: 260, minHeight: 32, maxHeight: 32)
+            .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(palette.inputBorder, lineWidth: 1)
+            )
+            .opacity(isEnabled ? 1 : 0.5)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .disabled(!isEnabled || options.isEmpty)
+        .accessibilityLabel(selectedLabel)
+    }
+
+    @ViewBuilder
+    private func menuItems(filtered: [ZCodeSettingsSelectOption<Value>]) -> some View {
+        ForEach(filtered) { option in
+            Button {
+                selection = option.value
+            } label: {
+                HStack(spacing: 6) {
+                    Text(option.label)
+                    Spacer(minLength: 8)
+                    if option.value == selection {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                }
+            }
+        }
     }
 }
 

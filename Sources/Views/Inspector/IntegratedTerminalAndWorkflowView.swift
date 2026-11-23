@@ -423,18 +423,18 @@ public struct IntegratedTerminalView: View {
 public struct WorkflowGraphCanvasView: View {
     @Bindable var store: AppStore
     @Environment(\.zcodePalette) private var palette
-    @State private var selectedNode: WorkflowGraphNode?
+
+    private var runs: [LiveWorkflowRunSummary] { store.activeWorkflowRunSummaries }
 
     public var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Execution Graph")
+                Text("Workflow runs")
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(palette.foreground)
                 Spacer()
-                if !store.workflowNodes.isEmpty {
-                    let completed = store.workflowNodes.filter { $0.status == "completed" }.count
-                    Text("\(completed)/\(store.workflowNodes.count) Completed")
+                if !runs.isEmpty {
+                    Text("\(runs.count)")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundStyle(palette.foregroundSubtle)
                 }
@@ -445,15 +445,15 @@ public struct WorkflowGraphCanvasView: View {
 
             Rectangle().fill(palette.border).frame(height: 1)
 
-            if store.workflowNodes.isEmpty {
+            if runs.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "point.3.connected.trianglepath.dotted")
                         .font(.system(size: 30))
                         .foregroundStyle(palette.foregroundMuted)
-                    Text("No active workflow graph")
+                    Text("No workflow runs in this session")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(palette.foreground)
-                    Text("Workflow execution nodes appear here when a multi-step workflow runs in the active session.")
+                    Text("Workflow runs reported by the host appear here.")
                         .font(.system(size: 12.5))
                         .foregroundStyle(palette.foregroundSubtle)
                         .multilineTextAlignment(.center)
@@ -461,90 +461,55 @@ public struct WorkflowGraphCanvasView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                GeometryReader { geo in
-                    let isPortrait = geo.size.width < geo.size.height
-                    let coords: [CGPoint] = store.workflowNodes.enumerated().map { idx, node in
-                        if isPortrait {
-                            let portraitRatios: [(Double, Double)] = [
-                                (0.50, 0.14),
-                                (0.26, 0.39),
-                                (0.74, 0.39),
-                                (0.50, 0.64),
-                                (0.50, 0.87)
-                            ]
-                            let r = idx < portraitRatios.count ? portraitRatios[idx] : (node.xRatio, node.yRatio)
-                            return CGPoint(x: r.0 * geo.size.width, y: r.1 * geo.size.height)
-                        } else {
-                            return CGPoint(x: node.xRatio * geo.size.width, y: node.yRatio * geo.size.height)
-                        }
-                    }
-
-                    ZStack {
-                        Canvas { context, _ in
-                            let edges: [(Int, Int)] = [(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)]
-                            for (fromIdx, toIdx) in edges where fromIdx < coords.count && toIdx < coords.count {
-                                let p1 = coords[fromIdx]
-                                let p2 = coords[toIdx]
-                                var path = Path()
-                                path.move(to: p1)
-                                if isPortrait {
-                                    let midY = (p1.y + p2.y) / 2
-                                    path.addCurve(to: p2, control1: CGPoint(x: p1.x, y: midY), control2: CGPoint(x: p2.x, y: midY))
-                                } else {
-                                    let midX = (p1.x + p2.x) / 2
-                                    path.addCurve(to: p2, control1: CGPoint(x: midX, y: p1.y), control2: CGPoint(x: midX, y: p2.y))
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(runs) { run in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 7) {
+                                    Circle()
+                                        .fill(statusColor(run.status))
+                                        .frame(width: 7, height: 7)
+                                    Text(run.title)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(palette.foreground)
+                                        .lineLimit(2)
+                                    Spacer(minLength: 0)
+                                    Text(run.status.uppercased())
+                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(statusColor(run.status))
                                 }
-                                context.stroke(path, with: .color(palette.accentBlue.opacity(0.65)), lineWidth: 2)
-                            }
-                        }
-
-                        ForEach(Array(store.workflowNodes.enumerated()), id: \.element.id) { idx, node in
-                            Button {
-                                selectedNode = node
-                            } label: {
-                                VStack(spacing: 3) {
-                                    HStack(spacing: 4) {
-                                        Circle()
-                                            .fill(node.status == "completed" ? palette.success : (node.status == "running" ? palette.accentBlue : palette.foregroundMuted))
-                                            .frame(width: 6, height: 6)
-                                        Text(node.title)
-                                            .font(.system(size: 11.5, weight: .bold))
-                                            .foregroundStyle(palette.foreground)
-                                            .lineLimit(1)
-                                    }
-                                    Text("\(node.role) • \(node.durationText)")
-                                        .font(.system(size: 10, design: .monospaced))
+                                if !run.usageText.isEmpty {
+                                    Text(run.usageText)
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .foregroundStyle(palette.foregroundMuted)
+                                }
+                                if !run.detail.isEmpty {
+                                    Text(run.detail)
+                                        .font(.system(size: 12.5))
                                         .foregroundStyle(palette.foregroundSubtle)
-                                        .lineLimit(1)
+                                        .lineLimit(4)
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 8)
-                                .background(palette.card, in: RoundedRectangle(cornerRadius: 10))
-                                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(selectedNode?.id == node.id ? palette.accentBlue : palette.borderStrong, lineWidth: 1.2))
                             }
-                            .buttonStyle(.plain)
-                            .position(coords[idx])
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(palette.card, in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(palette.border, lineWidth: 1))
                         }
-                    }
-                }
-
-                if let sel = selectedNode ?? store.workflowNodes.first {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("\(sel.title) — \(sel.role)")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(palette.foreground)
-                        Text("Status: \(sel.status.uppercased()) • Duration: \(sel.durationText)")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(palette.foregroundSubtle)
                     }
                     .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(palette.panel)
-                    .overlay(alignment: .top) {
-                        Rectangle().fill(palette.border).frame(height: 1)
-                    }
                 }
             }
+        }
+    }
+
+    private func statusColor(_ status: String) -> Color {
+        switch status.lowercased() {
+        case "completed": return palette.success
+        case "running", "pending": return palette.accentBlue
+        case "errored", "failed": return palette.destructive
+        case "stopped": return palette.foregroundMuted
+        default: return palette.foregroundMuted
         }
     }
 }

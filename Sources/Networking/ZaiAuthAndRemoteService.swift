@@ -474,13 +474,13 @@ public final class ZaiAuthAndRemoteService: NSObject, ASWebAuthenticationPresent
             let meta = item["meta"] as? [String: Any]
             let name = (meta?["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             let platform = (meta?["platform"] as? String) ?? "desktop"
-            let version = (meta?["version"] as? String) ?? "3.16.3"
+            let version = (meta?["version"] as? String) ?? ""
             return ZaiRegisteredRemoteDevice(
                 deviceSid: sid,
                 deviceMid: mid,
                 online: online,
                 createdAt: Date(timeIntervalSince1970: ts > 9_999_999_999 ? ts / 1000.0 : ts),
-                deviceName: (name?.isEmpty == false) ? name! : "Device \(mid.prefix(8))",
+                deviceName: name ?? "",
                 platform: platform,
                 version: version
             )

@@ -1,7 +1,7 @@
 import SwiftUI
 import Charts
 
-// MARK: - 1:1 ZCode v3.16.3 Detail Pages for All Remaining 14 Settings Sections
+// MARK: - 1:1 ZCode v3.16.3 Detail Pages for All Remaining Settings Sections
 
 struct SettingsPagesDetailViews: View {
     @Bindable var store: AppStore
@@ -26,6 +26,14 @@ struct SettingsPagesDetailViews: View {
     @State private var searchFilter: String = ""
     @State private var usageTab: String = "app" // "app" | "plan"
     @State private var usageRange: String = "7d" // "7d" | "30d"
+
+    private static var appVersionLabel: String {
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        if let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String, !build.isEmpty {
+            return "v\(short) (\(build))"
+        }
+        return "v\(short)"
+    }
 
     var body: some View {
         ScrollView {
@@ -53,8 +61,12 @@ struct SettingsPagesDetailViews: View {
                     skillsPage
                 case .commands:
                     commandsPage
+                case .automations:
+                    AutomationsSettingsSectionView(store: store)
                 case .hooks:
                     hooksPage
+                case .workspaceFileSearch:
+                    WorkspaceFileSearchScopeSettingsView(store: store)
                 case .usage:
                     usageStatsPage
                 case .archives:
@@ -146,98 +158,121 @@ struct SettingsPagesDetailViews: View {
 
             // Account & Language
             ZCodeSettingsCard(title: "Language & Workspace Mode") {
-                ZCodeSettingsRow(title: "Interface Language", subtitle: "Default language across menus and agent UI (English default)") {
-                    Picker("Language", selection: Binding(
-                        get: { store.language },
-                        set: { newLang in
-                            store.language = newLang
-                            store.pushDesktopSettingPatch(["locale": newLang.rawValue])
-                        }
-                    )) {
-                        ForEach(AppLanguage.allCases) { lang in
-                            Text(lang.displayName).tag(lang)
-                        }
-                    }
-                    .pickerStyle(.menu)
+                ZCodeSettingsRow(title: "Language", subtitle: "Choose the display language used by the application UI.") {
+                    ZCodeSettingsSelect(
+                        options: [
+                            ZCodeSettingsSelectOption(value: "system", label: "System default"),
+                            ZCodeSettingsSelectOption(value: "zh-CN", label: "中文简体"),
+                            ZCodeSettingsSelectOption(value: "en-US", label: "English")
+                        ],
+                        selection: Binding(
+                            get: {
+                                switch store.language {
+                                case .chineseSimplified: return "zh-CN"
+                                case .english: return "en-US"
+                                case .vietnamese: return "system"
+                                }
+                            },
+                            set: { newValue in
+                                switch newValue {
+                                case "zh-CN": store.language = .chineseSimplified
+                                case "en-US": store.language = .english
+                                default: store.language = .english
+                                }
+                                let resolved = newValue == "system" ? store.language.rawValue : newValue
+                                Task {
+                                    _ = await store.updateDesktopSetting([
+                                        "localePreference": newValue,
+                                        "locale": resolved
+                                    ])
+                                }
+                            }
+                        )
+                    )
                 }
 
                 Divider().overlay(palette.border)
 
-                ZCodeSettingsRow(title: "Default Interface Mode", subtitle: "Switch between software engineering workspace and document/office mode") {
-                    Picker("Mode", selection: Binding(
-                        get: { store.interfaceMode },
-                        set: { val in
-                            store.interfaceMode = val
-                            store.pushDesktopSettingPatch(["interfaceMode": val])
-                        }
-                    )) {
-                        Text("Coding").tag("coding")
-                        Text("Office").tag("office")
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 150)
+                ZCodeSettingsRow(title: "Interface mode", subtitle: "Switch between software engineering workspace and document/office mode.") {
+                    ZCodeSettingsSelect(
+                        options: [
+                            ZCodeSettingsSelectOption(value: "coding", label: "Coding mode"),
+                            ZCodeSettingsSelectOption(value: "office", label: "Office mode")
+                        ],
+                        selection: Binding(
+                            get: { store.interfaceMode },
+                            set: { store.interfaceMode = $0 }
+                        )
+                    )
                 }
             }
 
             // Agent Interaction & Search
             ZCodeSettingsCard(title: "Agent Interaction & Tool Execution") {
                 ZCodeSettingsRow(
-                    title: "Follow-up Prompt Behavior",
-                    subtitle: "Choose whether messages sent during a running turn queue up or steer immediately"
+                    title: "Interaction behavior",
+                    subtitle: "While ZCode is running, add follow-up actions to the queue or guide them to run after the next tool call."
                 ) {
-                    Picker("Behavior", selection: Binding(
-                        get: { store.zcodeInteractionBehavior },
-                        set: { val in
-                            store.zcodeInteractionBehavior = val
-                            store.pushDesktopSettingPatch(["zcodeInteractionBehavior": val])
-                        }
-                    )) {
-                        Text("Queue").tag("queue")
-                        Text("Steer").tag("guide")
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 145)
+                    ZCodeSettingsSelect(
+                        options: [
+                            ZCodeSettingsSelectOption(value: "queue", label: "Queue"),
+                            ZCodeSettingsSelectOption(value: "guide", label: "Guide")
+                        ],
+                        selection: Binding(
+                            get: { store.zcodeInteractionBehavior },
+                            set: { val in
+                                store.zcodeInteractionBehavior = val
+                                Task { _ = await store.updateDesktopSetting(["zcodeInteractionBehavior": val]) }
+                            }
+                        ),
+                        isEnabled: store.isRemoteRPCReady
+                    )
                 }
 
                 Divider().overlay(palette.border)
 
                 ZCodeSettingsRow(
-                    title: "Deferred Tool Search Mode",
-                    subtitle: "Load MCP and extended tool schemas on-demand to preserve context window"
+                    title: "Tool search",
+                    subtitle: "Load MCP and extended tool schemas on demand to preserve context window."
                 ) {
-                    Picker("Tool Search", selection: Binding(
-                        get: { store.toolSearchMode },
-                        set: { val in
-                            store.toolSearchMode = val
-                            store.pushDesktopSettingPatch(["toolSearchMode": val])
-                        }
-                    )) {
-                        Text("Auto").tag("auto")
-                        Text("On").tag("on")
-                        Text("Off").tag("off")
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 165)
+                    ZCodeSettingsSelect(
+                        options: [
+                            ZCodeSettingsSelectOption(value: "auto", label: "Auto"),
+                            ZCodeSettingsSelectOption(value: "local", label: "Local"),
+                            ZCodeSettingsSelectOption(value: "off", label: "Off")
+                        ],
+                        selection: Binding(
+                            get: { store.toolSearchMode },
+                            set: { val in
+                                store.toolSearchMode = val
+                                Task { _ = await store.updateDesktopSetting(["toolSearchMode": val]) }
+                            }
+                        ),
+                        isEnabled: store.isRemoteRPCReady
+                    )
                 }
 
                 Divider().overlay(palette.border)
 
                 ZCodeSettingsRow(
-                    title: "Dynamic Multi-Agent Workflows",
-                    subtitle: "Allow agent to orchestrate typed subagent fan-out workflows"
+                    title: "Dynamic workflows",
+                    subtitle: "Allow the agent to orchestrate typed subagent fan-out workflows."
                 ) {
-                    Picker("Workflows", selection: Binding(
-                        get: { store.dynamicWorkflowMode },
-                        set: { val in
-                            store.dynamicWorkflowMode = val
-                            store.pushDesktopSettingPatch(["dynamicWorkflowMode": val])
-                        }
-                    )) {
-                        Text("Auto").tag("auto")
-                        Text("Manual").tag("manual")
-                        Text("Off").tag("disabled")
-                    }
-                    .pickerStyle(.menu)
+                    ZCodeSettingsSelect(
+                        options: [
+                            ZCodeSettingsSelectOption(value: "disabled", label: "Off"),
+                            ZCodeSettingsSelectOption(value: "onDemand", label: "On command"),
+                            ZCodeSettingsSelectOption(value: "alwaysOn", label: "Always on")
+                        ],
+                        selection: Binding(
+                            get: { store.dynamicWorkflowMode },
+                            set: { val in
+                                store.dynamicWorkflowMode = val
+                                Task { _ = await store.updateDesktopSetting(["dynamicWorkflowMode": val]) }
+                            }
+                        ),
+                        isEnabled: store.isRemoteRPCReady
+                    )
                 }
 
                 Divider().overlay(palette.border)
@@ -250,11 +285,12 @@ struct SettingsPagesDetailViews: View {
                         get: { store.askUserQuestionAutoResolutionEnabled },
                         set: { val in
                             store.askUserQuestionAutoResolutionEnabled = val
-                            store.pushDesktopSettingPatch(["askUserQuestionAutoResolutionEnabled": val])
+                            Task { _ = await store.updateDesktopSetting(["askUserQuestionAutoResolutionEnabled": val]) }
                         }
                     ))
                     .labelsHidden()
                     .tint(palette.accentBlue)
+                    .disabled(!store.isRemoteRPCReady)
                 }
 
                 Divider().overlay(palette.border)
@@ -267,11 +303,12 @@ struct SettingsPagesDetailViews: View {
                         get: { store.nativeSearchEnhancementsEnabled },
                         set: { val in
                             store.nativeSearchEnhancementsEnabled = val
-                            store.pushDesktopSettingPatch(["nativeSearchEnhancementsEnabled": val])
+                            Task { _ = await store.updateDesktopSetting(["nativeSearchEnhancementsEnabled": val]) }
                         }
                     ))
                     .labelsHidden()
                     .tint(palette.accentBlue)
+                    .disabled(!store.isRemoteRPCReady)
                 }
 
                 Divider().overlay(palette.border)
@@ -285,37 +322,18 @@ struct SettingsPagesDetailViews: View {
                         set: { val in
                             store.keepAwakeWhileRunning = val
                             UIApplication.shared.isIdleTimerDisabled = val
-                            store.pushDesktopSettingPatch(["keepAwakeWhileRunning": val])
+                            Task { _ = await store.updateDesktopSetting(["keepAwakeWhileRunning": val]) }
                         }
                     ))
                     .labelsHidden()
                     .tint(palette.accentBlue)
+                    .disabled(!store.isRemoteRPCReady)
                 }
             }
 
-            // Notifications & Haptics
-            ZCodeSettingsCard(title: "Notifications & Haptics") {
-                ZCodeSettingsRow(title: "Push & Local Task Alerts", subtitle: "Notify when permissions, questions, or background runs complete") {
-                    Toggle("", isOn: $store.notificationsEnabled)
-                        .labelsHidden()
-                        .tint(palette.accentBlue)
-                }
-                if store.notificationsEnabled {
-                    Divider().overlay(palette.border)
-                    ZCodeSettingsRow(title: "Tool Permission Requests") {
-                        Toggle("", isOn: $store.notifyApprovals).labelsHidden().tint(palette.accentBlue)
-                    }
-                    Divider().overlay(palette.border)
-                    ZCodeSettingsRow(title: "AskUserQuestion Prompts") {
-                        Toggle("", isOn: $store.notifyQuestions).labelsHidden().tint(palette.accentBlue)
-                    }
-                    Divider().overlay(palette.border)
-                    ZCodeSettingsRow(title: "Task Completion & Errors") {
-                        Toggle("", isOn: $store.notifyCompletions).labelsHidden().tint(palette.accentBlue)
-                    }
-                }
-                Divider().overlay(palette.border)
-                ZCodeSettingsRow(title: "Tactile Haptic Feedback", subtitle: "Subtle haptics on tool approvals, checkpoints, and mode switches") {
+            // Haptics (client-local; notification scheduling is not implemented in this client)
+            ZCodeSettingsCard(title: "Haptics") {
+                ZCodeSettingsRow(title: "Tactile haptic feedback", subtitle: "Subtle haptics on tool approvals, checkpoints, and mode switches.") {
                     Toggle("", isOn: $store.hapticsEnabled)
                         .labelsHidden()
                         .tint(palette.accentBlue)
@@ -325,36 +343,61 @@ struct SettingsPagesDetailViews: View {
             // Network Proxy & Mobile App Lock
             ZCodeSettingsCard(title: "Network Proxy & Mobile Security") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("HTTP / SOCKS5 Proxy URL")
+                    Text("HTTP Proxy")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(palette.foregroundSubtle)
-                    HStack(spacing: 8) {
-                        TextField("http://127.0.0.1:7890 (leave empty for direct)", text: $store.httpProxyURL)
-                            .font(.system(size: 13, design: .monospaced))
-                            .foregroundStyle(palette.foreground)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .padding(9)
-                            .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
+                    TextField("http://127.0.0.1:7890 (leave empty for direct)", text: $store.httpProxyURL)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(palette.foreground)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .padding(9)
+                        .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
 
-                        Button("Apply") {
-                            store.pushDesktopSettingPatch([
-                                "httpProxy": [
-                                    "enabled": !store.httpProxyURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                                    "proxyUrl": store.httpProxyURL.trimmingCharacters(in: .whitespacesAndNewlines),
-                                    "noProxy": store.httpProxyNoProxy
-                                ]
-                            ])
-                            store.showToast("Updated network proxy")
-                        }
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(palette.brandForeground)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .background(palette.brand, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .buttonStyle(.plain)
+                    Text("No proxy")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(palette.foregroundSubtle)
+                    TextField("localhost, 127.0.0.1", text: $store.httpProxyNoProxy)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(palette.foreground)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .padding(9)
+                        .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
+
+                    Text("Custom certificate")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(palette.foregroundSubtle)
+                    TextField("Path to CA certificate", text: $store.httpProxyCaCertPath)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(palette.foreground)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .padding(9)
+                        .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
+
+                    Button {
+                        let proxy = store.httpProxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let noProxy = store.httpProxyNoProxy.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let ca = store.httpProxyCaCertPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                        var patch: [String: Any] = [:]
+                        patch["httpProxy"] = proxy.isEmpty ? NSNull() : proxy
+                        patch["httpProxyNoProxy"] = noProxy.isEmpty ? NSNull() : noProxy
+                        patch["httpProxyCaCertPath"] = ca.isEmpty ? NSNull() : ca
+                        Task { _ = await store.updateDesktopSetting(patch, successMessage: "HTTP proxy saved") }
+                    } label: {
+                        Text("Save")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(palette.brandForeground)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(palette.brand, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
+                    .buttonStyle(.plain)
+                    .disabled(!store.isRemoteRPCReady)
                 }
                 .padding(14)
 
@@ -382,8 +425,8 @@ struct SettingsPagesDetailViews: View {
 
             // Version & Runtime Info
             ZCodeSettingsCard(title: "About ZCode Mobile") {
-                ZCodeSettingsRow(title: "Version", subtitle: "100% Native SwiftUI • Zero WebView • SocketProtocol V4") {
-                    ZCodeSettingsPill(text: "v3.16.3 (31606)", tone: .accent)
+                ZCodeSettingsRow(title: "Version", subtitle: "100% native SwiftUI • no WebView") {
+                    ZCodeSettingsPill(text: Self.appVersionLabel, tone: .accent)
                 }
             }
         }
@@ -413,7 +456,6 @@ struct SettingsPagesDetailViews: View {
                         let selected = store.themeMode == mode
                         Button {
                             store.themeMode = mode
-                            store.pushDesktopSettingPatch(["theme": mode.rawValue])
                         } label: {
                             VStack(spacing: 8) {
                                 ZStack {
@@ -468,12 +510,12 @@ struct SettingsPagesDetailViews: View {
                             .font(.system(size: 13.5, weight: .medium))
                             .foregroundStyle(palette.foreground)
                         Spacer()
-                        Picker("Syntax Theme", selection: $store.syntaxTheme) {
-                            ForEach(ZCodeSyntaxTheme.allCases) { st in
-                                Text(st.displayName).tag(st)
-                            }
-                        }
-                        .pickerStyle(.menu)
+                        ZCodeSettingsSelect(
+                            options: ZCodeSyntaxTheme.allCases.map {
+                                ZCodeSettingsSelectOption(value: $0, label: $0.displayName)
+                            },
+                            selection: $store.syntaxTheme
+                        )
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
@@ -552,28 +594,22 @@ struct SettingsPagesDetailViews: View {
                         get: { store.embeddedBrowserAllowInsecureCertificates },
                         set: { val in
                             store.embeddedBrowserAllowInsecureCertificates = val
-                            store.pushDesktopSettingPatch(["embeddedBrowserAllowInsecureCertificates": val])
+                            Task { _ = await store.updateDesktopSetting(["embeddedBrowserAllowInsecureCertificates": val]) }
                         }
                     ))
                     .labelsHidden()
                     .tint(palette.accentBlue)
+                    .disabled(!store.isRemoteRPCReady)
                 }
 
                 Divider().overlay(palette.border)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Allowed Domains & Local Targets")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(palette.foregroundSubtle)
-                    TextField("localhost, 127.0.0.1, *.vercel.app", text: $store.browserAllowedDomains, axis: .vertical)
-                        .lineLimit(2...4)
-                        .font(.system(size: 13, design: .monospaced))
-                        .foregroundStyle(palette.foreground)
-                        .padding(10)
-                        .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
+                ZCodeSettingsRow(
+                    title: "Browser data",
+                    subtitle: "Browser data can only be managed in the ZCode desktop app."
+                ) {
+                    EmptyView()
                 }
-                .padding(14)
             }
         }
     }
@@ -585,7 +621,7 @@ struct SettingsPagesDetailViews: View {
             ZCodeSettingsPageHeader(
                 groupTitle: "Basics",
                 title: "Remote devices",
-                subtitle: "Manage your Z.AI account session, registered ZCode Desktop workstations, and Relay V4 connections."
+                subtitle: "Manage your servers, WSL distributions, and Docker containers."
             ) {
                 Button {
                     dismiss()
@@ -678,7 +714,7 @@ struct SettingsPagesDetailViews: View {
                                         tone: conn.state == .connected ? .success : .neutral
                                     )
                                 }
-                                Text("\(conn.host) • v\(conn.serverVersion)")
+                                Text(conn.serverVersion.isEmpty ? conn.host : "\(conn.host) • v\(conn.serverVersion)")
                                     .font(.system(size: 11.5, design: .monospaced))
                                     .foregroundStyle(palette.foregroundSubtle)
                                     .lineLimit(1)
@@ -727,43 +763,33 @@ struct SettingsPagesDetailViews: View {
                 subtitle: "Control native desktop GUI automation permissions and composer entry visibility on your paired workstation."
             )
 
-            ZCodeSettingsCard(title: "Desktop CUA Helper & Permissions") {
+            ZCodeSettingsCard(title: "Computer Use") {
                 ZCodeSettingsRow(
-                    title: "Enable Computer Use Agent (CUA)",
-                    subtitle: "Allow agent to inspect and interact with native desktop apps when authorized"
-                ) {
-                    Toggle("", isOn: $store.cuaHelperEnabled)
-                        .labelsHidden()
-                        .tint(palette.accentBlue)
-                }
-
-                Divider().overlay(palette.border)
-
-                ZCodeSettingsRow(
-                    title: "Show Computer Use Toggle in Composer",
-                    subtitle: "Display quick CUA toggle inside the task composer toolbar"
+                    title: "Show Computer Use button in the composer",
+                    subtitle: "When off, the composer button is hidden."
                 ) {
                     Toggle("", isOn: Binding(
                         get: { !store.computerUseComposerEntryHidden },
                         set: { visible in
                             store.computerUseComposerEntryHidden = !visible
-                            store.pushDesktopSettingPatch(["computerUseComposerEntryHidden": !visible])
+                            Task { _ = await store.updateDesktopSetting(["computerUseComposerEntryHidden": !visible]) }
                         }
                     ))
                     .labelsHidden()
                     .tint(palette.accentBlue)
+                    .disabled(!store.isRemoteRPCReady)
                 }
 
                 Divider().overlay(palette.border)
 
-                ZCodeSettingsRow(title: "Host Accessibility Permission", subtitle: "macOS AXUIElement control on paired host") {
-                    ZCodeSettingsPill(text: store.cuaAccessibilityStatus.capitalized, tone: .success)
+                ZCodeSettingsRow(title: "Accessibility permission", subtitle: "macOS AXUIElement control on the paired host. Check it in System Settings on your computer.") {
+                    ZCodeSettingsPill(text: "Unknown", tone: .neutral)
                 }
 
                 Divider().overlay(palette.border)
 
-                ZCodeSettingsRow(title: "Host Screen Recording Permission", subtitle: "Required for high-DPI desktop visual grounding") {
-                    ZCodeSettingsPill(text: store.cuaScreenRecordingStatus.capitalized, tone: .success)
+                ZCodeSettingsRow(title: "Screen Recording permission", subtitle: "Required for high-DPI desktop visual grounding. Check it in System Settings on your computer.") {
+                    ZCodeSettingsPill(text: "Unknown", tone: .neutral)
                 }
             }
         }
@@ -773,31 +799,28 @@ struct SettingsPagesDetailViews: View {
 
     private var shortcutsPage: some View {
         let q = searchFilter.trimmingCharacters(in: .whitespacesAndNewlines)
-        let filtered = store.shortcutBindings.filter {
+        let hostBindings = store.shortcutBindings
+        let source = hostBindings.isEmpty ? ShortcutBindingItem.officialDefaults : hostBindings
+        let filtered = source.filter {
             q.isEmpty || $0.title.localizedCaseInsensitiveContains(q) || $0.category.localizedCaseInsensitiveContains(q) || $0.activeBinding.localizedCaseInsensitiveContains(q)
         }
-        let categories = ["Window", "Workspace", "Composer"]
+        let categories = ["Global", "Window", "Workspace", "Composer", "Desktop"]
 
         return Group {
             ZCodeSettingsPageHeader(
                 groupTitle: "Basics",
                 title: "Keyboard Shortcuts",
-                subtitle: "Hardware Magic Keyboard shortcuts on iPadOS & iOS, synchronized with ZCode Desktop keybindings."
-            ) {
-                Button("Reset All") {
-                    store.shortcutBindings = ShortcutBindingItem.officialDefaults
-                    store.showToast("Reset shortcuts to defaults")
-                }
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(palette.accentBlue)
-            }
+                subtitle: hostBindings.isEmpty
+                    ? "ZCode Desktop default shortcuts. No custom bindings are stored on the host."
+                    : "Shortcuts stored on your ZCode Desktop host."
+            )
 
-            ZCodeSettingsSearchBar(text: $searchFilter, placeholder: "Search 19 keyboard shortcuts…")
+            ZCodeSettingsSearchBar(text: $searchFilter, placeholder: "Search shortcuts")
 
             ForEach(categories, id: \.self) { cat in
                 let items = filtered.filter { $0.category == cat }
                 if !items.isEmpty {
-                    ZCodeSettingsCard(title: cat) {
+                    ZCodeSettingsCard(title: cat, subtitle: "Shortcuts apply to the ZCode desktop app and are read-only here.") {
                         ForEach(Array(items.enumerated()), id: \.element.id) { idx, sc in
                             HStack {
                                 Text(sc.title)
@@ -822,6 +845,14 @@ struct SettingsPagesDetailViews: View {
                     }
                 }
             }
+
+            if filtered.isEmpty {
+                Text("No matching shortcuts")
+                    .font(.system(size: 13))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+            }
         }
     }
 
@@ -832,10 +863,11 @@ struct SettingsPagesDetailViews: View {
             ZCodeSettingsPageHeader(
                 groupTitle: "Agent capabilities",
                 title: "Memory",
-                subtitle: "Persistent cross-session instructions and project knowledge recalled automatically by ZCode."
+                subtitle: "Save and reuse long-term context in workspaces. Applies to new sessions and may increase model requests and token costs."
             ) {
                 Button("Save") {
-                    store.saveUserMemoryMarkdown(store.userMemoryMarkdown)
+                    let content = store.userMemoryMarkdown
+                    Task { _ = await store.saveUserMemoryMarkdown(content) }
                 }
                 .font(.system(size: 12.5, weight: .semibold))
                 .foregroundStyle(palette.brandForeground)
@@ -854,11 +886,12 @@ struct SettingsPagesDetailViews: View {
                         get: { store.memoryEnabled },
                         set: { val in
                             store.memoryEnabled = val
-                            store.pushDesktopSettingPatch(["memoryEnabled": val])
+                            Task { _ = await store.updateDesktopSetting(["memoryEnabled": val]) }
                         }
                     ))
                     .labelsHidden()
                     .tint(palette.accentBlue)
+                    .disabled(!store.isRemoteRPCReady)
                 }
             }
 
@@ -879,30 +912,6 @@ struct SettingsPagesDetailViews: View {
                 .padding(14)
             }
 
-            if !store.memories.isEmpty {
-                ZCodeSettingsCard(title: "Structured Workspace Memory Notes (\(store.memories.count))") {
-                    ForEach(Array(store.memories.enumerated()), id: \.element.id) { idx, note in
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack {
-                                Text(note.slug)
-                                    .font(.system(size: 13.5, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(palette.foreground)
-                                ZCodeSettingsPill(text: note.type, tone: .accent)
-                                Spacer()
-                            }
-                            Text(note.description)
-                                .font(.system(size: 12))
-                                .foregroundStyle(palette.foregroundSubtle)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 11)
-
-                        if idx < store.memories.count - 1 {
-                            Divider().overlay(palette.border).padding(.horizontal, 14)
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -917,7 +926,7 @@ struct SettingsPagesDetailViews: View {
             ZCodeSettingsPageHeader(
                 groupTitle: "Agent capabilities",
                 title: "Plugins",
-                subtitle: "Extend ZCode with official bundles containing Skills, Subagents, Slash Commands, and MCP servers."
+                subtitle: "Enable or disable installed plugins. Plugins bundle skills, commands, hooks, and MCP servers."
             )
 
             ZCodeSettingsSearchBar(text: $searchFilter, placeholder: "Search installed & official marketplace plugins…")
@@ -960,7 +969,9 @@ struct SettingsPagesDetailViews: View {
                 Text(pl.name)
                     .font(.system(size: 14.5, weight: .semibold))
                     .foregroundStyle(palette.foreground)
-                ZCodeSettingsPill(text: "v\(pl.version)", tone: .neutral)
+                if !pl.version.isEmpty {
+                    ZCodeSettingsPill(text: "v\(pl.version)", tone: .neutral)
+                }
                 ForEach(pl.componentBadges.prefix(3), id: \.self) { b in
                     ZCodeSettingsPill(text: b, tone: .accent)
                 }
@@ -968,17 +979,14 @@ struct SettingsPagesDetailViews: View {
                 if isInstalled {
                     Toggle("", isOn: Binding(
                         get: { pl.enabled },
-                        set: { store.setPluginEnabled(pl, enabled: $0) }
+                        set: { newValue in Task { _ = await store.setPluginEnabled(pl, enabled: newValue) } }
                     ))
                     .labelsHidden()
                     .tint(palette.accentBlue)
+                    .disabled(!store.isRemoteRPCReady)
                 } else {
                     Button {
-                        if let i = store.plugins.firstIndex(where: { $0.id == pl.id }) {
-                            store.plugins[i].installed = true
-                            store.plugins[i].enabled = true
-                            store.showToast("Installed \(pl.name)")
-                        }
+                        Task { _ = await store.installPlugin(pl) }
                     } label: {
                         Text("Install")
                             .font(.system(size: 12, weight: .semibold))
@@ -988,6 +996,7 @@ struct SettingsPagesDetailViews: View {
                             .background(palette.brand, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                     }
                     .buttonStyle(.plain)
+                    .disabled(!store.isRemoteRPCReady || pl.marketplace.isEmpty)
                 }
             }
 
@@ -1010,7 +1019,7 @@ struct SettingsPagesDetailViews: View {
             ZCodeSettingsPageHeader(
                 groupTitle: "Agent capabilities",
                 title: "MCP Servers",
-                subtitle: "Connect Model Context Protocol servers over stdio, Streamable HTTP, or SSE."
+                subtitle: "Manage MCP server configurations used by ZCode Agent."
             ) {
                 Button {
                     showNewMCP = true
@@ -1058,7 +1067,7 @@ struct SettingsPagesDetailViews: View {
                             .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
 
                         Button {
-                            applyRawMCPJsonString()
+                            Task { await applyRawMCPJsonString() }
                         } label: {
                             Text("Apply JSON Configuration")
                                 .font(.system(size: 13.5, weight: .semibold))
@@ -1105,10 +1114,11 @@ struct SettingsPagesDetailViews: View {
                                     Spacer()
                                     Toggle("", isOn: Binding(
                                         get: { srv.enabled },
-                                        set: { store.setMCPServerEnabled(srv, enabled: $0) }
+                                        set: { newValue in Task { _ = await store.setMCPServerEnabled(srv, enabled: newValue) } }
                                     ))
                                     .labelsHidden()
                                     .tint(palette.accentBlue)
+                                    .disabled(!store.isRemoteRPCReady)
                                 }
 
                                 Text(([srv.endpointOrCommand] + srv.args).joined(separator: " "))
@@ -1138,7 +1148,7 @@ struct SettingsPagesDetailViews: View {
                                         .background(palette.card, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                                     Spacer()
                                     Button(role: .destructive) {
-                                        store.deleteMCPServer(srv)
+                                        Task { _ = await store.deleteMCPServer(srv) }
                                     } label: {
                                         Image(systemName: "trash")
                                             .font(.system(size: 12))
@@ -1184,12 +1194,16 @@ struct SettingsPagesDetailViews: View {
         return "{\n  \"mcpServers\": {}\n}"
     }
 
-    private func applyRawMCPJsonString() {
+    private func applyRawMCPJsonString() async {
         guard let data = rawMcpJSON.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let servers = (obj["mcpServers"] as? [String: [String: Any]]) ?? (obj as? [String: [String: Any]]) else {
             store.showToast("Invalid JSON syntax")
             return
+        }
+        let desiredNames = Set(servers.keys)
+        for existing in store.mcpServers where !desiredNames.contains(existing.name) {
+            _ = await store.deleteMCPServer(existing)
         }
         for (name, cfg) in servers {
             let transport = (cfg["type"] as? String) ?? ((cfg["url"] != nil) ? "http" : "stdio")
@@ -1207,7 +1221,7 @@ struct SettingsPagesDetailViews: View {
                 tools: [],
                 resourcesCount: 0
             )
-            store.upsertMCPServer(draft, isNew: true)
+            _ = await store.upsertMCPServer(draft, isNew: true)
         }
         mcpEditorMode = "form"
     }
@@ -1224,7 +1238,7 @@ struct SettingsPagesDetailViews: View {
             ZCodeSettingsPageHeader(
                 groupTitle: "Agent capabilities",
                 title: "Skills",
-                subtitle: "Reusable SKILL.md domain workflows loaded automatically or invoked via slash commands."
+                subtitle: "Manage workspace and user skills. Enabled skills can be referenced in chat with $skill-name."
             )
 
             ZCodeSettingsSearchBar(text: $searchFilter, placeholder: "Search skills by name, scope, or domain…")
@@ -1246,10 +1260,11 @@ struct SettingsPagesDetailViews: View {
 
                             Toggle("", isOn: Binding(
                                 get: { sk.enabled },
-                                set: { store.setSkillEnabled(sk, enabled: $0) }
+                                set: { newValue in Task { _ = await store.setSkillEnabled(sk, enabled: newValue) } }
                             ))
                             .labelsHidden()
                             .tint(palette.accentBlue)
+                            .disabled(!store.isRemoteRPCReady)
                         }
 
                         Text(sk.summary)
@@ -1273,13 +1288,12 @@ struct SettingsPagesDetailViews: View {
     private var commandsPage: some View {
         let q = searchFilter.trimmingCharacters(in: .whitespacesAndNewlines)
         let customCmds = store.slashCommands.filter { $0.scope != "System" && (q.isEmpty || $0.trigger.localizedCaseInsensitiveContains(q) || $0.summary.localizedCaseInsensitiveContains(q)) }
-        let systemCmds = store.slashCommands.filter { $0.scope == "System" && (q.isEmpty || $0.trigger.localizedCaseInsensitiveContains(q) || $0.summary.localizedCaseInsensitiveContains(q)) }
 
         return Group {
             ZCodeSettingsPageHeader(
                 groupTitle: "Agent capabilities",
                 title: "Commands",
-                subtitle: "Custom Markdown slash commands (~/.zcode/commands & .zcode/commands) and built-in composer actions."
+                subtitle: "Manage ZCode Agent .md command files. Commands can be invoked with /command-name in chat."
             ) {
                 Button {
                     showNewCommand = true
@@ -1332,7 +1346,7 @@ struct SettingsPagesDetailViews: View {
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(palette.foreground)
                             Button(role: .destructive) {
-                                store.deleteSlashCommand(cmd)
+                                Task { _ = await store.deleteSlashCommand(cmd) }
                             } label: {
                                 Image(systemName: "trash")
                                     .font(.system(size: 12))
@@ -1350,16 +1364,6 @@ struct SettingsPagesDetailViews: View {
                 }
             }
 
-            ZCodeSettingsCard(title: "Built-in System Commands (\(systemCmds.count))") {
-                ForEach(Array(systemCmds.enumerated()), id: \.element.id) { idx, cmd in
-                    ZCodeSettingsRow(title: cmd.trigger, subtitle: cmd.summary, badge: "System") {
-                        EmptyView()
-                    }
-                    if idx < systemCmds.count - 1 {
-                        Divider().overlay(palette.border).padding(.horizontal, 14)
-                    }
-                }
-            }
         }
     }
 
@@ -1370,7 +1374,7 @@ struct SettingsPagesDetailViews: View {
             ZCodeSettingsPageHeader(
                 groupTitle: "Agent capabilities",
                 title: "Hooks",
-                subtitle: "Deterministic shell/process lifecycle hooks triggered on PreToolUse, PostToolUse, SessionStart, PermissionRequest, and Stop."
+                subtitle: "Manage task lifecycle hooks to automatically execute commands on specific events."
             ) {
                 Button {
                     showNewHook = true
@@ -1388,14 +1392,26 @@ struct SettingsPagesDetailViews: View {
                 .buttonStyle(.plain)
             }
 
-            ZCodeSettingsCard(title: "Workspace Hook Execution Trust") {
-                ZCodeSettingsRow(
-                    title: "Allow Workspace .zcode/settings.json Hooks",
-                    subtitle: "Disable if inspecting an untrusted third-party repository"
+            if !store.pendingHookTrustItems.isEmpty {
+                ZCodeSettingsCard(
+                    title: "Workspace hook trust",
+                    subtitle: "This workspace declares hooks that need review before they run."
                 ) {
-                    Toggle("", isOn: $store.workspaceHookTrustGranted)
-                        .labelsHidden()
-                        .tint(palette.accentBlue)
+                    ZCodeSettingsRow(
+                        title: "\(store.pendingHookTrustItems.count) hook declaration\(store.pendingHookTrustItems.count == 1 ? "" : "s") pending",
+                        subtitle: "Trusting runs these hooks in new sessions for this workspace."
+                    ) {
+                        Button("Trust") {
+                            Task { _ = await store.grantPendingWorkspaceHookTrust() }
+                        }
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(palette.brandForeground)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(palette.brand, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .buttonStyle(.plain)
+                        .disabled(!store.isRemoteRPCReady)
+                    }
                 }
             }
 
@@ -1432,11 +1448,12 @@ struct SettingsPagesDetailViews: View {
                                     set: { val in
                                         var updated = hk
                                         updated.enabled = val
-                                        store.upsertHookRule(updated)
+                                        Task { _ = await store.upsertHookRule(updated) }
                                     }
                                 ))
                                 .labelsHidden()
                                 .tint(palette.accentBlue)
+                                .disabled(!store.isRemoteRPCReady || !hk.editable)
                             }
 
                             Text(hk.command)
@@ -1454,7 +1471,7 @@ struct SettingsPagesDetailViews: View {
                                         .font(.system(size: 12, weight: .semibold))
                                         .foregroundStyle(palette.foreground)
                                     Button(role: .destructive) {
-                                        store.deleteHookRule(hk)
+                                        Task { _ = await store.deleteHookRule(hk) }
                                     } label: {
                                         Image(systemName: "trash")
                                             .font(.system(size: 12))
@@ -1476,112 +1493,268 @@ struct SettingsPagesDetailViews: View {
         }
     }
 
-    // MARK: - 13. Usage Stats (`usage`) — App Usage & Coding Plan + Swift Charts
+    // MARK: - 13. Usage stats (`usage`) — real host snapshots only
 
     private var usageStatsPage: some View {
-        let totalInK = store.tokenUsageStats.reduce(0) { $0 + $1.inputTokensK }
-        let totalOutK = store.tokenUsageStats.reduce(0) { $0 + $1.outputTokensK }
-        let totalCacheK = store.tokenUsageStats.reduce(0) { $0 + $1.cachedTokensK }
-        let cacheHitPct = totalInK > 0 ? min(99, Int(Double(totalCacheK) / Double(totalInK) * 100.0)) : 68
-
-        return Group {
+        Group {
             ZCodeSettingsPageHeader(
                 groupTitle: "Data and statistics",
                 title: "Usage stats",
-                subtitle: "Token consumption, prompt cache efficiency, daily activity, and Z.ai Coding Plan quota."
+                subtitle: "Review activity and model usage aggregated from local sessions."
             ) {
-                Picker("Range", selection: Binding(
-                    get: { usageRange },
-                    set: { r in
-                        usageRange = r
-                        Task { await store.syncUsageStatsRPC(range: r) }
+                HStack(spacing: 8) {
+                    ZCodeSettingsSelect(
+                        options: [
+                            ZCodeSettingsSelectOption(value: "7d", label: "Last 7 days"),
+                            ZCodeSettingsSelectOption(value: "30d", label: "Last 30 days")
+                        ],
+                        selection: Binding(
+                            get: { usageRange },
+                            set: { usageRange = $0 }
+                        ),
+                        isEnabled: store.isRemoteRPCReady
+                    )
+
+                    Button {
+                        Task {
+                            await store.syncUsageStatsRPC(range: usageRange)
+                            if usageTab == "plan" { await store.syncCodingPlanEntitlementRPC() }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .frame(width: 30, height: 30)
+                            .background(palette.card, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
-                )) {
-                    Text("7D").tag("7d")
-                    Text("30D").tag("30d")
+                    .buttonStyle(.plain)
+                    .disabled(!store.isRemoteRPCReady)
+                    .accessibilityLabel("Refresh usage")
+                }
+            }
+
+            if store.isZaiAuthenticated {
+                Picker("Usage tab", selection: $usageTab) {
+                    Text("App usage").tag("app")
+                    Text("Individual Plan").tag("plan")
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 96)
+            } else {
+                Picker("Usage tab", selection: $usageTab) {
+                    Text("App usage").tag("app")
+                }
+                .pickerStyle(.segmented)
+                .disabled(true)
             }
 
-            Picker("Usage Tab", selection: $usageTab) {
-                Text("App Usage").tag("app")
-                Text("Z.ai Coding Plan").tag("plan")
+            if usageTab == "plan", store.isZaiAuthenticated {
+                codingPlanEntitlementSection
+            } else {
+                appUsageSection
             }
-            .pickerStyle(.segmented)
+        }
+        .task(id: usageRange) {
+            await store.syncUsageStatsRPC(range: usageRange)
+        }
+        .onChange(of: usageTab) { _, tab in
+            if tab == "plan" { Task { await store.syncCodingPlanEntitlementRPC() } }
+        }
+    }
 
-            if usageTab == "plan" {
-                ZCodeSettingsCard(
-                    title: "Z.ai Coding Plan Entitlement",
-                    subtitle: "5-hour rolling window and monthly high-speed GLM-5.3 coding quota."
-                ) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(store.isZaiAuthenticated ? "Active Coding Plan" : "Sign in to view live plan quota")
-                                    .font(.system(size: 14.5, weight: .semibold))
+    @ViewBuilder
+    private var appUsageSection: some View {
+        if store.usageStatsLoading && store.usageStatsSnapshot == nil {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Computing usage…")
+                    .font(.system(size: 13))
+                    .foregroundStyle(palette.foregroundSubtle)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 24)
+        } else if let error = store.usageStatsError {
+            ZCodeSettingsCard(title: "Usage unavailable") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(error)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(palette.foregroundSubtle)
+                    Button("Retry") {
+                        Task { await store.syncUsageStatsRPC(range: usageRange) }
+                    }
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(palette.accentBlue)
+                }
+                .padding(14)
+            }
+        } else if let snapshot = store.usageStatsSnapshot {
+            let totalModels = snapshot.models.reduce(0) { $0 + $1.totalTokens }
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                usageKpiTile(label: "Total tokens", value: Self.compactTokenCount(snapshot.totalTokens), badge: snapshot.range)
+                usageKpiTile(label: "Peak day", value: Self.compactTokenCount(snapshot.peakDayTokens), badge: "Tokens")
+                usageKpiTile(label: "Longest session", value: Self.durationLabel(snapshot.longestSessionMs), badge: "Duration")
+                usageKpiTile(label: "Current streak", value: "\(snapshot.currentStreakDays) days", badge: "Longest \(snapshot.longestStreakDays)")
+            }
+
+            if !snapshot.models.isEmpty {
+                ZCodeSettingsCard(title: "Model usage", subtitle: "Tokens per model in the selected window.") {
+                    VStack(spacing: 0) {
+                        ForEach(Array(snapshot.models.sorted { $0.totalTokens > $1.totalTokens }.enumerated()), id: \.element.id) { idx, model in
+                            HStack(spacing: 8) {
+                                Text(model.modelId)
+                                    .font(.system(size: 12.5, design: .monospaced))
                                     .foregroundStyle(palette.foreground)
-                                Text("Models: GLM-5.3, GLM-5.3-Flash, GLM-5V-Turbo")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(palette.foregroundSubtle)
-                            }
-                            Spacer()
-                            ZCodeSettingsPill(text: store.isZaiAuthenticated ? "Active" : "Standby", tone: store.isZaiAuthenticated ? .success : .neutral)
-                        }
-
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack {
-                                Text("5-Hour Rolling Quota")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(palette.foregroundSubtle)
+                                    .lineLimit(1)
                                 Spacer()
-                                Text("Healthy")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(palette.success)
+                                Text(Self.compactTokenCount(model.totalTokens))
+                                    .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(palette.foreground)
+                                if totalModels > 0 {
+                                    Text(String(format: "%.0f%%", Double(model.totalTokens) / Double(totalModels) * 100))
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .foregroundStyle(palette.foregroundMuted)
+                                        .frame(width: 42, alignment: .trailing)
+                                }
                             }
-                            ProgressView(value: 0.24)
-                                .tint(palette.accentBlue)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            if idx < snapshot.models.count - 1 {
+                                Divider().overlay(palette.border).padding(.horizontal, 14)
+                            }
                         }
                     }
+                }
+            }
+
+            ZCodeSettingsCard(title: "Daily token usage", subtitle: "Total tokens per day in the selected window.") {
+                if snapshot.dailyModelUsage.isEmpty {
+                    Text("No token usage recorded in this window.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 28)
+                } else {
+                    Chart {
+                        ForEach(snapshot.dailyModelUsage) { point in
+                            BarMark(
+                                x: .value("Day", String(point.date.suffix(5))),
+                                y: .value("Tokens", point.totalTokens)
+                            )
+                            .foregroundStyle(palette.accentBlue)
+                        }
+                    }
+                    .frame(height: 190)
                     .padding(14)
                 }
-            } else {
-                // 4 KPI Cards
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-                    usageKpiTile(label: "Input Tokens", value: "\(totalInK)K", badge: "Prompt")
-                    usageKpiTile(label: "Output Tokens", value: "\(totalOutK)K", badge: "Completion")
-                    usageKpiTile(label: "Cache Hit Rate", value: "\(cacheHitPct)%", badge: "\(totalCacheK)K cached")
-                    usageKpiTile(label: "Active Sessions", value: "\(store.sessions.count)", badge: "\(store.projects.count) projects")
+            }
+        } else {
+            Text(store.isRemoteRPCReady ? "No usage stats recorded yet." : "Connect to your computer to load usage stats.")
+                .font(.system(size: 13))
+                .foregroundStyle(palette.foregroundSubtle)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 28)
+        }
+    }
+
+    @ViewBuilder
+    private var codingPlanEntitlementSection: some View {
+        if store.codingPlanEntitlementLoading && store.codingPlanEntitlement == nil {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Loading Coding Plan entitlement…")
+                    .font(.system(size: 13))
+                    .foregroundStyle(palette.foregroundSubtle)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 24)
+        } else if let error = store.codingPlanEntitlementError {
+            ZCodeSettingsCard(title: "Coding Plan entitlement") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(error)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(palette.foregroundSubtle)
+                    Button("Retry") {
+                        Task { await store.syncCodingPlanEntitlementRPC() }
+                    }
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(palette.accentBlue)
                 }
-
-                ZCodeSettingsCard(title: "Daily Token Throughput", subtitle: "Input vs Output tokens (in thousands) across recent coding days.") {
-                    if store.tokenUsageStats.isEmpty {
-                        Text("No token usage recorded in this window yet.")
-                            .font(.system(size: 13))
-                            .foregroundStyle(palette.foregroundSubtle)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 28)
-                    } else {
-                        Chart {
-                            ForEach(store.tokenUsageStats) { item in
-                                BarMark(
-                                    x: .value("Day", item.dayLabel),
-                                    y: .value("Input (K)", item.inputTokensK)
-                                )
-                                .foregroundStyle(palette.accentBlue)
-
-                                BarMark(
-                                    x: .value("Day", item.dayLabel),
-                                    y: .value("Output (K)", item.outputTokensK)
-                                )
-                                .foregroundStyle(palette.success)
+                .padding(14)
+            }
+        } else if let entitlement = store.codingPlanEntitlement {
+            let noPlan = entitlement.unavailableReason == "no_plan" || (entitlement.planLevel ?? "").isEmpty && entitlement.limits.isEmpty
+            ZCodeSettingsCard(
+                title: "Coding Plan entitlement",
+                subtitle: "Synced from your connected Coding Plan account."
+            ) {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .center) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(entitlement.planLevel ?? (noPlan ? "No active Coding Plan" : "Coding Plan"))
+                                .font(.system(size: 14.5, weight: .semibold))
+                                .foregroundStyle(palette.foreground)
+                            if !entitlement.productNames.isEmpty {
+                                Text(entitlement.productNames.joined(separator: " • "))
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                            }
+                            if let expires = entitlement.expiresAt {
+                                Text("Expires \(expires)")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(palette.foregroundMuted)
                             }
                         }
-                        .frame(height: 190)
-                        .padding(14)
+                        Spacer()
+                        ZCodeSettingsPill(
+                            text: noPlan ? "Not subscribed" : "Active",
+                            tone: noPlan ? .neutral : .success
+                        )
                     }
+
+                    if entitlement.limits.isEmpty {
+                        Text(noPlan
+                             ? "No connected Coding Plan quota is available for this account."
+                             : "The host did not return quota limits.")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(palette.foregroundSubtle)
+                    } else {
+                        ForEach(entitlement.limits) { limit in
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack {
+                                    Text(limit.displayTitle)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(palette.foregroundSubtle)
+                                    Spacer()
+                                    if let pct = limit.resolvedPercentUsed {
+                                        Text(String(format: "%.0f%% used", pct * 100))
+                                            .font(.system(size: 11.5, design: .monospaced))
+                                            .foregroundStyle(palette.foregroundMuted)
+                                    }
+                                }
+                                if let pct = limit.resolvedPercentUsed {
+                                    ProgressView(value: max(0, min(1, pct)))
+                                        .tint(palette.accentBlue)
+                                }
+                                if let reset = limit.nextResetTime {
+                                    Text("Resets \(reset)")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(palette.foregroundMuted)
+                                }
+                            }
+                        }
+                    }
+
+                    Text("Quota values follow the current usage guide and may change with platform policy.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(palette.foregroundMuted)
                 }
+                .padding(14)
             }
+        } else {
+            Text("No active Coding Plan")
+                .font(.system(size: 13))
+                .foregroundStyle(palette.foregroundSubtle)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 24)
         }
     }
 
@@ -1601,6 +1774,26 @@ struct SettingsPagesDetailViews: View {
         .padding(12)
         .background(palette.panel, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+    }
+
+    private static func compactTokenCount(_ value: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 1
+        if value >= 1_000_000 {
+            return (formatter.string(from: NSNumber(value: Double(value) / 1_000_000)) ?? "\(value)") + "M"
+        }
+        if value >= 1_000 {
+            return (formatter.string(from: NSNumber(value: Double(value) / 1_000)) ?? "\(value)") + "K"
+        }
+        return "\(value)"
+    }
+
+    private static func durationLabel(_ ms: Int) -> String {
+        let minutes = max(0, ms / 60_000)
+        if minutes >= 1_440 { return "\(minutes / 1_440)d \((minutes % 1_440) / 60)h" }
+        if minutes >= 60 { return "\(minutes / 60)h \(minutes % 60)m" }
+        return "\(minutes)m"
     }
 
     // MARK: - 14. Archive Management (`archives`)
@@ -1627,30 +1820,30 @@ struct SettingsPagesDetailViews: View {
                         get: { store.taskAutoArchiveEnabled },
                         set: { val in
                             store.taskAutoArchiveEnabled = val
-                            store.pushDesktopSettingPatch(["taskAutoArchive": ["enabled": val, "olderThanDays": store.taskAutoArchiveOlderThanDays]])
+                            Task { _ = await store.updateDesktopSetting(["taskAutoArchiveEnabled": val]) }
                         }
                     ))
                     .labelsHidden()
                     .tint(palette.accentBlue)
+                    .disabled(!store.isRemoteRPCReady)
                 }
 
                 if store.taskAutoArchiveEnabled {
                     Divider().overlay(palette.border)
-                    ZCodeSettingsRow(title: "Archive Tasks Older Than") {
-                        Picker("Days", selection: Binding(
-                            get: { store.taskAutoArchiveOlderThanDays },
-                            set: { days in
-                                store.taskAutoArchiveOlderThanDays = days
-                                store.pushDesktopSettingPatch(["taskAutoArchive": ["enabled": true, "olderThanDays": days]])
-                            }
-                        )) {
-                            Text("3 days").tag(3)
-                            Text("7 days").tag(7)
-                            Text("14 days").tag(14)
-                            Text("30 days").tag(30)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 220)
+                    ZCodeSettingsRow(title: "Archive tasks older than") {
+                        ZCodeSettingsSelect(
+                            options: [3, 7, 14, 30].map {
+                                ZCodeSettingsSelectOption(value: $0, label: "\($0) days")
+                            },
+                            selection: Binding(
+                                get: { store.taskAutoArchiveOlderThanDays },
+                                set: { days in
+                                    store.taskAutoArchiveOlderThanDays = days
+                                    Task { _ = await store.updateDesktopSetting(["taskAutoArchiveOlderThanDays": days]) }
+                                }
+                            ),
+                            isEnabled: store.isRemoteRPCReady
+                        )
                     }
                 }
             }
@@ -1737,12 +1930,20 @@ struct MCPServerEditorSheet: View {
                                         .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8))
                                 }
 
-                                Picker("Transport", selection: $draft.transport) {
-                                    Text("stdio").tag("stdio")
-                                    Text("Streamable HTTP").tag("http")
-                                    Text("SSE").tag("sse")
+                                HStack {
+                                    Text("Type")
+                                        .font(.system(size: 13.5, weight: .medium))
+                                        .foregroundStyle(palette.foreground)
+                                    Spacer()
+                                    ZCodeSettingsSelect(
+                                        options: [
+                                            ZCodeSettingsSelectOption(value: "stdio", label: "stdio"),
+                                            ZCodeSettingsSelectOption(value: "http", label: "Streamable HTTP"),
+                                            ZCodeSettingsSelectOption(value: "sse", label: "SSE")
+                                        ],
+                                        selection: $draft.transport
+                                    )
                                 }
-                                .pickerStyle(.segmented)
 
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text(draft.transport == "stdio" ? "Executable Command" : "Endpoint URL")
@@ -1801,11 +2002,15 @@ struct MCPServerEditorSheet: View {
                     Button("Save") {
                         draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
                         draft.args = argsText.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-                        store.upsertMCPServer(draft, isNew: isNew)
-                        dismiss()
+                        let snapshot = draft
+                        Task {
+                            if await store.upsertMCPServer(snapshot, isNew: isNew) {
+                                await MainActor.run { dismiss() }
+                            }
+                        }
                     }
                     .fontWeight(.semibold)
-                    .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.endpointOrCommand.isEmpty)
+                    .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.endpointOrCommand.isEmpty || !store.isRemoteRPCReady)
                 }
             }
         }
@@ -1844,6 +2049,440 @@ struct SkillMarkdownInspectorSheet: View {
     }
 }
 
+// MARK: - Automations (settings section, real zcode-agent RPC)
+
+struct AutomationsSettingsSectionView: View {
+    @Bindable var store: AppStore
+
+    @Environment(\.zcodePalette) private var palette
+    @State private var showNewAutomation = false
+    @State private var editingAutomation: AutomationScheduleItem?
+    @State private var pendingDelete: AutomationScheduleItem?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ZCodeSettingsPageHeader(
+                groupTitle: "Agent capabilities",
+                title: "Automations",
+                subtitle: SettingsSectionKind.automations.headerDescription
+            ) {
+                HStack(spacing: 8) {
+                    ZCodeSettingsPill(text: "Beta", tone: .accent)
+                    Button {
+                        showNewAutomation = true
+                    } label: {
+                        Label("New scheduled task", systemImage: "plus")
+                            .font(.system(size: 12.5, weight: .semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(!store.canManageAutomations || store.automations.count >= 20)
+                }
+            }
+
+            ZCodeSettingsCard(
+                title: "Scheduled tasks",
+                subtitle: "Run tasks on a schedule or whenever you need them."
+            ) {
+                if !store.canManageAutomations {
+                    Text(store.isRemoteRPCReady
+                         ? "Open an available project before creating a scheduled task."
+                         : "Connect to your computer to manage scheduled tasks.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                } else if store.isLoadingAutomations && store.automations.isEmpty {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity)
+                        .padding(24)
+                } else if store.automations.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("No scheduled tasks yet.")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(palette.foreground)
+                        Text("Create a task to run a prompt on a recurring schedule.")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(palette.foregroundSubtle)
+                        Button("Create manually") { showNewAutomation = true }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .padding(.top, 4)
+                    }
+                    .padding(16)
+                } else {
+                    ForEach(Array(store.automations.enumerated()), id: \.element.id) { idx, auto in
+                        automationRow(auto)
+                        if idx < store.automations.count - 1 {
+                            Divider().overlay(palette.border).padding(.horizontal, 14)
+                        }
+                    }
+                }
+
+                if let error = store.automationsError, !error.isEmpty {
+                    Divider().overlay(palette.border)
+                    Text(error)
+                        .font(.system(size: 12))
+                        .foregroundStyle(palette.destructive)
+                        .padding(14)
+                }
+            }
+
+            Text("Up to 20 scheduled tasks per workspace, including paused, completed, and failed tasks.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(palette.foregroundMuted)
+        }
+        .task { await store.loadAutomations() }
+        .sheet(isPresented: $showNewAutomation) {
+            ZCodeSettingsAutomationEditorSheet(store: store, existing: nil)
+        }
+        .sheet(item: $editingAutomation) { auto in
+            ZCodeSettingsAutomationEditorSheet(store: store, existing: auto)
+        }
+        .confirmationDialog(
+            "Delete scheduled task",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            presenting: pendingDelete
+        ) { auto in
+            Button("Delete", role: .destructive) {
+                pendingDelete = nil
+                Task { await store.deleteAutomation(id: auto.id) }
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: { auto in
+            Text("Delete “\(auto.name)”? This cannot be undone.")
+        }
+    }
+
+    private func automationRow(_ auto: AutomationScheduleItem) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(auto.name)
+                    .font(.system(size: 14.5, weight: .semibold))
+                    .foregroundStyle(palette.foreground)
+                HStack(spacing: 5) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(auto.cronExpression)
+                        .font(.system(size: 11.5, design: .monospaced))
+                    Text("·")
+                    Text(URL(fileURLWithPath: auto.workspacePath).lastPathComponent)
+                        .font(.system(size: 11.5))
+                }
+                .foregroundStyle(palette.foregroundSubtle)
+                Text(auto.lastRunStatus)
+                    .font(.system(size: 11))
+                    .foregroundStyle(palette.foregroundMuted)
+            }
+
+            Spacer(minLength: 8)
+
+            Toggle("", isOn: Binding(
+                get: { auto.enabled },
+                set: { newValue in
+                    Task { await store.setAutomationEnabled(id: auto.id, enabled: newValue) }
+                }
+            ))
+            .labelsHidden()
+            .tint(palette.accentBlue)
+
+            Menu {
+                Button {
+                    Task { await store.runAutomationNow(id: auto.id) }
+                } label: {
+                    Label("Run now", systemImage: "play")
+                }
+                Button {
+                    editingAutomation = auto
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    pendingDelete = auto
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+    }
+}
+
+struct ZCodeSettingsAutomationEditorSheet: View {
+    @Bindable var store: AppStore
+    let existing: AutomationScheduleItem?
+
+    @Environment(\.zcodePalette) private var palette
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var title: String
+    @State private var cron: String
+    @State private var prompt: String
+    @State private var isSaving = false
+
+    init(store: AppStore, existing: AutomationScheduleItem?) {
+        self.store = store
+        self.existing = existing
+        _title = State(initialValue: existing?.name ?? "")
+        _cron = State(initialValue: existing?.cronExpression ?? "0 9 * * 1-5")
+        _prompt = State(initialValue: existing?.prompt ?? "")
+    }
+
+    private var canSave: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !cron.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !isSaving
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                palette.background.ignoresSafeArea()
+                ScrollView {
+                    ZCodeSettingsCard(title: existing == nil ? "New scheduled task" : "Edit scheduled task") {
+                        VStack(alignment: .leading, spacing: 14) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Task title")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                                TextField("e.g. Daily standup summary", text: $title)
+                                    .font(.system(size: 13.5))
+                                    .padding(10)
+                                    .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8))
+                            }
+
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Schedule (cron)")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                                TextField("0 9 * * 1-5", text: $cron)
+                                    .font(.system(size: 13.5, design: .monospaced))
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                    .padding(10)
+                                    .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8))
+                                Text("Runs in the workspace’s timezone. Weekdays at 09:00 is `0 9 * * 1-5`.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(palette.foregroundMuted)
+                            }
+
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Instruction")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                                TextEditor(text: $prompt)
+                                    .font(.system(size: 13))
+                                    .scrollContentBackground(.hidden)
+                                    .frame(minHeight: 150)
+                                    .padding(8)
+                                    .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8))
+                            }
+
+                            if let error = store.automationsError, !error.isEmpty {
+                                Text(error)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(palette.destructive)
+                            }
+                        }
+                        .padding(14)
+                    }
+                    .padding(16)
+                }
+            }
+            .navigationTitle(existing == nil ? "New task" : "Edit task")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isSaving ? "Saving…" : "Save") {
+                        let snapshotTitle = title
+                        let snapshotCron = cron
+                        let snapshotPrompt = prompt
+                        Task {
+                            isSaving = true
+                            let ok: Bool
+                            if let existing {
+                                ok = await store.updateAutomation(
+                                    id: existing.id,
+                                    title: snapshotTitle,
+                                    cronExpr: snapshotCron,
+                                    prompt: snapshotPrompt
+                                )
+                            } else {
+                                ok = await store.createAutomation(
+                                    title: snapshotTitle,
+                                    cronExpr: snapshotCron,
+                                    prompt: snapshotPrompt
+                                )
+                            }
+                            isSaving = false
+                            if ok { dismiss() }
+                        }
+                    }
+                    .fontWeight(.semibold)
+                    .disabled(!canSave)
+                }
+            }
+        }
+        .preferredColorScheme(palette.isDark ? .dark : .light)
+    }
+}
+
+// MARK: - Workspace Search Scope (.zcodeignore, real file-channel RPC)
+
+struct WorkspaceFileSearchScopeSettingsView: View {
+    @Bindable var store: AppStore
+
+    @Environment(\.zcodePalette) private var palette
+    @State private var content = ""
+    @State private var savedContent = ""
+    @State private var source: String?
+    @State private var isLoading = false
+    @State private var isSaving = false
+
+    private var workspacePath: String { store.currentWorkspaceContext.path }
+    private var hasUnsavedChanges: Bool { source == "file" && content != savedContent }
+    private var canSave: Bool { source != nil && (source == "template" || content != savedContent) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ZCodeSettingsPageHeader(
+                groupTitle: "Basics",
+                title: "Workspace Search Scope",
+                subtitle: SettingsSectionKind.workspaceFileSearch.headerDescription
+            )
+
+            if workspacePath.isEmpty {
+                ZCodeSettingsCard(title: "Workspace Search Scope") {
+                    Text("Open a workspace to edit its search ignore rules.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                }
+            } else {
+                ZCodeSettingsCard(title: ".zcodeignore", subtitle: workspacePath) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if isLoading && source == nil {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(maxWidth: .infinity)
+                                .padding(28)
+                        } else {
+                            if source == "template" {
+                                Text(".zcodeignore does not exist yet: the content below is the initial preview (.gitignore copy + default exclusions); it is written to the workspace only after saving.")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                            }
+
+                            TextEditor(text: $content)
+                                .font(.system(size: 12.5, design: .monospaced))
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .scrollContentBackground(.hidden)
+                                .frame(minHeight: 230)
+                                .padding(8)
+                                .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8))
+                                .disabled(isLoading || isSaving || !store.isRemoteRPCReady)
+
+                            HStack(spacing: 8) {
+                                Button {
+                                    save()
+                                } label: {
+                                    Label("Save", systemImage: "square.and.arrow.down")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .disabled(!canSave || isLoading || isSaving || !store.isRemoteRPCReady)
+
+                                Button {
+                                    apply("sync-gitignore")
+                                } label: {
+                                    Label("Sync from .gitignore", systemImage: "arrow.triangle.2.circlepath")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(isLoading || isSaving || !store.isRemoteRPCReady)
+
+                                Button {
+                                    apply("reset-defaults")
+                                } label: {
+                                    Label("Restore default rules", systemImage: "arrow.counterclockwise")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(isLoading || isSaving || !store.isRemoteRPCReady)
+
+                                Spacer(minLength: 4)
+
+                                if hasUnsavedChanges {
+                                    Text("Unsaved changes")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(palette.foregroundMuted)
+                                }
+                            }
+                        }
+                    }
+                    .padding(14)
+                }
+
+                Text(".zcodeignore applies to workspace file search and takes effect on the next search after saving.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(palette.foregroundMuted)
+            }
+        }
+        .task(id: workspacePath) { await load() }
+    }
+
+    private func load() async {
+        guard !workspacePath.isEmpty, store.isRemoteRPCReady else { return }
+        isLoading = true
+        if let snapshot = await store.readWorkspaceFileSearchIgnore(rootPath: workspacePath) {
+            content = snapshot.content
+            savedContent = snapshot.content
+            source = snapshot.source
+        }
+        isLoading = false
+    }
+
+    private func save() {
+        let snapshot = content
+        Task {
+            isSaving = true
+            if await store.writeWorkspaceFileSearchIgnore(rootPath: workspacePath, content: snapshot) {
+                savedContent = snapshot
+                source = "file"
+            }
+            isSaving = false
+        }
+    }
+
+    private func apply(_ transform: String) {
+        Task {
+            isLoading = true
+            if let transformed = await store.applyWorkspaceFileSearchIgnoreTransform(
+                rootPath: workspacePath,
+                transform: transform
+            ) {
+                content = transformed
+            }
+            isLoading = false
+        }
+    }
+}
+
 struct SlashCommandEditorSheet: View {
     @Bindable var store: AppStore
     let isNew: Bool
@@ -1866,11 +2505,19 @@ struct SlashCommandEditorSheet: View {
                                 .padding(10)
                                 .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8))
 
-                            Picker("Scope", selection: $draft.scope) {
-                                Text("User (~/.zcode/commands)").tag("User")
-                                Text("Project (.zcode/commands)").tag("Project")
+                            HStack {
+                                Text("Scope")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                    .foregroundStyle(palette.foreground)
+                                Spacer()
+                                ZCodeSettingsSelect(
+                                    options: [
+                                        ZCodeSettingsSelectOption(value: "User", label: "User (~/.zcode/commands)"),
+                                        ZCodeSettingsSelectOption(value: "Project", label: "Project (.zcode/commands)")
+                                    ],
+                                    selection: $draft.scope
+                                )
                             }
-                            .pickerStyle(.segmented)
 
                             TextField("Short description shown in / menu", text: $draft.summary)
                                 .font(.system(size: 13.5))
@@ -1904,8 +2551,12 @@ struct SlashCommandEditorSheet: View {
                         if !draft.trigger.hasPrefix("/") {
                             draft.trigger = "/\(draft.trigger)"
                         }
-                        store.upsertSlashCommand(draft, isNew: isNew)
-                        dismiss()
+                        let snapshot = draft
+                        Task {
+                            if await store.upsertSlashCommand(snapshot, isNew: isNew) {
+                                await MainActor.run { dismiss() }
+                            }
+                        }
                     }
                     .fontWeight(.semibold)
                     .disabled(draft.trigger.trimmingCharacters(in: CharacterSet(charactersIn: "/ ")).isEmpty)
@@ -1934,19 +2585,26 @@ struct HookRuleEditorSheet: View {
                                 Text("Lifecycle Event")
                                     .font(.system(size: 13.5, weight: .medium))
                                 Spacer()
-                                Picker("Event", selection: $draft.event) {
-                                    ForEach(HookRuleItem.officialEvents, id: \.self) { ev in
-                                        Text(ev).tag(ev)
-                                    }
-                                }
-                                .pickerStyle(.menu)
+                                ZCodeSettingsSelect(
+                                    options: HookRuleItem.officialEvents.map {
+                                        ZCodeSettingsSelectOption(value: $0, label: $0)
+                                    },
+                                    selection: $draft.event
+                                )
                             }
 
-                            Picker("Scope", selection: $draft.scope) {
-                                Text("User").tag("user")
-                                Text("Project").tag("project")
+                            HStack {
+                                Text("Scope")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                Spacer()
+                                ZCodeSettingsSelect(
+                                    options: [
+                                        ZCodeSettingsSelectOption(value: "user", label: "User"),
+                                        ZCodeSettingsSelectOption(value: "project", label: "Project")
+                                    ],
+                                    selection: $draft.scope
+                                )
                             }
-                            .pickerStyle(.segmented)
 
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("Tool / Pattern Matcher")
@@ -1988,8 +2646,12 @@ struct HookRuleEditorSheet: View {
                 ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Save") {
-                        store.upsertHookRule(draft)
-                        dismiss()
+                        let snapshot = draft
+                        Task {
+                            if await store.upsertHookRule(snapshot) {
+                                await MainActor.run { dismiss() }
+                            }
+                        }
                     }
                     .fontWeight(.semibold)
                     .disabled(draft.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

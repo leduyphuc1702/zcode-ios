@@ -111,7 +111,7 @@ final class ZCodeMobileUnitTests: XCTestCase {
         XCTAssertEqual(store.language, .english)
         XCTAssertEqual(store.themeMode, .dark)
         XCTAssertEqual(SettingsGroupKind.allCases.count, 3)
-        XCTAssertEqual(SettingsSectionKind.allCases.count, 16)
+        XCTAssertEqual(SettingsSectionKind.allCases.count, 18)
 
         // Inline code comment workflow
         store.addInlineCodeComment(filePath: "src/rpc/SocketProtocol.swift", startLine: 18, endLine: 22, comment: "Verify endianness", snippet: "buffer.appendBigEndian")
@@ -263,30 +263,145 @@ final class ZCodeMobileUnitTests: XCTestCase {
     func testZCodeSettingsModelProviderAndSubagentStudioParity() async {
         let store = AppStore(seedDemoWorkspace: true)
 
-        // 1. Official 17 Provider Templates from zcode-builtin.json
-        XCTAssertEqual(ProviderTemplateDescriptor.officialCatalog.count, 17)
-        let openRouterTpl = ProviderTemplateDescriptor.officialCatalog.first(where: { $0.id == "openrouter" })
-        XCTAssertNotNil(openRouterTpl)
+        // 1. Provider catalog is host-owned: nothing is fabricated before the view arrives.
+        XCTAssertTrue(store.providerTemplates.isEmpty)
 
-        let createdProviderId = store.createProvider(
-            template: openRouterTpl,
+        let hostView: [String: Any] = [
+            "revision": "[\"builtin-r1\",\"personal-r2\"]",
+            "providerTemplates": [[
+                "templateId": "openrouter",
+                "templateNameMap": ["en-US": "OpenRouter"],
+                "config": [
+                    "group": "standard-personal",
+                    "api": ["type": "anthropic-messages", "baseUrl": "https://openrouter.ai/api"],
+                    "access": ["type": "api-key"],
+                    "logo": ["key": "openrouter"]
+                ]
+            ]],
+            "providerOrder": ["provider-openrouter"],
+            "providers": [
+                [
+                    "providerId": "provider-zai",
+                    "providerName": "Z.AI",
+                    "templateId": "zai",
+                    "enabled": true,
+                    "executable": true,
+                    "accountState": ["availability": "available", "entitled": true],
+                    "effectiveConfig": [
+                        "group": "zai-family",
+                        "access": [
+                            "type": "zhipu-account",
+                            "accountType": "zai",
+                            "mode": "individual-coding-plan",
+                            "entitled": true
+                        ],
+                        "api": ["type": "anthropic-messages", "baseUrl": "https://api.z.ai"],
+                        "logo": ["key": "zai"]
+                    ],
+                    "models": []
+                ],
+                [
+                    "providerId": "provider-openrouter",
+                    "providerName": "OpenRouter",
+                    "templateId": "openrouter",
+                    "enabled": true,
+                    "executable": true,
+                    "personalConfig": ["access": ["type": "api-key", "apiKey": "sk-or-real"]],
+                    "effectiveConfig": [
+                        "group": "standard-personal",
+                        "access": ["type": "api-key", "apiKey": "sk-or-real"],
+                        "api": ["type": "anthropic-messages", "baseUrl": "https://openrouter.ai/api"],
+                        "logo": ["key": "openrouter"]
+                    ],
+                    "models": [[
+                        "modelId": "anthropic/claude-opus-5",
+                        "enabled": true,
+                        "kind": "builtin",
+                        "selectable": true,
+                        "executable": true,
+                        "effectiveConfig": [
+                            "properties": [
+                                "contextWindow": 1_000_000,
+                                "requiresMfjsToolSchema": true,
+                                "inputFormat": ["supportsImage": true, "supportsPdf": true],
+                                "outputFormat": ["supportsText": true],
+                                "supportsToolCall": true
+                            ],
+                            "optionSpecs": [
+                                "reasoningLevel": ["values": ["low", "medium", "high", "max"], "map": "reasoning.level"],
+                                "maxOutputTokens": ["max": 65_536, "map": "max_output"]
+                            ]
+                        ]
+                    ]]
+                ]
+            ]
+        ]
+
+        store.applyProviderSettingsViewDictionary(hostView)
+
+        XCTAssertEqual(store.providerSettingsRevision, "[\"builtin-r1\",\"personal-r2\"]")
+        XCTAssertEqual(store.providerTemplates.map(\.id), ["openrouter"])
+        XCTAssertEqual(store.providerTemplates.first?.displayName(), "OpenRouter")
+        XCTAssertEqual(store.providerTemplates.first?.apiFormat, .anthropicMessages)
+        XCTAssertEqual(store.providerOrder, ["provider-openrouter"])
+        XCTAssertEqual(store.providers.map(\.id), ["provider-zai", "provider-openrouter"])
+
+        let account = store.providers.first(where: { $0.id == "provider-zai" })
+        XCTAssertEqual(account?.isAccountProvider, true)
+        XCTAssertEqual(account?.accountAvailability, "available")
+        XCTAssertEqual(account?.entitled, true)
+
+        let personal = store.providers.first(where: { $0.id == "provider-openrouter" })
+        XCTAssertEqual(personal?.apiKey, "sk-or-real")
+        XCTAssertTrue(personal?.hasConfiguredAPIKey == true)
+        XCTAssertEqual(personal?.revision, "[\"builtin-r1\",\"personal-r2\"]")
+        XCTAssertEqual(personal?.apiKey, "sk-or-real")
+
+        let model = personal?.models.first
+        XCTAssertEqual(model?.modelId, "anthropic/claude-opus-5")
+        XCTAssertEqual(model?.reasoningLevels, ["low", "medium", "high", "max"])
+        XCTAssertEqual(model?.reasoningMap, "reasoning.level")
+        XCTAssertEqual(model?.maxOutputTokens, 65_536)
+        XCTAssertEqual(model?.contextWindowTokens, 1_000_000)
+        XCTAssertTrue(model?.supportsVision == true)
+        XCTAssertTrue(model?.supportsPdf == true)
+        XCTAssertTrue(model?.executable == true)
+
+        // An empty host view must clear local state (no `!rawProviders.isEmpty` guard).
+        store.applyProviderSettingsViewDictionary([
+            "revision": "[]",
+            "providerTemplates": [],
+            "providerOrder": [],
+            "providers": []
+        ])
+        XCTAssertTrue(store.providers.isEmpty)
+        XCTAssertTrue(store.providerTemplates.isEmpty)
+        XCTAssertEqual(store.providerSettingsRevision, "[]")
+
+        // Connectivity is never faked offline: honest failure message with no host.
+        store.applyProviderSettingsViewDictionary(hostView)
+        await store.testModelConnectivity(providerId: "provider-openrouter", modelId: "anthropic/claude-opus-5")
+        let tested = store.providers
+            .first(where: { $0.id == "provider-openrouter" })?
+            .models.first(where: { $0.modelId == "anthropic/claude-opus-5" })
+        XCTAssertEqual(tested?.connectivityState, .failed)
+        XCTAssertEqual(tested?.connectivityMessage, "Connect to your computer to test")
+
+        // Provider/model mutations require the host; no local fake provider is inserted.
+        let createdId = await store.createProvider(
+            template: store.providerTemplates.first,
             customName: "OpenRouter Enterprise",
-            baseURL: "https://openrouter.ai/api",
-            apiFormat: .anthropicMessages,
             apiKey: "sk-or-test-unit-key"
         )
-        let createdProvider = store.providers.first(where: { $0.id == createdProviderId })
-        XCTAssertNotNil(createdProvider)
-        XCTAssertTrue(createdProvider?.hasConfiguredAPIKey == true)
-        XCTAssertGreaterThanOrEqual(createdProvider?.models.count ?? 0, 5)
+        XCTAssertNil(createdId)
+        XCTAssertFalse(store.providers.contains(where: { $0.name == "OpenRouter Enterprise" }))
 
-        // Upsert custom model & test connectivity
         let customModel = ModelDescriptor(
-            id: "\(createdProviderId)/anthropic/claude-opus-5-custom",
+            id: "provider-openrouter/anthropic/claude-opus-5-custom",
             modelId: "anthropic/claude-opus-5-custom",
             name: "Claude Opus 5 Custom",
-            providerId: createdProviderId,
-            providerName: "OpenRouter Enterprise",
+            providerId: "provider-openrouter",
+            providerName: "OpenRouter",
             enabled: true,
             builtin: false,
             useRecommendedConfig: false,
@@ -294,27 +409,24 @@ final class ZCodeMobileUnitTests: XCTestCase {
             maxOutputTokens: 65_536,
             supportsVision: true,
             supportsPdf: true,
-            reasoningLevels: ["low", "medium", "high", "max"]
+            reasoningLevels: ["low", "medium", "high", "max"],
+            reasoningMap: "reasoning.level"
         )
-        store.upsertModel(providerId: createdProviderId, originalModelId: nil, draft: customModel)
-        XCTAssertTrue(store.allModels.contains(where: { $0.modelId == "anthropic/claude-opus-5-custom" }))
+        let upserted = await store.upsertModel(
+            providerId: "provider-openrouter",
+            originalModelId: nil,
+            draft: customModel
+        )
+        XCTAssertFalse(upserted)
+        XCTAssertFalse(store.providers
+            .first(where: { $0.id == "provider-openrouter" })?
+            .models.contains(where: { $0.modelId == "anthropic/claude-opus-5-custom" }) == true)
 
-        store.setModelEnabled(providerId: createdProviderId, modelId: "anthropic/claude-opus-5-custom", enabled: false)
-        XCTAssertFalse(store.allModels.contains(where: { $0.modelId == "anthropic/claude-opus-5-custom" }))
-
-        store.setModelEnabled(providerId: createdProviderId, modelId: "anthropic/claude-opus-5-custom", enabled: true)
-        await store.testModelConnectivity(providerId: createdProviderId, modelId: "anthropic/claude-opus-5-custom")
-        let tested = store.providers.first(where: { $0.id == createdProviderId })?.models.first(where: { $0.modelId == "anthropic/claude-opus-5-custom" })
-        XCTAssertEqual(tested?.connectivityState, .connected)
-
-        // Cleanup keychain entry created in unit test
-        store.deleteProvider(createdProviderId)
-
-        // 2. Subagent Name Validation & Studio CRUD / Overrides
-        XCTAssertNotNil(AppStore.validateSubagentName("ab")) // too short
-        XCTAssertNotNil(AppStore.validateSubagentName("bad_underscore")) // invalid char
-        XCTAssertNotNil(AppStore.validateSubagentName("Explore")) // reserved built-in
-        XCTAssertNotNil(AppStore.validateSubagentName("general-purpose")) // reserved built-in
+        // 2. Subagent Name Validation & Studio CRUD / Overrides (seed-mode local CRUD).
+        XCTAssertNotNil(AppStore.validateSubagentName("ab"))
+        XCTAssertNotNil(AppStore.validateSubagentName("bad_underscore"))
+        XCTAssertNotNil(AppStore.validateSubagentName("Explore"))
+        XCTAssertNotNil(AppStore.validateSubagentName("general-purpose"))
         XCTAssertNil(AppStore.validateSubagentName("security-reviewer-v2"))
 
         let newSubagent = SubagentDefinitionItem(
@@ -334,15 +446,22 @@ final class ZCodeMobileUnitTests: XCTestCase {
             injectAgentsMd: true,
             runInBackground: true
         )
-        store.saveSubagent(newSubagent, isNew: true)
+        let saved = await store.saveSubagent(newSubagent, isNew: true)
+        XCTAssertTrue(saved)
         XCTAssertTrue(store.subagents.contains(where: { $0.name == "security-reviewer-v2" }))
 
-        // Built-in Explore inline model override
         if let explore = store.subagents.first(where: { $0.name == "Explore" && $0.source == "built-in" }) {
-            store.setSubagentModelAndEffortOverride(id: explore.id, modelOverride: "openai/gpt-5.4", reasoningOverride: "high")
+            let overridden = await store.setSubagentModelAndEffortOverride(
+                id: explore.id,
+                modelOverride: "openai/gpt-5.4",
+                reasoningOverride: "high"
+            )
+            XCTAssertTrue(overridden)
             let updatedExplore = store.subagents.first(where: { $0.id == explore.id })
             XCTAssertEqual(updatedExplore?.modelOverride, "openai/gpt-5.4")
             XCTAssertEqual(updatedExplore?.reasoningOverride, "high")
+        } else {
+            XCTFail("Seed fixtures must include the built-in Explore subagent")
         }
     }
 }

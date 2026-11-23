@@ -791,14 +791,16 @@ public struct ZCodeOnboardingAndHubView: View {
 
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: 6) {
-                                Text(dev.deviceName)
+                                Text(dev.deviceName.isEmpty ? "Unknown device" : dev.deviceName)
                                     .font(.system(size: 14, weight: .semibold))
                                     .foregroundStyle(palette.foreground)
                                 Circle()
                                     .fill(dev.online ? palette.success : palette.foregroundMuted)
                                     .frame(width: 7, height: 7)
                             }
-                            Text("\(dev.online ? "Online" : "Offline") • v\(dev.version)")
+                            Text(dev.version.isEmpty
+                                 ? (dev.online ? "Online" : "Offline")
+                                 : "\(dev.online ? "Online" : "Offline") • v\(dev.version)")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(palette.foregroundSubtle)
                         }

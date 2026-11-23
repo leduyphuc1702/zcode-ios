@@ -14,6 +14,7 @@ public struct ZCodeComposerView: View {
     @State private var selectedWorkspaceFileIds: Set<String> = []
     @State private var showPlusMenuPopover: Bool = false
     @State private var showModelPickerPopover: Bool = false
+    @State private var showModelSettingsSheet: Bool = false
     @State private var showContextWindowPopover: Bool = false
     @State private var showAttachmentTypeDialog: Bool = false
 
@@ -88,12 +89,30 @@ public struct ZCodeComposerView: View {
         showContextWindowPopover = false
     }
 
+    private static let appPlanModeCommand = SlashCommandItem(
+        id: "app-plan-mode",
+        trigger: "Plan mode",
+        summary: "Enable Plan mode",
+        scope: "System",
+        promptTemplate: ""
+    )
+
+    /// Host slash commands plus the desktop app command ("Plan mode", `chat.slash.app.plan.label`).
+    private var composerSlashCommands: [SlashCommandItem] {
+        var list = store.slashCommands
+        if !list.contains(where: { $0.trigger == "Plan mode" }) {
+            list.insert(Self.appPlanModeCommand, at: 0)
+        }
+        return list
+    }
+
     private var filteredCommands: [SlashCommandItem] {
         guard case .slash(let q) = activePopover else { return [] }
+        let commands = composerSlashCommands
         if q.isEmpty {
-            return Array(store.slashCommands.prefix(5))
+            return Array(commands.prefix(5))
         }
-        return store.slashCommands.filter {
+        return commands.filter {
             $0.trigger.localizedCaseInsensitiveContains(q) || $0.summary.localizedCaseInsensitiveContains(q)
         }
     }
@@ -244,6 +263,18 @@ public struct ZCodeComposerView: View {
         }
         .sheet(isPresented: $showFileMentionPicker) {
             workspaceFilePickerSheet
+        }
+        .sheet(isPresented: $showModelSettingsSheet) {
+            NavigationStack {
+                ModelProviderSettingsView(store: store)
+                    .navigationTitle("Model settings")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showModelSettingsSheet = false }
+                        }
+                    }
+            }
         }
     }
 
@@ -886,7 +917,7 @@ public struct ZCodeComposerView: View {
                     withAnimation(.easeOut(duration: 0.14)) {
                         showModelPickerPopover = false
                     }
-                    store.showToast("Manage models on your computer")
+                    showModelSettingsSheet = true
                 }
             )
         } else {
@@ -934,7 +965,7 @@ public struct ZCodeComposerView: View {
                     withAnimation(.easeOut(duration: 0.14)) {
                         showModelPickerPopover = false
                     }
-                    store.showToast("Manage models on your computer")
+                    showModelSettingsSheet = true
                 }
             )
         }
@@ -1673,12 +1704,8 @@ public struct ZCodeComposerView: View {
 
     private func applySlashSelection(_ cmd: SlashCommandItem) {
         if cmd.trigger == "Plan mode" {
-            if var s = store.activeSession {
-                s.mode = .plan
-                store.activeSession = s
-            }
+            store.selectMode(.plan)
             store.composerText = ""
-            store.showToast("Switched to Plan mode")
             isInputFocused = true
             return
         }

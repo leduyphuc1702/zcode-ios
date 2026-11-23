@@ -53,6 +53,11 @@ public struct ChatTurnCardView: View {
         message.role == "user" ? "user" : "assistant"
     }
 
+    private var thoughtLabel: String {
+        guard message.thoughtDurationMs > 0 else { return "Thought" }
+        return "Thought · \(String(format: "%.1fs", Double(message.thoughtDurationMs) / 1000.0))"
+    }
+
     private var hasQuotableContent: Bool {
         !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -209,7 +214,7 @@ public struct ChatTurnCardView: View {
                             Image(systemName: "brain")
                                 .font(.system(size: 13, weight: .regular))
                                 .foregroundStyle(palette.foregroundMuted)
-                            Text("Thought · \(String(format: "%.1fs", Double(max(100, message.thoughtDurationMs)) / 1000.0))")
+                            Text(thoughtLabel)
                                 .font(.system(size: 13.5, weight: .regular))
                                 .foregroundStyle(palette.foregroundMuted)
                             Image(systemName: isThoughtExpanded ? "chevron.down" : "chevron.right")
@@ -339,7 +344,7 @@ public struct ChatTurnCardView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Copy message")
 
-                if !readOnly {
+                if !readOnly, store.v4CanTarget(messageId: message.id) {
                 Button {
                     store.toggleMessageFeedback(messageId: message.id, rating: 1)
                 } label: {
@@ -363,6 +368,12 @@ public struct ChatTurnCardView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Mark unhelpful")
+                } else if message.feedback != 0 {
+                    Image(systemName: message.feedback == 1 ? "hand.thumbsup.fill" : "hand.thumbsdown.fill")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(palette.foregroundMuted)
+                        .frame(width: 32, height: 34)
+                        .accessibilityLabel(message.feedback == 1 ? "Marked helpful" : "Marked unhelpful")
                 }
 
                 if !readOnly, store.v4CanTarget(messageId: message.id) {

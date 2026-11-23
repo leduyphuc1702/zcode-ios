@@ -388,6 +388,7 @@ extension AppStore {
             session.cachedTokens = usage.cumulativeCacheReadTokens
         }
         session.todos = projection.todos
+        Self.applyGoalState(conv.state["goal"] as? [String: Any], to: &session)
         session.subagentRuns = projection.subagentRuns
         session.queuedPrompts = projection.queue
         session.pendingPermission = projection.permission
@@ -931,5 +932,93 @@ extension AppStore {
         if unknown {
             scheduleWorkspaceRefresh(projectId: target.projectId, workspacePath: target.path, workspaceIdentity: target.identity)
         }
+    }
+
+    // MARK: - Goal & Workflow-run projections from the V4 snapshot
+
+    /// `snapshot.goal` (`Kf`) -> status panel Goal section.
+    static func applyGoalState(_ goal: [String: Any]?, to session: inout AgentTaskSession) {
+        guard let goal else {
+            session.goals = []
+            session.goalElapsedText = nil
+            session.goalPaused = false
+            return
+        }
+        let summary = ((goal["summaryTitle"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let objective = ((goal["objective"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = summary.isEmpty ? objective : summary
+        let status = (goal["status"] as? String) ?? ""
+        session.goals = title.isEmpty
+            ? []
+            : [GoalObjectiveItem(id: (goal["targetId"] as? String) ?? "goal", title: title, completed: status == "verified")]
+        session.goalPaused = status == "paused"
+        if let seconds = ZCodeV4.double(goal["timeUsedSeconds"]), seconds > 0 {
+            let total = Int(seconds)
+            if total >= 3600 {
+                session.goalElapsedText = "\(total / 3600)h \((total % 3600) / 60)m"
+            } else if total >= 60 {
+                session.goalElapsedText = "\(total / 60)m \(total % 60)s"
+            } else {
+                session.goalElapsedText = "\(total)s"
+            }
+        } else {
+            session.goalElapsedText = nil
+        }
+    }
+
+    /// Workflow runs reported by `snapshot.workflowRuns` for the active conversation.
+    public var activeWorkflowRunSummaries: [LiveWorkflowRunSummary] {
+        guard let session = activeSession, v4Owns(session.id),
+              let conv = v4Sync.conversation,
+              let container = conv.state["workflowRuns"] as? [String: Any],
+              let runs = container["runs"] as? [[String: Any]] else { return [] }
+        return runs.compactMap { run in
+            guard let runId = run["runId"] as? String, !runId.isEmpty else { return nil }
+            let status = (run["status"] as? String) ?? "pending"
+            var title: String?
+            for row in conv.rows {
+                let launch = (row["workflowLaunch"] as? [String: Any])
+                    ?? ((row["turnHeader"] as? [String: Any])?["workflowLaunch"] as? [String: Any])
+                guard let launch, (launch["runId"] as? String) == runId else { continue }
+                title = (launch["name"] as? String) ?? (launch["description"] as? String)
+                if title?.isEmpty == true { title = nil }
+                break
+            }
+            let usage = run["usage"] as? [String: Any]
+            let spent = ZCodeV4.int(usage?["spentTokens"])
+            let nodesUsed = ZCodeV4.int(usage?["nodesUsed"]) ?? (run["nodes"] as? [[String: Any]])?.count
+            var parts: [String] = []
+            if let nodesUsed, nodesUsed > 0 { parts.append("\(nodesUsed) steps") }
+            if let spent, spent > 0 { parts.append("\(spent) tokens") }
+            let detail: String = {
+                if let error = run["error"] as? String, !error.isEmpty { return error }
+                if let result = run["resultPreview"] as? String, !result.isEmpty { return result }
+                if let stop = run["stopReason"] as? String, !stop.isEmpty { return "Stopped: \(stop)" }
+                return ""
+            }()
+            return LiveWorkflowRunSummary(
+                id: runId,
+                title: title ?? "Workflow \(runId.prefix(8))",
+                status: status,
+                detail: detail,
+                usageText: parts.joined(separator: " · ")
+            )
+        }
+    }
+}
+
+public struct LiveWorkflowRunSummary: Identifiable, Equatable {
+    public var id: String
+    public var title: String
+    public var status: String
+    public var detail: String
+    public var usageText: String
+
+    public init(id: String, title: String, status: String, detail: String, usageText: String) {
+        self.id = id
+        self.title = title
+        self.status = status
+        self.detail = detail
+        self.usageText = usageText
     }
 }

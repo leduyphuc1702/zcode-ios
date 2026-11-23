@@ -4,10 +4,14 @@ public struct AutomationsWorkspacePageView: View {
     @Bindable var store: AppStore
     let isWideLayout: Bool
     @Environment(\.zcodePalette) private var palette
-    @State private var showCreateSheet = false
+    @State private var showEditor = false
+    @State private var editing: AutomationScheduleItem?
     @State private var draftTitle = ""
     @State private var draftCron = "0 9 * * 1-5"
     @State private var draftPrompt = ""
+    @State private var isSaving = false
+    @State private var pendingDelete: AutomationScheduleItem?
+    @State private var busyAutomationId: String?
 
     public init(store: AppStore, isWideLayout: Bool) {
         self.store = store
@@ -16,7 +20,6 @@ public struct AutomationsWorkspacePageView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Official ZCode Sub-page Header
             HStack(spacing: 10) {
                 if !isWideLayout {
                     Button {
@@ -38,7 +41,25 @@ public struct AutomationsWorkspacePageView: View {
                 Spacer()
 
                 Button {
-                    showCreateSheet = true
+                    Task { await store.loadAutomations() }
+                } label: {
+                    Group {
+                        if store.isLoadingAutomations {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .medium))
+                        }
+                    }
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 32, height: 32)
+                    .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Refresh scheduled tasks")
+
+                Button {
+                    beginCreate()
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "plus")
@@ -60,99 +81,255 @@ public struct AutomationsWorkspacePageView: View {
 
             Rectangle().fill(palette.border).frame(height: 1)
 
+            if let error = store.automationsError {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(palette.destructive)
+                    Text(error)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(palette.destructive.opacity(0.08))
+            }
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Schedule recurring ZCode tasks across workspaces or off-peak windows.")
+                    Text("Schedule recurring tasks or queue background work that runs during idle time.")
                         .font(.system(size: 13.5))
                         .foregroundStyle(palette.foregroundSubtle)
 
-                    ForEach($store.automations) { $auto in
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(auto.name)
-                                        .font(.system(size: 15, weight: .semibold))
-                                        .foregroundStyle(palette.foreground)
-                                    Text("\(auto.cronExpression) • \(auto.workspacePath)")
-                                        .font(.system(size: 12, design: .monospaced))
-                                        .foregroundStyle(palette.accentBlue)
-                                        .lineLimit(1)
-                                }
-                                Spacer()
-                                Toggle(isOn: $auto.enabled) { EmptyView() }
-                                    .labelsHidden()
-                            }
-
-                            Text(auto.prompt)
-                                .font(.system(size: 13))
-                                .foregroundStyle(palette.foregroundSubtle)
-
-                            HStack {
-                                Text(auto.lastRunStatus)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(palette.foregroundMuted)
-                                Spacer()
-                                Button {
-                                    store.createNewSession(initialPrompt: auto.prompt)
-                                } label: {
-                                    Label("Run Now", systemImage: "play.fill")
-                                        .font(.system(size: 12.5, weight: .semibold))
-                                        .foregroundStyle(palette.foreground)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 6)
-                                        .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 7))
-                                }
-                                .buttonStyle(.plain)
-                            }
+                    if store.isLoadingAutomations && store.automations.isEmpty {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                            Spacer()
                         }
-                        .padding(14)
-                        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
-                        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.border, lineWidth: 1))
+                        .padding(.vertical, 40)
+                    } else if store.automations.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "calendar.badge.clock")
+                                .font(.system(size: 28))
+                                .foregroundStyle(palette.foregroundMuted)
+                            Text("No scheduled tasks yet.")
+                                .font(.system(size: 14.5, weight: .semibold))
+                                .foregroundStyle(palette.foreground)
+                            Text("Create a task to run a prompt on a recurring schedule.")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .multilineTextAlignment(.center)
+                            Button("Create scheduled task") { beginCreate() }
+                                .font(.system(size: 13, weight: .semibold))
+                                .buttonStyle(.plain)
+                                .padding(.horizontal, 12)
+                                .frame(height: 32)
+                                .background(palette.brand, in: RoundedRectangle(cornerRadius: 8))
+                                .foregroundStyle(palette.brandForeground)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 36)
+                    }
+
+                    ForEach(store.automations) { auto in
+                        automationCard(auto)
                     }
                 }
                 .padding(16)
             }
         }
         .background(palette.background)
-        .sheet(isPresented: $showCreateSheet) {
-            NavigationStack {
-                Form {
-                    TextField("Automation Title", text: $draftTitle)
-                    TextField("Cron Expression", text: $draftCron)
-                        .textInputAutocapitalization(.never)
-                    TextField("Task Prompt", text: $draftPrompt, axis: .vertical)
-                        .lineLimit(3...6)
+        .task { await store.loadAutomations() }
+        .sheet(isPresented: $showEditor) {
+            editorSheet
+        }
+        .confirmationDialog(
+            "Delete scheduled task",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let target = pendingDelete {
+                    pendingDelete = nil
+                    Task { await store.deleteAutomation(id: target.id) }
                 }
-                .navigationTitle("New Automation")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { showCreateSheet = false }
-                    }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Create") {
-                            guard !draftTitle.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-                            store.automations.insert(
-                                AutomationScheduleItem(
-                                    id: UUID().uuidString,
-                                    name: draftTitle,
-                                    cronExpression: draftCron,
-                                    workspacePath: store.activeProject?.rootPath ?? "/Users/macos/workspace",
-                                    prompt: draftPrompt.isEmpty ? "Run scheduled workspace audit" : draftPrompt,
-                                    enabled: true,
-                                    lastRunStatus: "Ready",
-                                    lastRunAt: nil
-                                ),
-                                at: 0
-                            )
-                            draftTitle = ""
-                            draftPrompt = ""
-                            showCreateSheet = false
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("Delete “\(pendingDelete?.name ?? "")”? This cannot be undone.")
+        }
+    }
+
+    private func automationCard(_ auto: AutomationScheduleItem) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(auto.name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(palette.foreground)
+                    Text("\(auto.cronExpression) • \(auto.workspacePath.isEmpty ? "No workspace" : auto.workspacePath)")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(palette.accentBlue)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                if busyAutomationId == auto.id {
+                    ProgressView().controlSize(.mini)
+                }
+                Toggle(isOn: Binding(
+                    get: { auto.enabled },
+                    set: { newValue in
+                        busyAutomationId = auto.id
+                        Task {
+                            await store.setAutomationEnabled(id: auto.id, enabled: newValue)
+                            busyAutomationId = nil
                         }
+                    }
+                )) { EmptyView() }
+                .labelsHidden()
+                .disabled(busyAutomationId != nil)
+            }
+
+            Text(auto.prompt)
+                .font(.system(size: 13))
+                .foregroundStyle(palette.foregroundSubtle)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Text(auto.lastRunStatus)
+                    .font(.system(size: 12))
+                    .foregroundStyle(palette.foregroundMuted)
+                Spacer()
+                Button {
+                    busyAutomationId = auto.id
+                    Task {
+                        await store.runAutomationNow(id: auto.id)
+                        busyAutomationId = nil
+                    }
+                } label: {
+                    Label("Run now", systemImage: "play.fill")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(palette.foreground)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .disabled(busyAutomationId != nil)
+
+                Menu {
+                    Button {
+                        beginEdit(auto)
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        pendingDelete = auto
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(width: 30, height: 26)
+                        .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 7))
+                }
+            }
+        }
+        .padding(14)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.border, lineWidth: 1))
+    }
+
+    private var editorSheet: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Task title", text: $draftTitle)
+                    TextField("Schedule (cron)", text: $draftCron)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("Instructions", text: $draftPrompt, axis: .vertical)
+                        .lineLimit(3...6)
+                } footer: {
+                    Text("Runs on the workspace schedule you enter, for example 0 9 * * 1-5.")
+                }
+                if let error = store.automationsError {
+                    Section {
+                        Text(error)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(palette.destructive)
                     }
                 }
             }
-            .presentationDetents([.medium])
+            .navigationTitle(editing == nil ? "New scheduled task" : "Edit scheduled task")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { showEditor = false }
+                        .disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        saveDraft()
+                    } label: {
+                        if isSaving {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Text("Save")
+                        }
+                    }
+                    .disabled(isSaving)
+                }
+            }
+            .interactiveDismissDisabled(isSaving)
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func beginCreate() {
+        guard store.canManageAutomations else {
+            store.showToast(store.isRemoteRPCReady
+                ? "Open a workspace to manage its scheduled tasks."
+                : "Connect to your computer to manage scheduled tasks.")
+            return
+        }
+        editing = nil
+        draftTitle = ""
+        draftCron = "0 9 * * 1-5"
+        draftPrompt = ""
+        store.automationsError = nil
+        showEditor = true
+    }
+
+    private func beginEdit(_ auto: AutomationScheduleItem) {
+        editing = auto
+        draftTitle = auto.name
+        draftCron = auto.cronExpression
+        draftPrompt = auto.prompt
+        store.automationsError = nil
+        showEditor = true
+    }
+
+    private func saveDraft() {
+        guard !isSaving else { return }
+        isSaving = true
+        Task {
+            let ok: Bool
+            if let editing {
+                ok = await store.updateAutomation(id: editing.id, title: draftTitle, cronExpr: draftCron, prompt: draftPrompt)
+            } else {
+                ok = await store.createAutomation(title: draftTitle, cronExpr: draftCron, prompt: draftPrompt)
+            }
+            isSaving = false
+            if ok { showEditor = false }
         }
     }
 }
@@ -162,6 +339,7 @@ public struct PluginMarketplacePageView: View {
     let isWideLayout: Bool
     @Environment(\.zcodePalette) private var palette
     @State private var query = ""
+    @State private var busyPluginId: String?
 
     public init(store: AppStore, isWideLayout: Bool) {
         self.store = store
@@ -191,15 +369,29 @@ public struct PluginMarketplacePageView: View {
                 Spacer()
 
                 Button {
-                    store.showToast("Refreshed zcode-plugins-official catalog")
+                    Task {
+                        let ok = await store.refreshPluginMarketplace()
+                        if ok {
+                            store.showToast("Refreshed plugin catalog")
+                        } else if let error = store.pluginMarketplaceError {
+                            store.showToast("Couldn't refresh plugins. \(error)")
+                        }
+                    }
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(palette.foregroundSubtle)
-                        .frame(width: 32, height: 32)
-                        .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 8))
+                    Group {
+                        if store.isRefreshingPluginMarketplace {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .medium))
+                        }
+                    }
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 32, height: 32)
+                    .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Refresh plugin catalog")
             }
             .padding(.horizontal, 14)
             .frame(height: 46)
@@ -207,12 +399,27 @@ public struct PluginMarketplacePageView: View {
 
             Rectangle().fill(palette.border).frame(height: 1)
 
+            if let error = store.pluginMarketplaceError {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(palette.destructive)
+                    Text(error)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(palette.destructive.opacity(0.08))
+            }
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass")
                             .foregroundStyle(palette.foregroundSubtle)
-                        TextField("Search official ZCode plugins...", text: $query)
+                        TextField("Search plugins...", text: $query)
                             .font(.system(size: 14))
                             .foregroundStyle(palette.foreground)
                     }
@@ -221,40 +428,26 @@ public struct PluginMarketplacePageView: View {
                     .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 10))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(palette.border, lineWidth: 1))
 
-                    ForEach($store.plugins) { $plugin in
+                    if store.plugins.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "puzzlepiece.extension")
+                                .font(.system(size: 28))
+                                .foregroundStyle(palette.foregroundMuted)
+                            Text("No plugins found.")
+                                .font(.system(size: 14.5, weight: .semibold))
+                                .foregroundStyle(palette.foreground)
+                            Text("Connect to your computer and refresh to load the host plugin catalog.")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 36)
+                    }
+
+                    ForEach(store.plugins) { plugin in
                         if query.isEmpty || plugin.name.localizedCaseInsensitiveContains(query) || plugin.summary.localizedCaseInsensitiveContains(query) {
-                            HStack(alignment: .top, spacing: 12) {
-                                Image(systemName: "puzzlepiece.extension.fill")
-                                    .font(.system(size: 16))
-                                    .foregroundStyle(palette.accentBlue)
-                                    .frame(width: 36, height: 36)
-                                    .background(palette.accentBlue.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
-
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack(spacing: 6) {
-                                        Text(plugin.name)
-                                            .font(.system(size: 15, weight: .semibold))
-                                            .foregroundStyle(palette.foreground)
-                                        Text("v\(plugin.version)")
-                                            .font(.system(size: 11.5, design: .monospaced))
-                                            .foregroundStyle(palette.foregroundMuted)
-                                    }
-                                    Text(plugin.summary)
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(palette.foregroundSubtle)
-                                    Text(plugin.marketplace)
-                                        .font(.system(size: 11.5, design: .monospaced))
-                                        .foregroundStyle(palette.foregroundMuted)
-                                }
-
-                                Spacer()
-
-                                Toggle(isOn: $plugin.enabled) { EmptyView() }
-                                    .labelsHidden()
-                            }
-                            .padding(14)
-                            .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
-                            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.border, lineWidth: 1))
+                            pluginCard(plugin)
                         }
                     }
                 }
@@ -262,6 +455,84 @@ public struct PluginMarketplacePageView: View {
             }
         }
         .background(palette.background)
+        .task {
+            if !store.isUITestSeededMode, store.plugins.isEmpty {
+                _ = await store.refreshPluginMarketplace()
+            }
+        }
+    }
+
+    private func pluginCard(_ plugin: PluginCatalogItem) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "puzzlepiece.extension.fill")
+                .font(.system(size: 16))
+                .foregroundStyle(palette.accentBlue)
+                .frame(width: 36, height: 36)
+                .background(palette.accentBlue.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(plugin.name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(palette.foreground)
+                    Text("v\(plugin.version)")
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(palette.foregroundMuted)
+                    if !plugin.installed {
+                        Text("Available")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(palette.foregroundMuted)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(palette.surfaceHover, in: Capsule())
+                    }
+                }
+                Text(plugin.summary)
+                    .font(.system(size: 13))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(plugin.marketplace)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(palette.foregroundMuted)
+            }
+
+            Spacer()
+
+            if busyPluginId == plugin.id {
+                ProgressView().controlSize(.mini)
+            } else if plugin.installed {
+                Toggle(isOn: Binding(
+                    get: { plugin.enabled },
+                    set: { newValue in
+                        busyPluginId = plugin.id
+                        Task {
+                            _ = await store.setMarketplacePluginEnabled(id: plugin.id, enabled: newValue)
+                            busyPluginId = nil
+                        }
+                    }
+                )) { EmptyView() }
+                .labelsHidden()
+            } else {
+                Button {
+                    busyPluginId = plugin.id
+                    Task {
+                        _ = await store.installMarketplacePlugin(id: plugin.id)
+                        busyPluginId = nil
+                    }
+                } label: {
+                    Text("Install")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(palette.brandForeground)
+                        .padding(.horizontal, 11)
+                        .frame(height: 30)
+                        .background(palette.brand, in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.border, lineWidth: 1))
     }
 }
 

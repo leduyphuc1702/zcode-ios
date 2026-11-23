@@ -1026,7 +1026,7 @@ public struct WorkspaceSidebarView: View {
                             .clipShape(Circle())
                     }
 
-                    Text(store.userDisplayName)
+                    Text(store.userDisplayName.isEmpty ? "Not signed in" : store.userDisplayName)
                         .font(.system(size: 14.5, weight: .medium))
                         .foregroundStyle(palette.foreground)
                         .lineLimit(1)

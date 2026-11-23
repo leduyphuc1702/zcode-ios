@@ -80,10 +80,10 @@ public enum SeedWorkspaceFactory {
                 statusText: "Z.ai Account • Coding Plan",
                 logoKey: "zai",
                 models: [
-                    ModelDescriptor(id: "zai/GLM-5.3", modelId: "GLM-5.3", name: "GLM-5.3", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 200, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, badge: "Default"),
-                    ModelDescriptor(id: "zai/GLM-5.3-Flash", modelId: "GLM-5.3-Flash", name: "GLM-5.3 Flash", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 200, maxOutputTokens: 16_384, supportsVision: true, supportsReasoning: true, badge: "Fast"),
-                    ModelDescriptor(id: "zai/GLM-5.1", modelId: "GLM-5.1", name: "GLM-5.1 Coding", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 200, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, badge: nil),
-                    ModelDescriptor(id: "zai/GLM-5V-Turbo", modelId: "GLM-5V-Turbo", name: "GLM-5V Turbo", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 128, maxOutputTokens: 16_384, supportsVision: true, supportsVideo: true, supportsReasoning: true, badge: "Vision")
+                    ModelDescriptor(id: "zai/GLM-5.3", modelId: "GLM-5.3", name: "GLM-5.3", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 200, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, reasoningLevels: ["low", "medium", "high", "max"], badge: "Default"),
+                    ModelDescriptor(id: "zai/GLM-5.3-Flash", modelId: "GLM-5.3-Flash", name: "GLM-5.3 Flash", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 200, maxOutputTokens: 16_384, supportsVision: true, supportsReasoning: true, reasoningLevels: ["low", "medium", "high", "max"], badge: "Fast"),
+                    ModelDescriptor(id: "zai/GLM-5.1", modelId: "GLM-5.1", name: "GLM-5.1 Coding", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 200, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, reasoningLevels: ["low", "medium", "high", "max"], badge: nil),
+                    ModelDescriptor(id: "zai/GLM-5V-Turbo", modelId: "GLM-5V-Turbo", name: "GLM-5V Turbo", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 128, maxOutputTokens: 16_384, supportsVision: true, supportsVideo: true, supportsReasoning: true, reasoningLevels: ["low", "medium", "high", "max"], badge: "Vision")
                 ]
             ),
             ModelProviderConfig(
@@ -101,7 +101,7 @@ public enum SeedWorkspaceFactory {
                 statusText: "Team Organization Plan",
                 logoKey: "zai",
                 models: [
-                    ModelDescriptor(id: "zai-team/GLM-5.3", modelId: "GLM-5.3", name: "GLM-5.3 (Team)", providerId: "account:zai-team-coding-plan", providerName: "Z.ai Team", contextWindowK: 200, supportsVision: true, supportsReasoning: true)
+                    ModelDescriptor(id: "zai-team/GLM-5.3", modelId: "GLM-5.3", name: "GLM-5.3 (Team)", providerId: "account:zai-team-coding-plan", providerName: "Z.ai Team", contextWindowK: 200, supportsVision: true, supportsReasoning: true, reasoningLevels: ["low", "medium", "high", "max"], reasoningMap: "reasoning.level")
                 ]
             ),
             ModelProviderConfig(
@@ -119,7 +119,7 @@ public enum SeedWorkspaceFactory {
                 statusText: "Starter Entitlement",
                 logoKey: "zai",
                 models: [
-                    ModelDescriptor(id: "zai-start/GLM-5.3-Flash", modelId: "GLM-5.3-Flash", name: "GLM-5.3 Flash", providerId: "account:zai-start-plan", providerName: "Z.ai Start", contextWindowK: 128, supportsVision: true, supportsReasoning: true)
+                    ModelDescriptor(id: "zai-start/GLM-5.3-Flash", modelId: "GLM-5.3-Flash", name: "GLM-5.3 Flash", providerId: "account:zai-start-plan", providerName: "Z.ai Start", contextWindowK: 128, supportsVision: true, supportsReasoning: true, reasoningLevels: ["low", "medium", "high", "max"], reasoningMap: "reasoning.level")
                 ]
             ),
             ModelProviderConfig(
@@ -136,8 +136,8 @@ public enum SeedWorkspaceFactory {
                 statusText: "Anthropic Messages API",
                 logoKey: "anthropic",
                 models: [
-                    ModelDescriptor(id: "anthropic/claude-opus-4-7", modelId: "claude-opus-4-7", name: "Claude Opus 4.7", providerId: "anthropic", providerName: "Anthropic", builtin: false, contextWindowK: 200, maxOutputTokens: 32_768, supportsVision: true, supportsPdf: true, supportsReasoning: true, badge: "Max"),
-                    ModelDescriptor(id: "anthropic/claude-sonnet-4-6", modelId: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", providerId: "anthropic", providerName: "Anthropic", builtin: false, contextWindowK: 200, maxOutputTokens: 16_384, supportsVision: true, supportsPdf: true, supportsReasoning: true, badge: nil)
+                    ModelDescriptor(id: "anthropic/claude-opus-4-7", modelId: "claude-opus-4-7", name: "Claude Opus 4.7", providerId: "anthropic", providerName: "Anthropic", builtin: false, contextWindowK: 200, maxOutputTokens: 32_768, supportsVision: true, supportsPdf: true, supportsReasoning: true, reasoningLevels: ["low", "medium", "high", "max"], badge: "Max"),
+                    ModelDescriptor(id: "anthropic/claude-sonnet-4-6", modelId: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", providerId: "anthropic", providerName: "Anthropic", builtin: false, contextWindowK: 200, maxOutputTokens: 16_384, supportsVision: true, supportsPdf: true, supportsReasoning: true, reasoningLevels: ["low", "medium", "high", "max"], badge: nil)
                 ]
             ),
             ModelProviderConfig(
@@ -154,8 +154,8 @@ public enum SeedWorkspaceFactory {
                 statusText: "OpenAI Responses API",
                 logoKey: "openai",
                 models: [
-                    ModelDescriptor(id: "openai/gpt-5.4", modelId: "gpt-5.4", name: "GPT-5.4", providerId: "openai", providerName: "OpenAI", builtin: false, contextWindowK: 256, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, badge: nil),
-                    ModelDescriptor(id: "openai/gpt-5.3-codex", modelId: "gpt-5.3-codex", name: "GPT-5.3 Codex", providerId: "openai", providerName: "OpenAI", builtin: false, contextWindowK: 256, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, badge: "Codex")
+                    ModelDescriptor(id: "openai/gpt-5.4", modelId: "gpt-5.4", name: "GPT-5.4", providerId: "openai", providerName: "OpenAI", builtin: false, contextWindowK: 256, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, reasoningLevels: ["low", "medium", "high", "max"], badge: nil),
+                    ModelDescriptor(id: "openai/gpt-5.3-codex", modelId: "gpt-5.3-codex", name: "GPT-5.3 Codex", providerId: "openai", providerName: "OpenAI", builtin: false, contextWindowK: 256, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, reasoningLevels: ["low", "medium", "high", "max"], badge: "Codex")
                 ]
             )
         ]

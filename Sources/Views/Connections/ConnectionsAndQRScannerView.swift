@@ -94,7 +94,7 @@ public struct ConnectionsManagerSheetView: View {
                                         .font(.system(size: 11.5, design: .monospaced))
                                         .foregroundStyle(palette.foregroundSubtle)
                                         .lineLimit(1)
-                                    Text("\(conn.transport.title) • v\(conn.serverVersion) • \(conn.latencyMs)ms")
+                                    Text(connSubtitle(conn))
                                         .font(.system(size: 11))
                                         .foregroundStyle(palette.foregroundMuted)
                                 }
@@ -141,6 +141,13 @@ public struct ConnectionsManagerSheetView: View {
                 }
             }
         }
+    }
+
+    private func connSubtitle(_ conn: RemoteConnection) -> String {
+        var parts: [String] = [conn.transport.title]
+        if !conn.serverVersion.isEmpty { parts.append("v\(conn.serverVersion)") }
+        if conn.latencyMs > 0 { parts.append("\(conn.latencyMs)ms") }
+        return parts.joined(separator: " • ")
     }
 
     private var addConnectionFormSheet: some View {

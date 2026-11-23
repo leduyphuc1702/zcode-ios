@@ -6,11 +6,10 @@ import UIKit
 struct ModelProviderSettingsView: View {
     @Bindable var store: AppStore
     @Environment(\.zcodePalette) private var palette
-    @Environment(\.openURL) private var openURL
 
     @State private var searchText: String = ""
     @State private var showAddProviderSheet: Bool = false
-    @State private var selectedProviderIdForPush: String? = nil
+    @State private var createdProviderId: String? = nil
 
     private var accountProviders: [ModelProviderConfig] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -18,18 +17,18 @@ struct ModelProviderSettingsView: View {
             guard p.isAccountProvider else { return false }
             guard !q.isEmpty else { return true }
             return p.name.localizedCaseInsensitiveContains(q)
-                || p.models.contains(where: { $0.modelId.localizedCaseInsensitiveContains(q) || $0.name.localizedCaseInsensitiveContains(q) })
+                || p.models.contains(where: { $0.modelId.localizedCaseInsensitiveContains(q) })
         }
     }
 
     private var personalProviders: [ModelProviderConfig] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return store.providers.filter { p in
-            guard !p.isAccountProvider else { return false }
+        let ordered = store.providers.filter { !$0.isAccountProvider }
+        return ordered.filter { p in
             guard !q.isEmpty else { return true }
             return p.name.localizedCaseInsensitiveContains(q)
                 || p.baseURL.localizedCaseInsensitiveContains(q)
-                || p.models.contains(where: { $0.modelId.localizedCaseInsensitiveContains(q) || $0.name.localizedCaseInsensitiveContains(q) })
+                || p.models.contains(where: { $0.modelId.localizedCaseInsensitiveContains(q) })
         }
     }
 
@@ -39,42 +38,73 @@ struct ModelProviderSettingsView: View {
                 ZCodeSettingsPageHeader(
                     groupTitle: "Basics",
                     title: "Model settings",
-                    subtitle: "Manage built-in Z.ai Coding Plans and custom model providers. Enabled models appear immediately in the chat model picker."
+                    subtitle: "Manage custom model providers. Once configured, they can be selected during chat."
                 ) {
-                    Button {
-                        showAddProviderSheet = true
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 11.5, weight: .bold))
-                            Text("Add Provider")
+                    HStack(spacing: 8) {
+                        Button {
+                            Task { await store.syncProvidersAndModelsRPC() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .frame(width: 30, height: 30)
+                                .background(palette.card, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
-                        .foregroundStyle(palette.brandForeground)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 7)
-                        .background(palette.brand, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .buttonStyle(.plain)
+                        .disabled(!store.isRemoteRPCReady)
+                        .accessibilityLabel("Refresh providers")
+
+                        Button {
+                            showAddProviderSheet = true
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 11.5, weight: .bold))
+                                Text("Add provider")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                            }
+                            .foregroundStyle(palette.brandForeground)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 7)
+                            .background(palette.brand, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!store.isRemoteRPCReady)
+                        .accessibilityIdentifier("addProviderButton")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("addProviderButton")
+                }
+
+                if !store.isRemoteRPCReady {
+                    ZCodeSettingsCard {
+                        Text("Connect to your ZCode Desktop host to view and edit model providers.")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .padding(14)
+                    }
                 }
 
                 ZCodeSettingsSearchBar(
                     text: $searchText,
-                    placeholder: "Search providers or model IDs (e.g. GLM-5.3, claude-opus, gpt-5.4)…"
+                    placeholder: "Search providers or model IDs…"
                 )
 
-                // Group 1: Built-in Z.ai / BigModel Account Providers
-                if !accountProviders.isEmpty {
-                    ZCodeSettingsCard(
-                        title: "Z.ai & Official Account Plans",
-                        subtitle: "Authenticated via your signed-in Z.AI account session."
-                    ) {
+                // Group 1: host account/preset providers ("Providers").
+                ZCodeSettingsCard(
+                    title: "Providers",
+                    subtitle: "Built-in plan providers supplied by ZCode Desktop."
+                ) {
+                    if accountProviders.isEmpty {
+                        Text("No plan providers reported by the host.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(14)
+                    } else {
                         ForEach(Array(accountProviders.enumerated()), id: \.element.id) { idx, provider in
                             NavigationLink {
                                 ProviderDetailStudioView(store: store, providerId: provider.id)
                             } label: {
-                                providerRowContent(provider: provider, isPersonal: false, indexInPersonal: 0, totalPersonal: 0)
+                                providerRowContent(provider: provider, indexInPersonal: 0, totalPersonal: 0)
                             }
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("providerRow_\(provider.id)")
@@ -86,26 +116,27 @@ struct ModelProviderSettingsView: View {
                     }
                 }
 
-                // Group 2: Custom & Template Personal Providers
+                // Group 2: host personal providers ("Custom providers") in providerOrder.
                 ZCodeSettingsCard(
-                    title: "Custom & API-Key Providers",
-                    subtitle: "Configure Anthropic, OpenAI, OpenRouter, DeepSeek, Kimi, MiniMax, xAI, or private enterprise endpoints."
+                    title: "Custom providers",
+                    subtitle: "Providers you added, backed by API keys or custom endpoints."
                 ) {
                     if personalProviders.isEmpty {
                         VStack(spacing: 10) {
                             Image(systemName: "cpu")
                                 .font(.system(size: 24, weight: .light))
                                 .foregroundStyle(palette.foregroundMuted)
-                            Text("No custom model providers configured yet.")
+                            Text("No custom model providers yet")
                                 .font(.system(size: 13.5, weight: .medium))
                                 .foregroundStyle(palette.foregroundSubtle)
                             Button {
                                 showAddProviderSheet = true
                             } label: {
-                                Text("Add Provider from 17+ Official Templates")
+                                Text("Add provider")
                                     .font(.system(size: 13, weight: .semibold))
                                     .foregroundStyle(palette.accentBlue)
                             }
+                            .disabled(!store.isRemoteRPCReady)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 24)
@@ -116,7 +147,6 @@ struct ModelProviderSettingsView: View {
                             } label: {
                                 providerRowContent(
                                     provider: provider,
-                                    isPersonal: true,
                                     indexInPersonal: idx,
                                     totalPersonal: personalProviders.count
                                 )
@@ -136,24 +166,18 @@ struct ModelProviderSettingsView: View {
             .padding(.bottom, 32)
         }
         .background(palette.background)
-        .navigationDestination(isPresented: Binding(
-            get: { selectedProviderIdForPush != nil },
-            set: { if !$0 { selectedProviderIdForPush = nil } }
-        )) {
-            if let pid = selectedProviderIdForPush {
-                ProviderDetailStudioView(store: store, providerId: pid)
-            }
+        .navigationDestination(item: $createdProviderId) { pid in
+            ProviderDetailStudioView(store: store, providerId: pid)
         }
         .sheet(isPresented: $showAddProviderSheet) {
             AddProviderTemplateSheet(store: store) { createdId in
-                selectedProviderIdForPush = createdId
+                createdProviderId = createdId
             }
         }
     }
 
     private func providerRowContent(
         provider: ModelProviderConfig,
-        isPersonal: Bool,
         indexInPersonal: Int,
         totalPersonal: Int
     ) -> some View {
@@ -170,7 +194,7 @@ struct ModelProviderSettingsView: View {
 
                     if provider.isAccountProvider {
                         ZCodeSettingsPill(
-                            text: provider.entitled ? "Entitled" : "Plan Inactive",
+                            text: provider.entitled ? "Entitled" : (provider.accountAvailability == "available" ? "Not subscribed" : "Not signed in"),
                             tone: provider.entitled ? .success : .neutral
                         )
                     } else {
@@ -183,29 +207,25 @@ struct ModelProviderSettingsView: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(palette.foregroundSubtle)
 
-                    Text("•")
-                        .foregroundStyle(palette.foregroundMuted)
+                    Text("•").foregroundStyle(palette.foregroundMuted)
 
-                    if provider.isAccountProvider {
-                        Text(provider.statusText)
-                            .font(.system(size: 12))
-                            .foregroundStyle(palette.foregroundSubtle)
-                            .lineLimit(1)
-                    } else {
-                        Text(provider.hasConfiguredAPIKey ? "API key set" : "API key needed")
-                            .font(.system(size: 12))
-                            .foregroundStyle(provider.hasConfiguredAPIKey ? palette.success : palette.warning)
-                            .lineLimit(1)
-                    }
+                    Circle()
+                        .fill(statusColor(provider))
+                        .frame(width: 6, height: 6)
+
+                    Text(provider.statusText)
+                        .font(.system(size: 12))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .lineLimit(1)
                 }
             }
 
             Spacer(minLength: 6)
 
-            if isPersonal && totalPersonal > 1 {
+            if totalPersonal > 1 && !provider.isAccountProvider {
                 HStack(spacing: 2) {
                     Button {
-                        store.movePersonalProvider(providerId: provider.id, direction: -1)
+                        Task { await store.movePersonalProvider(providerId: provider.id, direction: -1) }
                     } label: {
                         Image(systemName: "chevron.up")
                             .font(.system(size: 11, weight: .semibold))
@@ -213,10 +233,10 @@ struct ModelProviderSettingsView: View {
                             .frame(width: 24, height: 26)
                     }
                     .buttonStyle(.plain)
-                    .disabled(indexInPersonal == 0)
+                    .disabled(indexInPersonal == 0 || !store.isRemoteRPCReady)
 
                     Button {
-                        store.movePersonalProvider(providerId: provider.id, direction: 1)
+                        Task { await store.movePersonalProvider(providerId: provider.id, direction: 1) }
                     } label: {
                         Image(systemName: "chevron.down")
                             .font(.system(size: 11, weight: .semibold))
@@ -224,13 +244,9 @@ struct ModelProviderSettingsView: View {
                             .frame(width: 24, height: 26)
                     }
                     .buttonStyle(.plain)
-                    .disabled(indexInPersonal == totalPersonal - 1)
+                    .disabled(indexInPersonal == totalPersonal - 1 || !store.isRemoteRPCReady)
                 }
             }
-
-            Circle()
-                .fill(provider.enabled ? palette.success : palette.foregroundMuted.opacity(0.4))
-                .frame(width: 7, height: 7)
 
             Image(systemName: "chevron.right")
                 .font(.system(size: 11.5, weight: .semibold))
@@ -241,26 +257,40 @@ struct ModelProviderSettingsView: View {
         .contentShape(Rectangle())
     }
 
+    private func statusColor(_ provider: ModelProviderConfig) -> Color {
+        if !provider.enabled { return palette.foregroundMuted.opacity(0.4) }
+        return provider.executable ? palette.success : palette.warning
+    }
+
     private func providerAvatar(for provider: ModelProviderConfig) -> some View {
-        let matchedTemplate = ProviderTemplateDescriptor.officialCatalog.first(where: { $0.id == provider.templateId || $0.id == provider.id })
-        let hex = matchedTemplate?.accentHex ?? (provider.isAccountProvider ? 0x3B82F6 : 0x6366F1)
-        let symbol = matchedTemplate?.logoSymbol ?? (provider.isAccountProvider ? "sparkles" : "server.rack")
+        let symbol: String = {
+            switch provider.logoKey.lowercased() {
+            case let key where key.contains("zai"), let key where key.contains("zhipu"): return "sparkles"
+            case let key where key.contains("bigmodel"): return "cpu.fill"
+            case let key where key.contains("anthropic"): return "a.circle.fill"
+            case let key where key.contains("openai"): return "circle.hexagongrid.fill"
+            case let key where key.contains("openrouter"): return "arrow.triangle.branch"
+            case let key where key.contains("deepseek"): return "waveform.path.ecg"
+            default: return provider.isAccountProvider ? "sparkles" : "server.rack"
+            }
+        }()
+        let tint = provider.isAccountProvider ? palette.accentBlue : palette.foregroundSubtle
         return ZStack {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color(hex: hex).opacity(0.16))
+                .fill(tint.opacity(0.13))
                 .frame(width: 34, height: 34)
                 .overlay(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .strokeBorder(Color(hex: hex).opacity(0.35), lineWidth: 1)
+                        .strokeBorder(tint.opacity(0.30), lineWidth: 1)
                 )
             Image(systemName: symbol)
                 .font(.system(size: 14.5, weight: .semibold))
-                .foregroundStyle(Color(hex: hex))
+                .foregroundStyle(tint)
         }
     }
 }
 
-// MARK: - Provider Detail & Connection Studio (`ProviderDetailStudioView`)
+// MARK: - Provider Detail & Connection Studio
 
 struct ProviderDetailStudioView: View {
     @Bindable var store: AppStore
@@ -273,12 +303,14 @@ struct ProviderDetailStudioView: View {
     @State private var draftBaseURL: String = ""
     @State private var draftFormat: ProviderAPIFormat = .anthropicMessages
     @State private var draftAPIKey: String = ""
-    @State private var draftEnabled: Bool = true
     @State private var revealAPIKey: Bool = false
+    @State private var isRenaming: Bool = false
+    @State private var isSavingConnection: Bool = false
+    @State private var showDeleteConfirm: Bool = false
     @State private var modelFilter: String = ""
     @State private var editingModel: ModelEditorTarget? = nil
-    @State private var showDeleteConfirm: Bool = false
     @State private var didLoadInitial: Bool = false
+    @State private var pendingDeleteModelId: String? = nil
 
     struct ModelEditorTarget: Identifiable {
         let id = UUID()
@@ -294,9 +326,7 @@ struct ProviderDetailStudioView: View {
         guard let provider else { return [] }
         let q = modelFilter.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return provider.models }
-        return provider.models.filter {
-            $0.modelId.localizedCaseInsensitiveContains(q) || $0.name.localizedCaseInsensitiveContains(q)
-        }
+        return provider.models.filter { $0.modelId.localizedCaseInsensitiveContains(q) }
     }
 
     var body: some View {
@@ -306,30 +336,7 @@ struct ProviderDetailStudioView: View {
             if let provider {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        ZCodeSettingsPageHeader(
-                            groupTitle: "Model settings",
-                            title: provider.name,
-                            subtitle: provider.isAccountProvider
-                                ? "Managed Z.ai / BigModel Coding Plan entitlement and built-in model availability."
-                                : "Configure API format, endpoint URL, authentication key, and model capabilities."
-                        ) {
-                            Toggle("", isOn: Binding(
-                                get: { provider.enabled },
-                                set: { newVal in
-                                    draftEnabled = newVal
-                                    store.updateProviderConnection(
-                                        providerId: provider.id,
-                                        name: draftName.isEmpty ? provider.name : draftName,
-                                        baseURL: draftBaseURL.isEmpty ? provider.baseURL : draftBaseURL,
-                                        apiFormat: draftFormat,
-                                        apiKey: nil,
-                                        enabled: newVal
-                                    )
-                                }
-                            ))
-                            .labelsHidden()
-                            .tint(palette.accentBlue)
-                        }
+                        header(provider)
 
                         if provider.isAccountProvider {
                             accountPlanStatusCard(provider)
@@ -339,13 +346,31 @@ struct ProviderDetailStudioView: View {
 
                         modelsSectionCard(provider)
 
+                        if !provider.issues.isEmpty {
+                            ZCodeSettingsCard(title: "Configuration issues") {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    ForEach(provider.issues) { issue in
+                                        HStack(alignment: .top, spacing: 6) {
+                                            Image(systemName: "exclamationmark.triangle.fill")
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(palette.warning)
+                                            Text(issue.message)
+                                                .font(.system(size: 12))
+                                                .foregroundStyle(palette.foregroundSubtle)
+                                        }
+                                    }
+                                }
+                                .padding(14)
+                            }
+                        }
+
                         if !provider.isAccountProvider {
                             Button(role: .destructive) {
                                 showDeleteConfirm = true
                             } label: {
                                 HStack {
                                     Image(systemName: "trash")
-                                    Text("Delete Provider")
+                                    Text("Delete provider")
                                         .fontWeight(.semibold)
                                 }
                                 .font(.system(size: 14))
@@ -359,6 +384,7 @@ struct ProviderDetailStudioView: View {
                                 )
                             }
                             .buttonStyle(.plain)
+                            .disabled(!store.isRemoteRPCReady)
                         }
                     }
                     .padding(.horizontal, 16)
@@ -372,14 +398,10 @@ struct ProviderDetailStudioView: View {
         }
         .navigationTitle(provider?.name ?? "Provider")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear {
-            guard !didLoadInitial, let p = provider else { return }
-            didLoadInitial = true
-            draftName = p.name
-            draftBaseURL = p.baseURL
-            draftFormat = p.apiFormat
-            draftEnabled = p.enabled
-            draftAPIKey = KeychainStore.load("provider_key_\(p.id)") ?? ""
+        .onAppear { loadDraftIfNeeded() }
+        .onChange(of: provider?.revision) { _, _ in
+            guard !isRenaming else { return }
+            loadDraftIfNeeded(force: true)
         }
         .sheet(item: $editingModel) { target in
             ModelConfigEditorSheet(
@@ -390,40 +412,164 @@ struct ProviderDetailStudioView: View {
             )
         }
         .confirmationDialog(
-            "Delete this provider and all its custom model settings?",
+            "Delete provider \"\(provider?.name ?? "")\"?",
             isPresented: $showDeleteConfirm,
             titleVisibility: .visible
         ) {
-            Button("Delete Provider", role: .destructive) {
-                store.deleteProvider(providerId)
-                dismiss()
+            Button("Delete", role: .destructive) {
+                Task {
+                    if await store.deleteProvider(providerId) { dismiss() }
+                }
             }
             Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the provider and its custom model settings.")
         }
+        .confirmationDialog(
+            "Delete model \"\(pendingDeleteModelId ?? "")\"?",
+            isPresented: Binding(get: { pendingDeleteModelId != nil }, set: { if !$0 { pendingDeleteModelId = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let mid = pendingDeleteModelId {
+                    Task { _ = await store.deleteModel(providerId: providerId, modelId: mid) }
+                }
+                pendingDeleteModelId = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeleteModelId = nil }
+        }
+    }
+
+    private func header(_ provider: ModelProviderConfig) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                if isRenaming {
+                    TextField("Provider name", text: $draftName)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(palette.foreground)
+                        .textFieldStyle(.plain)
+                        .onSubmit { commitRename(provider) }
+                        .submitLabel(.done)
+                        .accessibilityIdentifier("providerNameField")
+                } else {
+                    Text(provider.name)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(palette.foreground)
+                }
+
+                Spacer()
+
+                if !provider.isAccountProvider {
+                    Toggle("", isOn: Binding(
+                        get: { provider.enabled },
+                        set: { newValue in
+                            Task { _ = await store.saveProviderMeta(providerId: provider.id, enabled: newValue) }
+                        }
+                    ))
+                    .labelsHidden()
+                    .tint(palette.accentBlue)
+                    .disabled(!store.isRemoteRPCReady)
+
+                    Menu {
+                        Button {
+                            draftName = provider.name
+                            isRenaming = true
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        Divider()
+                        Button(role: .destructive) {
+                            showDeleteConfirm = true
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .frame(width: 30, height: 30)
+                            .background(palette.card, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .disabled(!store.isRemoteRPCReady)
+                }
+            }
+
+            Text(provider.isAccountProvider
+                 ? "Managed Z.ai / BigModel Coding Plan entitlement and built-in model availability."
+                 : "Configure API format, endpoint URL, authentication key, and model capabilities.")
+                .font(.system(size: 13))
+                .foregroundStyle(palette.foregroundSubtle)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if isRenaming {
+                HStack(spacing: 8) {
+                    Button("Save") { commitRename(provider) }
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(palette.brandForeground)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(palette.brand, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    Button("Cancel") {
+                        isRenaming = false
+                        draftName = provider.name
+                    }
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(palette.foregroundSubtle)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func commitRename(_ provider: ModelProviderConfig) {
+        let name = draftName
+        isRenaming = false
+        Task { _ = await store.saveProviderMeta(providerId: provider.id, name: name) }
+    }
+
+    private func loadDraftIfNeeded(force: Bool = false) {
+        guard let p = provider else { return }
+        if didLoadInitial && !force { return }
+        didLoadInitial = true
+        draftName = p.name
+        draftBaseURL = p.baseURL
+        draftFormat = p.apiFormat
+        // The host returns the plaintext key; the renderer masks it with a reveal toggle.
+        draftAPIKey = p.apiKey
+        revealAPIKey = false
     }
 
     private func accountPlanStatusCard(_ provider: ModelProviderConfig) -> some View {
         ZCodeSettingsCard(
-            title: "Plan & Authentication Status",
-            subtitle: "Uses your Z.AI OAuth session automatically without manual API keys."
+            title: "Plan & authentication status",
+            subtitle: "Uses your Z.AI account session without a manual API key."
         ) {
             ZCodeSettingsRow(
-                title: "Account Session",
-                subtitle: store.zaiAccount?.displayName ?? "Sign in with Z.AI in Remote Devices to activate plan entitlements"
+                title: "Account session",
+                subtitle: store.zaiAccount?.displayName ?? "Sign in with Z.AI in Remote devices to activate plan entitlements"
             ) {
                 ZCodeSettingsPill(
-                    text: provider.entitled ? "Active" : "Not Entitled",
-                    tone: provider.entitled ? .success : .warning
+                    text: provider.entitled ? "Entitled" : "Not subscribed",
+                    tone: provider.entitled ? .success : .neutral
                 )
             }
 
             Divider().overlay(palette.border)
 
-            ZCodeSettingsRow(
-                title: "Endpoint Base URL",
-                subtitle: provider.baseURL
-            ) {
-                ZCodeSettingsPill(text: provider.apiFormat.shortBadge, tone: .neutral)
+            ZCodeSettingsRow(title: "Base URL", subtitle: provider.baseURL.isEmpty ? "Not reported" : provider.baseURL) {
+                HStack(spacing: 4) {
+                    Image(systemName: "lock")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Read-only")
+                        .font(.system(size: 11.5, weight: .medium))
+                }
+                .foregroundStyle(palette.foregroundMuted)
+            }
+
+            Divider().overlay(palette.border)
+
+            ZCodeSettingsRow(title: "API format", subtitle: provider.apiFormat.displayName) {
+                EmptyView()
             }
 
             if let urlStr = provider.apiKeyManagementURL, let url = URL(string: urlStr) {
@@ -432,7 +578,7 @@ struct ProviderDetailStudioView: View {
                     openURL(url)
                 } label: {
                     HStack {
-                        Text("Manage Coding Plan Subscription")
+                        Text("Manage Coding Plan subscription")
                             .font(.system(size: 13.5, weight: .semibold))
                         Spacer()
                         Image(systemName: "arrow.up.right")
@@ -449,45 +595,15 @@ struct ProviderDetailStudioView: View {
 
     private func personalConnectionCard(_ provider: ModelProviderConfig) -> some View {
         ZCodeSettingsCard(
-            title: "Connection & API Credentials",
-            subtitle: "Stored encrypted in iOS Keychain and synced to ZCode Desktop when paired."
+            title: "Connection & API credentials",
+            subtitle: "Values are stored on your ZCode Desktop host; the API key is shown only here."
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Provider Name")
+                    Text("Base URL")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(palette.foregroundSubtle)
-                    TextField("Provider display name", text: $draftName)
-                        .font(.system(size: 14))
-                        .foregroundStyle(palette.foreground)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 9)
-                        .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("API Protocol Format")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(palette.foregroundSubtle)
-                    Picker("API Format", selection: $draftFormat) {
-                        ForEach(ProviderAPIFormat.allCases) { fmt in
-                            Text(fmt.displayName).tag(fmt)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 6)
-                    .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Endpoint Base URL")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(palette.foregroundSubtle)
-                    TextField("https://api.anthropic.com/v1", text: $draftBaseURL)
+                    TextField("https://api.example.com/v1", text: $draftBaseURL)
                         .font(.system(size: 13.5, design: .monospaced))
                         .foregroundStyle(palette.foreground)
                         .textInputAutocapitalization(.never)
@@ -500,8 +616,20 @@ struct ProviderDetailStudioView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
+                    Text("API format")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(palette.foregroundSubtle)
+                    ZCodeSettingsSelect(
+                        options: ProviderAPIFormat.allCases.map {
+                            ZCodeSettingsSelectOption(value: $0, label: $0.displayName)
+                        },
+                        selection: $draftFormat
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("API Key")
+                        Text("API key")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(palette.foregroundSubtle)
                         Spacer()
@@ -510,7 +638,7 @@ struct ProviderDetailStudioView: View {
                                 openURL(keyUrl)
                             } label: {
                                 HStack(spacing: 3) {
-                                    Text("Get API Key")
+                                    Text("Get API key")
                                     Image(systemName: "arrow.up.right")
                                 }
                                 .font(.system(size: 11.5, weight: .semibold))
@@ -523,9 +651,9 @@ struct ProviderDetailStudioView: View {
                     HStack(spacing: 8) {
                         Group {
                             if revealAPIKey {
-                                TextField("sk-…", text: $draftAPIKey)
+                                TextField("Enter API key", text: $draftAPIKey)
                             } else {
-                                SecureField(provider.hasConfiguredAPIKey ? "•••••••••••••••• (Configured)" : "Paste API key (sk-…)", text: $draftAPIKey)
+                                SecureField("Enter API key", text: $draftAPIKey)
                             }
                         }
                         .font(.system(size: 13.5, design: .monospaced))
@@ -541,66 +669,88 @@ struct ProviderDetailStudioView: View {
                                 .foregroundStyle(palette.foregroundSubtle)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel(revealAPIKey ? "Hide API key" : "Reveal API key")
 
                         Button {
-                            if let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !clip.isEmpty {
-                                draftAPIKey = clip
-                            }
+                            UIPasteboard.general.string = draftAPIKey
                         } label: {
-                            Text("Paste")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(palette.foreground)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(palette.card, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(palette.foregroundSubtle)
                         }
                         .buttonStyle(.plain)
+                        .disabled(draftAPIKey.isEmpty)
+                        .accessibilityLabel("Copy API key")
                     }
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
                     .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
+
+                    if draftAPIKey.isEmpty && provider.apiKey.isEmpty {
+                        Text("No API key configured.")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(palette.warning)
+                    }
                 }
 
                 Button {
-                    store.updateProviderConnection(
-                        providerId: provider.id,
-                        name: draftName,
-                        baseURL: draftBaseURL,
-                        apiFormat: draftFormat,
-                        apiKey: draftAPIKey.isEmpty && provider.hasConfiguredAPIKey ? nil : draftAPIKey,
-                        enabled: provider.enabled
-                    )
+                    saveConnection(provider)
                 } label: {
-                    Text("Save Connection Settings")
-                        .font(.system(size: 13.5, weight: .semibold))
-                        .foregroundStyle(palette.brandForeground)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(palette.brand, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    HStack(spacing: 6) {
+                        if isSavingConnection { ProgressView().controlSize(.mini) }
+                        Text(isSavingConnection ? "Saving…" : "Save")
+                            .font(.system(size: 13.5, weight: .semibold))
+                    }
+                    .foregroundStyle(palette.brandForeground)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(palette.brand, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .disabled(isSavingConnection || !store.isRemoteRPCReady)
                 .accessibilityIdentifier("saveProviderConnectionButton")
             }
             .padding(14)
         }
     }
 
+    private func saveConnection(_ provider: ModelProviderConfig) {
+        let keyToSend: String? = draftAPIKey == provider.apiKey ? nil : draftAPIKey
+        isSavingConnection = true
+        Task {
+            let ok = await store.saveProviderConnection(
+                providerId: provider.id,
+                name: draftName,
+                baseURL: draftBaseURL,
+                apiFormat: draftFormat,
+                apiKey: keyToSend
+            )
+            await MainActor.run { isSavingConnection = false }
+            if ok, let refreshed = store.providers.first(where: { $0.id == provider.id }) {
+                draftAPIKey = refreshed.apiKey
+                draftBaseURL = refreshed.baseURL
+                draftFormat = refreshed.apiFormat
+                draftName = refreshed.name
+            }
+        }
+    }
+
     private func modelsSectionCard(_ provider: ModelProviderConfig) -> some View {
         ZCodeSettingsCard(
-            title: "Models (\(provider.models.filter(\.enabled).count) enabled of \(provider.models.count))",
-            subtitle: "Test live model connectivity, toggle availability, or configure context window, modalities, and reasoning levels."
+            title: "Model list",
+            subtitle: "Models exposed to chat. Test connectivity, toggle availability, or edit capabilities."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    ZCodeSettingsSearchBar(text: $modelFilter, placeholder: "Filter models in \(provider.name)…")
+                    ZCodeSettingsSearchBar(text: $modelFilter, placeholder: "Filter models…")
 
                     if !provider.isAccountProvider {
                         Button {
                             editingModel = ModelEditorTarget(
                                 originalModelId: nil,
                                 draft: ModelDescriptor(
-                                    id: "\(provider.id)/custom-model",
+                                    id: "",
                                     modelId: "",
                                     name: "",
                                     providerId: provider.id,
@@ -608,15 +758,26 @@ struct ProviderDetailStudioView: View {
                                     enabled: true,
                                     builtin: false,
                                     useRecommendedConfig: true,
-                                    contextWindowK: 200,
-                                    maxOutputTokens: 32_768
+                                    contextWindowTokens: 0,
+                                    maxOutputTokens: 0,
+                                    supportsVision: false,
+                                    supportsVideo: false,
+                                    supportsAudio: false,
+                                    supportsPdf: false,
+                                    supportsToolCall: true,
+                                    supportsReasoning: false,
+                                    supportsJsonSchemaOutput: false,
+                                    supportsNativeWebSearch: false,
+                                    supportsMidConversationSystem: false,
+                                    reasoningLevels: [],
+                                    badge: nil
                                 )
                             )
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: "plus")
                                     .font(.system(size: 11.5, weight: .bold))
-                                Text("Add Model")
+                                Text("Add model")
                                     .font(.system(size: 12.5, weight: .semibold))
                             }
                             .foregroundStyle(palette.brandForeground)
@@ -625,6 +786,7 @@ struct ProviderDetailStudioView: View {
                             .background(palette.brand, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                         }
                         .buttonStyle(.plain)
+                        .disabled(!store.isRemoteRPCReady)
                         .accessibilityIdentifier("addModelButton")
                     }
                 }
@@ -632,7 +794,9 @@ struct ProviderDetailStudioView: View {
                 .padding(.top, 12)
 
                 if filteredModels.isEmpty {
-                    Text("No matching models.")
+                    Text(provider.models.isEmpty
+                         ? "No models are configured. Add a model to use it in chat."
+                         : "No matching models.")
                         .font(.system(size: 13))
                         .foregroundStyle(palette.foregroundSubtle)
                         .frame(maxWidth: .infinity)
@@ -640,7 +804,7 @@ struct ProviderDetailStudioView: View {
                 } else {
                     VStack(spacing: 0) {
                         ForEach(Array(filteredModels.enumerated()), id: \.element.id) { idx, model in
-                            modelRow(provider: provider, model: model)
+                            modelRow(provider: provider, model: model, index: idx, count: filteredModels.count)
                             if idx < filteredModels.count - 1 {
                                 Divider().overlay(palette.border).padding(.horizontal, 14)
                             }
@@ -652,7 +816,7 @@ struct ProviderDetailStudioView: View {
         }
     }
 
-    private func modelRow(provider: ModelProviderConfig, model: ModelDescriptor) -> some View {
+    private func modelRow(provider: ModelProviderConfig, model: ModelDescriptor, index: Int, count: Int) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
@@ -661,41 +825,26 @@ struct ProviderDetailStudioView: View {
                             .font(.system(size: 13.5, weight: .semibold, design: .monospaced))
                             .foregroundStyle(palette.foreground)
                             .lineLimit(1)
-                        if let badge = model.badge, !badge.isEmpty {
-                            ZCodeSettingsPill(text: badge, tone: .accent)
+                        if model.supportsVision {
+                            ZCodeSettingsPill(text: "Image", tone: .neutral)
                         }
-                        if !model.useRecommendedConfig {
-                            ZCodeSettingsPill(text: "Custom Rules", tone: .warning)
+                        if !model.reasoningLevels.isEmpty {
+                            ZCodeSettingsPill(text: "Thinking", tone: .neutral)
                         }
                     }
 
-                    // Capability Badges Row (Context Window + Modalities + Reasoning)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 5) {
-                            ZCodeSettingsPill(text: "\(model.formattedContextWindow) ctx", tone: .neutral)
-                            ZCodeSettingsPill(text: "\(max(1, model.maxOutputTokens / 1000))K out", tone: .neutral)
-                            if model.supportsVision {
-                                Label("Image", systemImage: "photo")
-                                    .font(.system(size: 10.5, weight: .medium))
-                                    .foregroundStyle(palette.foregroundSubtle)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2.5)
-                                    .background(palette.card, in: Capsule())
-                            }
-                            if model.supportsPdf {
-                                ZCodeSettingsPill(text: "PDF", tone: .neutral)
-                            }
-                            if model.supportsVideo {
-                                ZCodeSettingsPill(text: "Video", tone: .neutral)
-                            }
-                            if !model.reasoningLevels.isEmpty {
-                                Label("Thinking (\(model.reasoningLevels.count))", systemImage: "brain")
-                                    .font(.system(size: 10.5, weight: .medium))
-                                    .foregroundStyle(palette.foregroundSubtle)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2.5)
-                                    .background(palette.card, in: Capsule())
-                            }
+                    HStack(spacing: 5) {
+                        if model.contextWindowTokens > 0 {
+                            ZCodeSettingsPill(text: "Context window: \(model.formattedContextWindow)", tone: .neutral)
+                        }
+                        if model.maxOutputTokens > 0 {
+                            ZCodeSettingsPill(text: "Max output: \(model.maxOutputTokens)", tone: .neutral)
+                        }
+                        if !model.enabled {
+                            ZCodeSettingsPill(text: "Disabled", tone: .neutral)
+                        }
+                        if !model.executable && model.enabled {
+                            ZCodeSettingsPill(text: "Not ready", tone: .warning)
                         }
                     }
                 }
@@ -704,17 +853,18 @@ struct ProviderDetailStudioView: View {
 
                 Toggle("", isOn: Binding(
                     get: { model.enabled },
-                    set: { store.setModelEnabled(providerId: provider.id, modelId: model.modelId, enabled: $0) }
+                    set: { newValue in
+                        Task { _ = await store.setModelEnabled(providerId: provider.id, modelId: model.modelId, enabled: newValue) }
+                    }
                 ))
                 .labelsHidden()
                 .tint(palette.accentBlue)
+                .disabled(!store.isRemoteRPCReady)
             }
 
             HStack(spacing: 8) {
                 Button {
-                    Task {
-                        await store.testModelConnectivity(providerId: provider.id, modelId: model.modelId)
-                    }
+                    Task { await store.testModelConnectivity(providerId: provider.id, modelId: model.modelId) }
                 } label: {
                     HStack(spacing: 5) {
                         if model.connectivityState == .testing {
@@ -723,7 +873,7 @@ struct ProviderDetailStudioView: View {
                             Image(systemName: "bolt.horizontal.circle")
                                 .font(.system(size: 11.5, weight: .semibold))
                         }
-                        Text("Test Connectivity")
+                        Text(model.connectivityState == .testing ? "Testing…" : "Test")
                             .font(.system(size: 11.5, weight: .semibold))
                     }
                     .foregroundStyle(palette.foreground)
@@ -733,8 +883,10 @@ struct ProviderDetailStudioView: View {
                     .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
+                .disabled(!store.isRemoteRPCReady || !provider.enabled || model.connectivityState == .testing)
+                .accessibilityLabel(provider.enabled ? "Test model" : "Enable provider first")
 
-                if let connMsg = model.connectivityMessage {
+                if let connMsg = model.connectivityMessage, model.connectivityState != .testing {
                     ZCodeSettingsPill(
                         text: connMsg,
                         tone: model.connectivityState == .connected ? .success : (model.connectivityState == .failed ? .danger : .neutral)
@@ -747,21 +899,19 @@ struct ProviderDetailStudioView: View {
                     Button {
                         editingModel = ModelEditorTarget(originalModelId: model.modelId, draft: model)
                     } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "slider.horizontal.3")
-                            Text("Configure")
-                        }
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(palette.foregroundSubtle)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(palette.card, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 12))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .frame(width: 28, height: 26)
+                            .background(palette.card, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                     }
                     .buttonStyle(.plain)
+                    .disabled(!store.isRemoteRPCReady)
+                    .accessibilityLabel("Edit model")
 
                     if !model.builtin {
                         Button(role: .destructive) {
-                            store.deleteModel(providerId: provider.id, modelId: model.modelId)
+                            pendingDeleteModelId = model.modelId
                         } label: {
                             Image(systemName: "trash")
                                 .font(.system(size: 12))
@@ -770,6 +920,31 @@ struct ProviderDetailStudioView: View {
                                 .background(palette.destructive.opacity(0.10), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         }
                         .buttonStyle(.plain)
+                        .disabled(!store.isRemoteRPCReady)
+                    }
+
+                    HStack(spacing: 2) {
+                        Button {
+                            Task { await store.moveModel(providerId: provider.id, modelId: model.modelId, direction: -1) }
+                        } label: {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .frame(width: 22, height: 24)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(index == 0 || !store.isRemoteRPCReady)
+
+                        Button {
+                            Task { await store.moveModel(providerId: provider.id, modelId: model.modelId, direction: 1) }
+                        } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .frame(width: 22, height: 24)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(index == count - 1 || !store.isRemoteRPCReady)
                     }
                 }
             }
@@ -779,7 +954,7 @@ struct ProviderDetailStudioView: View {
     }
 }
 
-// MARK: - Add Provider Template Picker Sheet (1:1 ZCode `BGn` Dialog)
+// MARK: - Add Provider Template Picker (host `providerTemplates` only)
 
 struct AddProviderTemplateSheet: View {
     @Bindable var store: AppStore
@@ -787,287 +962,184 @@ struct AddProviderTemplateSheet: View {
 
     @Environment(\.zcodePalette) private var palette
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
-
     @State private var query: String = ""
-    @State private var selectedTemplate: ProviderTemplateDescriptor? = nil
-    @State private var isCustomMode: Bool = false
+    @State private var creatingTemplateId: String? = nil
+    @State private var isCreatingCustom: Bool = false
 
-    @State private var providerName: String = ""
-    @State private var apiFormat: ProviderAPIFormat = .anthropicMessages
-    @State private var baseURL: String = ""
-    @State private var apiKey: String = ""
+    private func filtered(_ list: [ProviderTemplateDescriptor]) -> [ProviderTemplateDescriptor] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return list }
+        return list.filter { $0.displayName().localizedCaseInsensitiveContains(q) || $0.id.localizedCaseInsensitiveContains(q) }
+    }
 
     private var zhipuTemplates: [ProviderTemplateDescriptor] {
-        filterTemplates(ProviderTemplateDescriptor.officialCatalog.filter { $0.category == "zhipu" })
+        filtered(store.providerTemplates.filter(\.isZhipuFamily))
     }
 
     private var otherTemplates: [ProviderTemplateDescriptor] {
-        filterTemplates(ProviderTemplateDescriptor.officialCatalog.filter { $0.category == "other" })
-    }
-
-    private func filterTemplates(_ list: [ProviderTemplateDescriptor]) -> [ProviderTemplateDescriptor] {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return list }
-        return list.filter {
-            $0.name.localizedCaseInsensitiveContains(q)
-                || $0.id.localizedCaseInsensitiveContains(q)
-                || $0.defaultModelIds.contains(where: { $0.localizedCaseInsensitiveContains(q) })
-        }
+        filtered(store.providerTemplates.filter { !$0.isZhipuFamily })
     }
 
     var body: some View {
         NavigationStack {
             ZStack {
                 palette.background.ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ZCodeSettingsSearchBar(text: $query, placeholder: "Search provider templates…")
 
-                if selectedTemplate != nil || isCustomMode {
-                    configureSelectedTemplateView
-                } else {
-                    templateCatalogView
+                        Button {
+                            createCustom()
+                        } label: {
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .fill(palette.accentBlue.opacity(0.14))
+                                        .frame(width: 36, height: 36)
+                                    Image(systemName: "plus.square.dashed")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundStyle(palette.accentBlue)
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Custom endpoint")
+                                        .font(.system(size: 14.5, weight: .semibold))
+                                        .foregroundStyle(palette.foreground)
+                                    Text("Connect any Anthropic Messages or OpenAI-compatible endpoint")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(palette.foregroundSubtle)
+                                }
+                                Spacer()
+                                if isCreatingCustom {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(palette.foregroundMuted)
+                                }
+                            }
+                            .padding(13)
+                            .background(palette.panel, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.borderStrong, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(creatingTemplateId != nil || isCreatingCustom || !store.isRemoteRPCReady)
+                        .accessibilityIdentifier("createCustomProviderButton")
+
+                        if store.providerTemplates.isEmpty {
+                            ZCodeSettingsCard {
+                                Text("The host did not report any provider templates. Add a custom endpoint instead.")
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                                    .padding(14)
+                            }
+                        }
+
+                        if !zhipuTemplates.isEmpty {
+                            ZCodeSettingsCard(title: "Zhipu") {
+                                ForEach(Array(zhipuTemplates.enumerated()), id: \.element.id) { idx, tpl in
+                                    templateRow(tpl)
+                                    if idx < zhipuTemplates.count - 1 {
+                                        Divider().overlay(palette.border).padding(.leading, 52)
+                                    }
+                                }
+                            }
+                        }
+
+                        if !otherTemplates.isEmpty {
+                            ZCodeSettingsCard(title: "Other") {
+                                ForEach(Array(otherTemplates.enumerated()), id: \.element.id) { idx, tpl in
+                                    templateRow(tpl)
+                                    if idx < otherTemplates.count - 1 {
+                                        Divider().overlay(palette.border).padding(.leading, 52)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(16)
                 }
             }
-            .navigationTitle(selectedTemplate != nil || isCustomMode ? "Configure Provider" : "Add Model Provider")
+            .navigationTitle("Add provider")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if selectedTemplate != nil || isCustomMode {
-                        Button("Back") {
-                            selectedTemplate = nil
-                            isCustomMode = false
-                        }
-                    } else {
-                        Button("Cancel") { dismiss() }
-                    }
+                    Button("Cancel") { dismiss() }
                 }
             }
         }
         .preferredColorScheme(palette.isDark ? .dark : .light)
     }
 
-    private var templateCatalogView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                ZCodeSettingsSearchBar(text: $query, placeholder: "Search 17 official provider templates…")
-
-                Button {
-                    selectedTemplate = nil
-                    isCustomMode = true
-                    providerName = ""
-                    apiFormat = .openaiChatCompletions
-                    baseURL = "https://"
-                    apiKey = ""
-                } label: {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .fill(palette.accentBlue.opacity(0.16))
-                                .frame(width: 36, height: 36)
-                            Image(systemName: "plus.square.dashed")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(palette.accentBlue)
-                        }
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Create Custom Provider")
-                                .font(.system(size: 14.5, weight: .semibold))
-                                .foregroundStyle(palette.foreground)
-                            Text("Connect any OpenAI-compatible, Anthropic Messages, vLLM, or Ollama endpoint")
-                                .font(.system(size: 12))
-                                .foregroundStyle(palette.foregroundSubtle)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(palette.foregroundMuted)
-                    }
-                    .padding(13)
-                    .background(palette.panel, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.borderStrong, lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("createCustomProviderButton")
-
-                if !zhipuTemplates.isEmpty {
-                    ZCodeSettingsCard(title: "Z.ai & BigModel Templates") {
-                        ForEach(Array(zhipuTemplates.enumerated()), id: \.element.id) { idx, tpl in
-                            templateRow(tpl)
-                            if idx < zhipuTemplates.count - 1 {
-                                Divider().overlay(palette.border).padding(.leading, 52)
-                            }
-                        }
-                    }
-                }
-
-                if !otherTemplates.isEmpty {
-                    ZCodeSettingsCard(title: "Model Providers") {
-                        ForEach(Array(otherTemplates.enumerated()), id: \.element.id) { idx, tpl in
-                            templateRow(tpl)
-                            if idx < otherTemplates.count - 1 {
-                                Divider().overlay(palette.border).padding(.leading, 52)
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(16)
-        }
-    }
-
     private func templateRow(_ tpl: ProviderTemplateDescriptor) -> some View {
         Button {
-            selectedTemplate = tpl
-            isCustomMode = false
-            providerName = tpl.name
-            apiFormat = tpl.apiFormat
-            baseURL = tpl.defaultBaseURL
-            apiKey = ""
+            create(template: tpl)
         } label: {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color(hex: tpl.accentHex).opacity(0.16))
+                        .fill(palette.accentBlue.opacity(0.12))
                         .frame(width: 32, height: 32)
-                    Image(systemName: tpl.logoSymbol)
+                    Image(systemName: tpl.isZhipuFamily ? "sparkles" : "server.rack")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color(hex: tpl.accentHex))
+                        .foregroundStyle(palette.accentBlue)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(tpl.name)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(palette.foreground)
-                        ZCodeSettingsPill(text: tpl.apiFormat.shortBadge, tone: .neutral)
-                    }
-                    Text("\(tpl.defaultModelIds.prefix(3).joined(separator: ", "))\(tpl.defaultModelIds.count > 3 ? " +\(tpl.defaultModelIds.count - 3)" : "")")
-                        .font(.system(size: 11.5, design: .monospaced))
+                    Text(tpl.displayName())
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(palette.foreground)
+                    Text(tpl.apiFormat.displayName)
+                        .font(.system(size: 11.5))
                         .foregroundStyle(palette.foregroundSubtle)
                         .lineLimit(1)
                 }
                 Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(palette.foregroundMuted)
+                if creatingTemplateId == tpl.id {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(palette.foregroundMuted)
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(creatingTemplateId != nil || isCreatingCustom || !store.isRemoteRPCReady)
         .accessibilityIdentifier("providerTemplate_\(tpl.id)")
     }
 
-    private var configureSelectedTemplateView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                ZCodeSettingsCard(
-                    title: selectedTemplate?.name ?? "Custom Provider",
-                    subtitle: "Review endpoint defaults and enter your API key."
-                ) {
-                    VStack(alignment: .leading, spacing: 13) {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("Provider Name")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(palette.foregroundSubtle)
-                            TextField("e.g. Anthropic Production", text: $providerName)
-                                .font(.system(size: 14))
-                                .foregroundStyle(palette.foreground)
-                                .padding(10)
-                                .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
-                        }
-
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("API Format")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(palette.foregroundSubtle)
-                            Picker("API Format", selection: $apiFormat) {
-                                ForEach(ProviderAPIFormat.allCases) { fmt in
-                                    Text(fmt.displayName).tag(fmt)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                        }
-
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("Base URL")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(palette.foregroundSubtle)
-                            TextField("https://api.example.com/v1", text: $baseURL)
-                                .font(.system(size: 13.5, design: .monospaced))
-                                .foregroundStyle(palette.foreground)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .padding(10)
-                                .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
-                        }
-
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack {
-                                Text("API Key")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(palette.foregroundSubtle)
-                                Spacer()
-                                if let uStr = selectedTemplate?.apiKeyURL, let u = URL(string: uStr) {
-                                    Button("Get API Key ↗") { openURL(u) }
-                                        .font(.system(size: 11.5, weight: .semibold))
-                                        .foregroundStyle(palette.accentBlue)
-                                }
-                            }
-                            SecureField("sk-… (saved to Keychain)", text: $apiKey)
-                                .font(.system(size: 13.5, design: .monospaced))
-                                .foregroundStyle(palette.foreground)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .padding(10)
-                                .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
-                        }
-
-                        if let tpl = selectedTemplate, !tpl.defaultModelIds.isEmpty {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("Pre-configured Models (\(tpl.defaultModelIds.count))")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(palette.foregroundSubtle)
-                                Text(tpl.defaultModelIds.joined(separator: "  •  "))
-                                    .font(.system(size: 11.5, design: .monospaced))
-                                    .foregroundStyle(palette.foregroundMuted)
-                            }
-                        }
-
-                        Button {
-                            let createdId = store.createProvider(
-                                template: selectedTemplate,
-                                customName: providerName,
-                                baseURL: baseURL,
-                                apiFormat: apiFormat,
-                                apiKey: apiKey
-                            )
-                            dismiss()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                onCreated(createdId)
-                            }
-                        } label: {
-                            Text("Create Provider")
-                                .font(.system(size: 14.5, weight: .semibold))
-                                .foregroundStyle(palette.brandForeground)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 11)
-                                .background(palette.brand, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(baseURL.trimmingCharacters(in: .whitespacesAndNewlines).count < 8)
-                        .accessibilityIdentifier("confirmCreateProviderButton")
-                    }
-                    .padding(14)
+    private func create(template: ProviderTemplateDescriptor) {
+        creatingTemplateId = template.id
+        Task {
+            let id = await store.createProvider(template: template, customName: template.displayName())
+            await MainActor.run {
+                creatingTemplateId = nil
+                if let id {
+                    dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { onCreated(id) }
                 }
             }
-            .padding(16)
+        }
+    }
+
+    private func createCustom() {
+        isCreatingCustom = true
+        Task {
+            let id = await store.createProvider(template: nil, customName: "New provider")
+            await MainActor.run {
+                isCreatingCustom = false
+                if let id {
+                    dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { onCreated(id) }
+                }
+            }
         }
     }
 }
 
-// MARK: - Add / Edit Model Configuration Sheet (1:1 ZCode `JHn` Dialog)
+// MARK: - Add / Edit Model Configuration (1:1 host `ModelConfig` shape)
 
 struct ModelConfigEditorSheet: View {
     @Bindable var store: AppStore
@@ -1078,236 +1150,430 @@ struct ModelConfigEditorSheet: View {
     @Environment(\.zcodePalette) private var palette
     @Environment(\.dismiss) private var dismiss
 
-    @State private var showAdvanced: Bool = true
-    private let contextPresets: [Int] = [32_000, 64_000, 128_000, 200_000, 256_000, 1_000_000]
-    private let outputPresets: [Int] = [8_192, 16_384, 32_768, 65_536]
-    private let candidateReasoningLevels: [String] = ["off", "minimal", "low", "medium", "high", "max"]
+    @State private var contextText: String = ""
+    @State private var maxOutputText: String = ""
+    @State private var newReasoningLevel: String = ""
+    @State private var validationMessage: String? = nil
+    @State private var isSaving: Bool = false
+    @State private var smartStatus: String? = nil
+    @State private var didCaptureOriginal: Bool = false
+    @State private var originalSnapshot: ModelDescriptor? = nil
+    @State private var resolveTask: Task<Void, Never>? = nil
+
+    private var provider: ModelProviderConfig? {
+        store.providers.first(where: { $0.id == providerId })
+    }
+
+    private var modelIdReadOnly: Bool {
+        initialModel.builtin
+    }
 
     var body: some View {
         NavigationStack {
             ZStack {
                 palette.background.ignoresSafeArea()
-
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         ZCodeSettingsCard(
-                            title: originalModelId == nil ? "Add Model" : "Edit Model Configuration",
-                            subtitle: "Configure model identifier, token limits, input modalities, and reasoning levels."
+                            title: originalModelId == nil ? "Add model" : "Model configuration",
+                            subtitle: "Configure the model identifier, token limits, modalities and reasoning levels."
                         ) {
                             VStack(alignment: .leading, spacing: 14) {
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text("Model ID")
                                         .font(.system(size: 12, weight: .semibold))
                                         .foregroundStyle(palette.foregroundSubtle)
-                                    TextField("e.g. claude-opus-5 or gpt-5.4", text: $initialModel.modelId)
+                                    TextField("Model ID", text: $initialModel.modelId)
                                         .font(.system(size: 14, design: .monospaced))
-                                        .foregroundStyle(palette.foreground)
+                                        .foregroundStyle(modelIdReadOnly ? palette.foregroundSubtle : palette.foreground)
                                         .textInputAutocapitalization(.never)
                                         .autocorrectionDisabled()
+                                        .disabled(modelIdReadOnly)
                                         .padding(10)
                                         .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                                         .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
-                                }
-
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text("Display Label (Optional)")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(palette.foregroundSubtle)
-                                    TextField("Defaults to Model ID", text: $initialModel.name)
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(palette.foreground)
-                                        .padding(10)
-                                        .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                                        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
+                                        .onSubmit { resolveRecommendedIfNeeded() }
                                 }
 
                                 Toggle(isOn: $initialModel.useRecommendedConfig) {
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text("Follow Recommended Configuration")
+                                        Text("Smart configuration")
                                             .font(.system(size: 13.5, weight: .medium))
                                             .foregroundStyle(palette.foreground)
-                                        Text("Automatically inherit ZCode's built-in capability & token rules for known model IDs")
+                                        Text("Match ZCode's built-in capability and token defaults for this model ID.")
                                             .font(.system(size: 11.5))
                                             .foregroundStyle(palette.foregroundSubtle)
                                     }
                                 }
                                 .tint(palette.accentBlue)
+                                .onChange(of: initialModel.useRecommendedConfig) { _, on in
+                                    if on { resolveRecommendedIfNeeded() } else { smartStatus = nil }
+                                }
+
+                                if let smartStatus {
+                                    Text(smartStatus)
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(palette.success)
+                                }
 
                                 Divider().overlay(palette.border)
 
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack {
-                                        Text("Context Window")
+                                HStack(alignment: .top, spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text("Context window")
                                             .font(.system(size: 12, weight: .semibold))
                                             .foregroundStyle(palette.foregroundSubtle)
-                                        Spacer()
-                                        Text("\(initialModel.contextWindowTokens) tokens")
-                                            .font(.system(size: 12, design: .monospaced))
-                                            .foregroundStyle(palette.accentBlue)
+                                        TextField(inheritedContextPlaceholder, text: $contextText)
+                                            .keyboardType(.numberPad)
+                                            .font(.system(size: 14, design: .monospaced))
+                                            .padding(10)
+                                            .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
                                     }
-                                    ScrollView(.horizontal, showsIndicators: false) {
-                                        HStack(spacing: 6) {
-                                            ForEach(contextPresets, id: \.self) { val in
-                                                let label = val >= 1_000_000 ? "1M" : "\(val / 1000)K"
-                                                Button {
-                                                    initialModel.contextWindowTokens = val
-                                                } label: {
-                                                    Text(label)
-                                                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                                                        .foregroundStyle(initialModel.contextWindowTokens == val ? palette.brandForeground : palette.foreground)
-                                                        .padding(.horizontal, 10)
-                                                        .padding(.vertical, 6)
-                                                        .background(
-                                                            initialModel.contextWindowTokens == val ? palette.brand : palette.card,
-                                                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                                        )
-                                                }
-                                                .buttonStyle(.plain)
-                                            }
-                                        }
-                                    }
-                                }
 
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack {
-                                        Text("Max Output Tokens")
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text("Max output tokens")
                                             .font(.system(size: 12, weight: .semibold))
                                             .foregroundStyle(palette.foregroundSubtle)
-                                        Spacer()
-                                        Text("\(initialModel.maxOutputTokens) tokens")
-                                            .font(.system(size: 12, design: .monospaced))
-                                            .foregroundStyle(palette.accentBlue)
-                                    }
-                                    HStack(spacing: 6) {
-                                        ForEach(outputPresets, id: \.self) { val in
-                                            Button {
-                                                initialModel.maxOutputTokens = val
-                                            } label: {
-                                                Text("\(val / 1024)K")
-                                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                                                    .foregroundStyle(initialModel.maxOutputTokens == val ? palette.brandForeground : palette.foreground)
-                                                    .padding(.horizontal, 10)
-                                                    .padding(.vertical, 6)
-                                                    .background(
-                                                        initialModel.maxOutputTokens == val ? palette.brand : palette.card,
-                                                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                                    )
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
+                                        TextField(inheritedMaxOutputPlaceholder, text: $maxOutputText)
+                                            .keyboardType(.numberPad)
+                                            .font(.system(size: 14, design: .monospaced))
+                                            .padding(10)
+                                            .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
                                     }
                                 }
                             }
                             .padding(14)
                         }
 
-                        // Collapsible Advanced Configuration (`inputFormat`, `capabilities`, `optionSpecs.reasoningLevel`)
                         ZCodeSettingsCard(
-                            title: "Advanced Capabilities & Modalities",
-                            subtitle: "Fine-tune multimodal inputs, tool calling, structured output, and reasoning levels."
+                            title: "Advanced settings",
+                            subtitle: "Input types, capabilities, and reasoning level mapping."
                         ) {
                             VStack(alignment: .leading, spacing: 12) {
+                                Text("Input types")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(palette.foregroundSubtle)
                                 HStack(spacing: 8) {
-                                    ZCodeSettingsPill(text: "Text Input (Locked ON)", tone: .success)
-                                    Spacer()
+                                    ZCodeSettingsPill(text: "Text (required)", tone: .success)
+                                    modalityToggle("Image", isOn: $initialModel.supportsVision)
+                                    modalityToggle("Video", isOn: $initialModel.supportsVideo)
+                                    modalityToggle("PDF", isOn: $initialModel.supportsPdf)
                                 }
-
-                                Toggle("Image / Vision Input", isOn: $initialModel.supportsVision)
-                                    .font(.system(size: 13.5))
-                                    .tint(palette.accentBlue)
-                                Toggle("PDF Document Input", isOn: $initialModel.supportsPdf)
-                                    .font(.system(size: 13.5))
-                                    .tint(palette.accentBlue)
-                                Toggle("Video Input", isOn: $initialModel.supportsVideo)
-                                    .font(.system(size: 13.5))
-                                    .tint(palette.accentBlue)
-                                Toggle("Audio Input", isOn: $initialModel.supportsAudio)
-                                    .font(.system(size: 13.5))
-                                    .tint(palette.accentBlue)
 
                                 Divider().overlay(palette.border)
 
-                                Toggle("Tool / Function Calling", isOn: $initialModel.supportsToolCall)
-                                    .font(.system(size: 13.5))
+                                Text("Model capabilities")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                                Toggle("Structured output", isOn: $initialModel.supportsJsonSchemaOutput)
+                                    .font(.system(size: 13))
                                     .tint(palette.accentBlue)
-                                Toggle("JSON Schema Structured Output", isOn: $initialModel.supportsJsonSchemaOutput)
-                                    .font(.system(size: 13.5))
+                                Toggle("Native web search", isOn: $initialModel.supportsNativeWebSearch)
+                                    .font(.system(size: 13))
                                     .tint(palette.accentBlue)
-                                Toggle("Native Web Search", isOn: $initialModel.supportsNativeWebSearch)
-                                    .font(.system(size: 13.5))
-                                    .tint(palette.accentBlue)
-                                Toggle("Mid-Conversation System Instructions", isOn: $initialModel.supportsMidConversationSystem)
-                                    .font(.system(size: 13.5))
+                                Toggle("Mid-conversation system messages", isOn: $initialModel.supportsMidConversationSystem)
+                                    .font(.system(size: 13))
                                     .tint(palette.accentBlue)
 
                                 Divider().overlay(palette.border)
 
                                 VStack(alignment: .leading, spacing: 8) {
-                                    Text("Supported Reasoning Effort Levels")
+                                    Text("Reasoning levels (low to high)")
                                         .font(.system(size: 12, weight: .semibold))
                                         .foregroundStyle(palette.foregroundSubtle)
+                                    Text("Order matters: the highest level is the default. Levels must be non-empty and unique.")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(palette.foregroundMuted)
 
-                                    ScrollView(.horizontal, showsIndicators: false) {
-                                        HStack(spacing: 6) {
-                                            ForEach(candidateReasoningLevels, id: \.self) { level in
-                                                let active = initialModel.reasoningLevels.contains(level)
+                                    if initialModel.reasoningLevels.isEmpty {
+                                        Text("This model exposes no reasoning levels.")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(palette.foregroundMuted)
+                                    } else {
+                                        ForEach(Array(initialModel.reasoningLevels.enumerated()), id: \.offset) { idx, level in
+                                            HStack(spacing: 8) {
+                                                Text("\(idx + 1)")
+                                                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                                    .foregroundStyle(palette.foregroundMuted)
+                                                    .frame(width: 18)
+                                                Text(level)
+                                                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                                    .foregroundStyle(palette.foreground)
+                                                Spacer()
                                                 Button {
-                                                    if active {
-                                                        initialModel.reasoningLevels.removeAll { $0 == level }
-                                                    } else {
-                                                        initialModel.reasoningLevels.append(level)
-                                                    }
+                                                    guard idx > 0 else { return }
+                                                    initialModel.reasoningLevels.swapAt(idx, idx - 1)
+                                                } label: {
+                                                    Image(systemName: "chevron.up")
+                                                        .font(.system(size: 11, weight: .semibold))
+                                                        .foregroundStyle(idx == 0 ? palette.foregroundMuted.opacity(0.35) : palette.foregroundSubtle)
+                                                        .frame(width: 26, height: 24)
+                                                }
+                                                .buttonStyle(.plain)
+                                                .disabled(idx == 0)
+
+                                                Button {
+                                                    guard idx < initialModel.reasoningLevels.count - 1 else { return }
+                                                    initialModel.reasoningLevels.swapAt(idx, idx + 1)
+                                                } label: {
+                                                    Image(systemName: "chevron.down")
+                                                        .font(.system(size: 11, weight: .semibold))
+                                                        .foregroundStyle(idx == initialModel.reasoningLevels.count - 1 ? palette.foregroundMuted.opacity(0.35) : palette.foregroundSubtle)
+                                                        .frame(width: 26, height: 24)
+                                                }
+                                                .buttonStyle(.plain)
+                                                .disabled(idx == initialModel.reasoningLevels.count - 1)
+
+                                                Button(role: .destructive) {
+                                                    initialModel.reasoningLevels.remove(at: idx)
                                                     initialModel.supportsReasoning = !initialModel.reasoningLevels.isEmpty
                                                 } label: {
-                                                    HStack(spacing: 4) {
-                                                        Image(systemName: active ? "checkmark.circle.fill" : "circle")
-                                                            .font(.system(size: 11))
-                                                        Text(level)
-                                                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                                                    }
-                                                    .foregroundStyle(active ? palette.accentBlue : palette.foregroundSubtle)
-                                                    .padding(.horizontal, 9)
-                                                    .padding(.vertical, 6)
-                                                    .background(
-                                                        active ? palette.accentBlue.opacity(0.15) : palette.card,
-                                                        in: Capsule()
-                                                    )
+                                                    Image(systemName: "trash")
+                                                        .font(.system(size: 11.5))
+                                                        .foregroundStyle(palette.destructive)
+                                                        .frame(width: 26, height: 24)
                                                 }
                                                 .buttonStyle(.plain)
                                             }
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 7)
+                                            .background(palette.card, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                                         }
                                     }
+
+                                    HStack(spacing: 8) {
+                                        TextField("Add level (e.g. medium)", text: $newReasoningLevel)
+                                            .font(.system(size: 13, design: .monospaced))
+                                            .textInputAutocapitalization(.never)
+                                            .autocorrectionDisabled()
+                                            .padding(9)
+                                            .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
+                                        Button("Add") { addReasoningLevel() }
+                                            .font(.system(size: 12.5, weight: .semibold))
+                                            .foregroundStyle(palette.brandForeground)
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 9)
+                                            .background(palette.brand, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                            .buttonStyle(.plain)
+                                            .disabled(newReasoningLevel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                    }
+
+                                    Text("Reasoning parameter mapping")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(palette.foregroundSubtle)
+                                    TextEditor(text: $initialModel.reasoningMap)
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .scrollContentBackground(.hidden)
+                                        .frame(minHeight: 90)
+                                        .padding(8)
+                                        .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(palette.inputBorder, lineWidth: 1))
+                                    Text("Opaque host expression used to map the selected level to provider parameters.")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(palette.foregroundMuted)
                                 }
                             }
                             .padding(14)
+                        }
+
+                        if let validationMessage {
+                            Text(validationMessage)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(palette.destructive)
                         }
                     }
                     .padding(16)
                 }
             }
-            .navigationTitle(originalModelId == nil ? "Add Model" : initialModel.modelId)
+            .navigationTitle(originalModelId == nil ? "Add model" : initialModel.modelId)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Save") {
-                        let cleanId = initialModel.modelId.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !cleanId.isEmpty else { return }
-                        initialModel.modelId = cleanId
-                        if initialModel.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            initialModel.name = cleanId
-                        }
-                        store.upsertModel(providerId: providerId, originalModelId: originalModelId, draft: initialModel)
-                        dismiss()
+                    Button {
+                        save()
+                    } label: {
+                        if isSaving { ProgressView().controlSize(.small) }
+                        else { Text("Save").fontWeight(.semibold) }
                     }
-                    .fontWeight(.semibold)
-                    .disabled(initialModel.modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isSaving)
                     .accessibilityIdentifier("saveModelConfigButton")
+                }
+                ToolbarItem(placement: .bottomBar) {
+                    Button("Reset form") { resetForm() }
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(palette.accentBlue)
+                        .disabled(isSaving)
+                }
+            }
+            .onAppear {
+                if !didCaptureOriginal {
+                    didCaptureOriginal = true
+                    originalSnapshot = initialModel
+                    contextText = initialModel.contextWindowTokens > 0 ? String(initialModel.contextWindowTokens) : ""
+                    maxOutputText = initialModel.maxOutputTokens > 0 ? String(initialModel.maxOutputTokens) : ""
                 }
             }
         }
         .preferredColorScheme(palette.isDark ? .dark : .light)
+    }
+
+    private var inheritedContextPlaceholder: String {
+        if let provider, let current = provider.models.first(where: { $0.modelId == originalModelId || $0.modelId == initialModel.modelId }), current.contextWindowTokens > 0 {
+            return String(current.contextWindowTokens)
+        }
+        return "Inherited"
+    }
+
+    private var inheritedMaxOutputPlaceholder: String {
+        if let provider, let current = provider.models.first(where: { $0.modelId == originalModelId || $0.modelId == initialModel.modelId }), current.maxOutputTokens > 0 {
+            return String(current.maxOutputTokens)
+        }
+        return "Inherited"
+    }
+
+    private func modalityToggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        Button {
+            isOn.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: isOn.wrappedValue ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 11))
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(isOn.wrappedValue ? palette.accentBlue : palette.foregroundSubtle)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(isOn.wrappedValue ? palette.accentBlue.opacity(0.13) : palette.card, in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func addReasoningLevel() {
+        let level = newReasoningLevel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !level.isEmpty else { return }
+        guard !initialModel.reasoningLevels.contains(level) else {
+            validationMessage = "Reasoning levels must be unique."
+            return
+        }
+        initialModel.reasoningLevels.append(level)
+        initialModel.supportsReasoning = true
+        newReasoningLevel = ""
+        validationMessage = nil
+    }
+
+    private func resetForm() {
+        guard let originalSnapshot else { return }
+        initialModel = originalSnapshot
+        contextText = initialModel.contextWindowTokens > 0 ? String(initialModel.contextWindowTokens) : ""
+        maxOutputText = initialModel.maxOutputTokens > 0 ? String(initialModel.maxOutputTokens) : ""
+        validationMessage = nil
+    }
+
+    private func resolveRecommendedIfNeeded() {
+        guard initialModel.useRecommendedConfig, store.isRemoteRPCReady else { return }
+        let modelId = initialModel.modelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !modelId.isEmpty else { return }
+        resolveTask?.cancel()
+        resolveTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            guard let resolved = await store.resolveModelConfig(
+                providerId: providerId,
+                modelId: modelId,
+                originalModelId: originalModelId,
+                personalConfig: nil
+            ) else { return }
+            guard let effective = resolved["effectiveConfig"] as? [String: Any] else { return }
+            await MainActor.run {
+                applyResolvedConfig(effective)
+                smartStatus = "Smart configuration matched for this model"
+            }
+        }
+    }
+
+    private func applyResolvedConfig(_ config: [String: Any]) {
+        let props = (config["properties"] as? [String: Any]) ?? [:]
+        let inFmt = (props["inputFormat"] as? [String: Any]) ?? [:]
+        let opt = (config["optionSpecs"] as? [String: Any]) ?? [:]
+        let rSpec = (opt["reasoningLevel"] as? [String: Any]) ?? [:]
+        let maxSpec = (opt["maxOutputTokens"] as? [String: Any]) ?? [:]
+        if let ctx = props["contextWindow"] as? Int, ctx > 0 {
+            initialModel.contextWindowTokens = ctx
+            contextText = String(ctx)
+        }
+        if let maxOut = maxSpec["max"] as? Int, maxOut > 0 {
+            initialModel.maxOutputTokens = maxOut
+            maxOutputText = String(maxOut)
+        }
+        initialModel.maxOutputTokensMap = (maxSpec["map"] as? String) ?? initialModel.maxOutputTokensMap
+        initialModel.supportsVision = (inFmt["supportsImage"] as? Bool) ?? initialModel.supportsVision
+        initialModel.supportsVideo = (inFmt["supportsVideo"] as? Bool) ?? initialModel.supportsVideo
+        initialModel.supportsPdf = (inFmt["supportsPdf"] as? Bool) ?? initialModel.supportsPdf
+        initialModel.supportsAudio = (inFmt["supportsAudio"] as? Bool) ?? initialModel.supportsAudio
+        initialModel.supportsToolCall = (props["supportsToolCall"] as? Bool) ?? initialModel.supportsToolCall
+        initialModel.supportsJsonSchemaOutput = (props["supportsJsonSchemaOutput"] as? Bool) ?? initialModel.supportsJsonSchemaOutput
+        initialModel.supportsNativeWebSearch = (props["supportsNativeWebSearch"] as? Bool) ?? initialModel.supportsNativeWebSearch
+        initialModel.supportsMidConversationSystem = (props["supportsMidConversationSystem"] as? Bool) ?? initialModel.supportsMidConversationSystem
+        initialModel.requiresMfjsToolSchema = (props["requiresMfjsToolSchema"] as? Bool) ?? initialModel.requiresMfjsToolSchema
+        if let values = rSpec["values"] as? [String], !values.isEmpty {
+            initialModel.reasoningLevels = values
+            initialModel.supportsReasoning = true
+        }
+        if let map = rSpec["map"] as? String, !map.isEmpty {
+            initialModel.reasoningMap = map
+        }
+    }
+
+    private func save() {
+        validationMessage = nil
+        let cleanId = initialModel.modelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else {
+            validationMessage = "Model ID is required."
+            return
+        }
+        if let ctx = Int(contextText.trimmingCharacters(in: .whitespacesAndNewlines)), ctx > 0 {
+            initialModel.contextWindowTokens = ctx
+        } else {
+            validationMessage = "Context window is required and must be a positive number."
+            return
+        }
+        if let maxOut = Int(maxOutputText.trimmingCharacters(in: .whitespacesAndNewlines)), maxOut > 0 {
+            initialModel.maxOutputTokens = maxOut
+        } else if maxOutputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            initialModel.maxOutputTokens = 0
+        } else {
+            validationMessage = "Max output tokens must be a positive number."
+            return
+        }
+        if !initialModel.reasoningLevels.isEmpty {
+            guard initialModel.reasoningLevels.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                validationMessage = "Reasoning levels must be non-empty."
+                return
+            }
+            guard Set(initialModel.reasoningLevels).count == initialModel.reasoningLevels.count else {
+                validationMessage = "Reasoning levels must be unique."
+                return
+            }
+            guard !initialModel.reasoningMap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                validationMessage = "Reasoning level mapping is required when levels are configured."
+                return
+            }
+        }
+        initialModel.modelId = cleanId
+        isSaving = true
+        Task {
+            let ok = await store.upsertModel(providerId: providerId, originalModelId: originalModelId, draft: initialModel)
+            await MainActor.run {
+                isSaving = false
+                if ok { dismiss() }
+            }
+        }
     }
 }

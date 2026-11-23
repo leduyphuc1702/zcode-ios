@@ -14,6 +14,7 @@
 		1636649924905FA1722B314B /* SyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EF5C5479CF1065EF2D6BFC4 /* SyntaxHighlighter.swift */; };
 		16DA12BB2D613A83BA8E8241 /* AppStore+Inspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D2F70C50DC1875B9476E22D /* AppStore+Inspector.swift */; };
 		19F25C9FF02EFC5A59FBD808 /* IntegratedTerminalAndWorkflowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AB6F02A1B7BBF48EE8CB260 /* IntegratedTerminalAndWorkflowView.swift */; };
+		2F2E6BB94A765EC11617BEA2 /* AppStore+AutomationsAndMarketplace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D041FD9000D2C96F8FB523C8 /* AppStore+AutomationsAndMarketplace.swift */; };
 		30D20502E70D9D8260DE28E5 /* ZCodeTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = F52F4C3A00113F895908DF99 /* ZCodeTheme.swift */; };
 		32DFAD5BB6931139B8566E12 /* ContextWindowPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE1E67CAD789E9E31380BAA4 /* ContextWindowPopover.swift */; };
 		393C832AED9C71BD528BA8C4 /* EnterpriseSettingsCenterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3785C763CD4D2B8EFBB3DAF7 /* EnterpriseSettingsCenterView.swift */; };
@@ -123,6 +124,7 @@
 		C69B1E89A391AD40E347D376 /* ZCodeVQLCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeVQLCodec.swift; sourceTree = "<group>"; };
 		C9D939E56E02C2E684BBB319 /* ZCodeMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeMobileApp.swift; sourceTree = "<group>"; };
 		CB0773D4E22E0F5640DBD1AF /* NativeMediaDocumentViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMediaDocumentViewer.swift; sourceTree = "<group>"; };
+		D041FD9000D2C96F8FB523C8 /* AppStore+AutomationsAndMarketplace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppStore+AutomationsAndMarketplace.swift"; sourceTree = "<group>"; };
 		D09D693F4924B4228D575194 /* AutomationsAndMarketplaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationsAndMarketplaceViews.swift; sourceTree = "<group>"; };
 		E7FA08E0EA1DAE1C411E5E04 /* SecurityLockAndPatternView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecurityLockAndPatternView.swift; sourceTree = "<group>"; };
 		ED9D97A18BD8FEFCC2CE75A0 /* V4ProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V4ProtocolTests.swift; sourceTree = "<group>"; };
@@ -137,6 +139,7 @@
 			isa = PBXGroup;
 			children = (
 				BEEF67AED666A980DECF571A /* AppStore.swift */,
+				D041FD9000D2C96F8FB523C8 /* AppStore+AutomationsAndMarketplace.swift */,
 				0D2F70C50DC1875B9476E22D /* AppStore+Inspector.swift */,
 				085607869B2EC5917323082D /* AppStore+Live.swift */,
 				7BECCF783A3E0AA64E59421D /* AppStore+ProjectTree.swift */,
@@ -459,6 +462,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				86C553DFBE825356589D7E7E /* AgentChatCanvasView.swift in Sources */,
+				2F2E6BB94A765EC11617BEA2 /* AppStore+AutomationsAndMarketplace.swift in Sources */,
 				16DA12BB2D613A83BA8E8241 /* AppStore+Inspector.swift in Sources */,
 				DB51EFE049A0DF9E91641E18 /* AppStore+Live.swift in Sources */,
 				9C554A6AF149269E74D194C0 /* AppStore+ProjectTree.swift in Sources */,
@@ -574,7 +578,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 31608;
+				CURRENT_PROJECT_VERSION = 31609;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -683,7 +687,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 31608;
+				CURRENT_PROJECT_VERSION = 31609;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

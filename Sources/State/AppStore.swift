@@ -85,14 +85,34 @@ public final class AppStore {
     public var embeddedBrowserAllowInsecureCertificates: Bool = false { didSet { persistPreferences() } }
     public var fileSearchIgnorePatterns: String = "node_modules/\n.git/\nDerivedData/\nbuild/\n*.ipa" { didSet { persistPreferences() } }
     public var cuaHelperEnabled: Bool = true { didSet { persistPreferences() } }
-    public var computerUseComposerEntryHidden: Bool = false { didSet { persistPreferences() } }
-    public var cuaAccessibilityStatus: String = "granted"
-    public var cuaScreenRecordingStatus: String = "granted"
+    /// Host setting `computerUseComposerEntryHidden` (desktop default: true).
+    public var computerUseComposerEntryHidden: Bool = true { didSet { persistPreferences() } }
+    /// No host RPC exposes macOS TCC permission state in 3.16.3; never claim "granted".
+    public var cuaAccessibilityStatus: String = "unknown"
+    public var cuaScreenRecordingStatus: String = "unknown"
     public var remoteStartupAutoReconnectEnabled: Bool = true { didSet { persistPreferences() } }
-    public var shortcutBindings: [ShortcutBindingItem] = ShortcutBindingItem.officialDefaults
-    public var pluginMarketplaces: [String] = ["zcode-plugins-official"]
+    /// Host setting `shortcutBindings` (`Record<string,string[]>`). Starts empty; populated only from the host.
+    public var shortcutBindings: [ShortcutBindingItem] = []
+    public var pluginMarketplaces: [String] = []
     public var isSyncingSettings: Bool = false
     public var lastSettingsSyncedAt: Date? = nil
+
+    // MARK: - Live Provider/Host Settings Data (never seeded)
+    /// `provider-settings.getView.providerTemplates` (host-sourced).
+    public var providerTemplates: [ProviderTemplateDescriptor] = []
+    public var providerOrder: [String] = []
+    /// `provider-settings.getView.revision` (STRING).
+    public var providerSettingsRevision: String = ""
+    /// Real `usage-stats.getAppUsageSnapshot` (nil until the host answers).
+    public var usageStatsSnapshot: UsageStatsSnapshot? = nil
+    public var usageStatsError: String? = nil
+    public var usageStatsLoading: Bool = false
+    /// Real `usage-stats.getEntitlementSnapshot` (nil when unavailable).
+    public var codingPlanEntitlement: CodingPlanEntitlementSnapshot? = nil
+    public var codingPlanEntitlementError: String? = nil
+    public var codingPlanEntitlementLoading: Bool = false
+    /// Real workspace-hook trust review items from `hooks.loadHooks`.
+    public var pendingHookTrustItems: [PendingHookTrustItem] = []
 
     // MARK: - ZCode Remote Mobile Shell Navigation & Sheet State
     public var mobilePage: MobileShellPage = .home
@@ -169,6 +189,13 @@ public final class AppStore {
     public var automations: [AutomationScheduleItem]
     public var tokenUsageStats: [DailyTokenUsageItem]
     public var notificationInbox: [NotificationInboxItem] = []
+
+    // MARK: - Live Host Automations & Plugin Marketplace (zcode-agent / plugin-management)
+    public var isLoadingAutomations: Bool = false
+    public var automationsError: String? = nil
+    @ObservationIgnored var automationHostRows: [[String: Any]] = []
+    public var isRefreshingPluginMarketplace: Bool = false
+    public var pluginMarketplaceError: String? = nil
 
     // MARK: - Composer State
     public var composerText: String = ""
@@ -286,6 +313,7 @@ public final class AppStore {
             self.automations = []
             self.tokenUsageStats = []
             self.notificationInbox = []
+            self.userDisplayName = ""
             self.providers = []
             self.skills = []
             self.plugins = []
@@ -446,7 +474,7 @@ public final class AppStore {
         KeychainStore.delete(zaiAccessKeychainKey)
         zaiAccount = nil
         zaiRegisteredDevices = []
-        userDisplayName = "ZCode User"
+        userDisplayName = ""
         didSkipAccountStep = false
         playImpactHaptic(.medium)
         showToast("Signed out of Z.AI")
@@ -735,11 +763,36 @@ public final class AppStore {
 
     public func toggleMessageFeedback(messageId: String, rating: Int) {
         playSelectionHaptic()
-        guard var session = activeSession,
+        guard let session = activeSession,
               let mIdx = session.messages.firstIndex(where: { $0.id == messageId }) else { return }
-        session.messages[mIdx].feedback = (session.messages[mIdx].feedback == rating) ? 0 : rating
-        _ = v4SetFeedback(messageId: messageId, rating: session.messages[mIdx].feedback, session: session)
-        activeSession = session
+        guard v4CanTarget(messageId: messageId),
+              let target = v4Sync.rowTargets[messageId] else {
+            showToast("Feedback is unavailable for this turn")
+            return
+        }
+        let previousRating = session.messages[mIdx].feedback
+        let newRating = (previousRating == rating) ? 0 : rating
+        let feedbackValue: Any = newRating == 1 ? "like" as Any : (newRating == -1 ? "dislike" as Any : NSNull())
+        Task { @MainActor in
+            do {
+                try await self.v4Command(
+                    "setAssistantFeedback",
+                    payload: ["target": target, "feedback": feedbackValue],
+                    sessionId: session.id,
+                    workspacePath: session.workspacePath,
+                    cas: true,
+                    rowTarget: true
+                )
+                // Reflect only persisted feedback; the host snapshot confirms on publish.
+                if let idx = self.sessions.firstIndex(where: { $0.id == session.id }),
+                   let m = self.sessions[idx].messages.firstIndex(where: { $0.id == messageId }) {
+                    self.sessions[idx].messages[m].feedback = newRating
+                }
+            } catch {
+                self.showToast("Couldn't save feedback: \(error.localizedDescription)")
+                self.v4Resync(force: false)
+            }
+        }
     }
 
     private func hostTaskScope(for session: AgentTaskSession) -> [String: Any] {
@@ -752,6 +805,19 @@ public final class AppStore {
 
     private var canMutateHostTasks: Bool {
         !isUITestSeededMode && activeConnection?.state == .connected
+    }
+
+    /// Draft sessions and the seeded fixtures may be changed locally; host tasks require the live RPC.
+    private func canChangeSession(_ id: String) -> Bool {
+        isUITestSeededMode || id.hasPrefix("task-") || canMutateHostTasks
+    }
+
+    private func requireSessionMutation(_ id: String, action: String) -> Bool {
+        guard canChangeSession(id) else {
+            showToast("Connect to your computer to \(action)")
+            return false
+        }
+        return true
     }
 
     /// Applies `local` optimistically, sends `zcode-task.<method>`, and rolls back on failure.
@@ -782,6 +848,7 @@ public final class AppStore {
     }
 
     public func togglePinSession(_ id: String) {
+        guard requireSessionMutation(id, action: "change pinned tasks") else { return }
         guard let current = sessions.first(where: { $0.id == id }) else { return }
         let pinned = !current.pinned
         mutateHostTask(id, method: "setTaskPinned", extra: ["pinned": pinned], failureMessage: pinned ? "Couldn't pin task" : "Couldn't unpin task") {
@@ -790,6 +857,7 @@ public final class AppStore {
     }
 
     public func archiveSession(_ id: String) {
+        guard requireSessionMutation(id, action: "archive tasks") else { return }
         mutateHostTask(id, method: "archiveTask", failureMessage: "Couldn't archive task") {
             $0.archived = true
             $0.pinned = false
@@ -800,18 +868,21 @@ public final class AppStore {
     }
 
     public func restoreSession(_ id: String) {
+        guard requireSessionMutation(id, action: "restore tasks") else { return }
         mutateHostTask(id, method: "unarchiveTask", failureMessage: "Couldn't unarchive task") {
             $0.archived = false
         }
     }
 
     public func markSessionUnread(_ id: String) {
+        guard requireSessionMutation(id, action: "mark tasks unread") else { return }
         mutateHostTask(id, method: "setTaskUnread", extra: ["unread": true], failureMessage: "Couldn't mark as unread") {
             $0.unread = true
         }
     }
 
     public func deleteSession(_ id: String) {
+        guard requireSessionMutation(id, action: "delete tasks") else { return }
         guard let session = sessions.first(where: { $0.id == id }) else { return }
         let method = session.archived ? "deleteArchivedTask" : "deleteTask"
         mutateHostTask(id, method: method, failureMessage: "Couldn't delete task") { _ in }
@@ -824,6 +895,7 @@ public final class AppStore {
     public func renameSession(_ id: String, newTitle: String) {
         let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        guard requireSessionMutation(id, action: "rename tasks") else { return }
         mutateHostTask(id, method: "renameTask", extra: ["title": trimmed], failureMessage: "Couldn't rename task") {
             $0.title = trimmed
         }
@@ -839,29 +911,16 @@ public final class AppStore {
             return
         }
 
-        if trimmed == "/compact" {
+        // Desktop 3.16.3 app-command parsing (`DX`): `/compact` + `/compress` -> V4 `compact`;
+        // `/goal <objective>` / `/goal resume` -> V4 goal commands. No local mode/percent mutation.
+        let loweredCommand = trimmed.lowercased()
+        if (loweredCommand == "/compact" || loweredCommand == "/compress"),
+           composerAttachments.isEmpty, composerQuotes.isEmpty {
             composerText = ""
-            if v4Owns(session.id) {
-                v4Fire("compact", payload: [:], session: session, cas: false, failure: "Couldn't compact")
-                showToast("Requested context compaction")
-                return
-            }
-            session.contextUsedPercent = max(0, session.contextUsedPercent / 3)
-            activeSession = session
-            if let conn = activeConnection, conn.transport != .enterpriseSandbox, conn.state == .connected {
-                Task {
-                    _ = try? await rpcClient.call(channel: "zcode-task", method: "compactSession", args: [.fromJSONObject(["taskId": session.id])])
-                }
-            }
-            showToast("Requested context compaction")
+            requestContextCompaction(for: session)
             return
         }
-
-        if trimmed == "/goal" {
-            composerText = ""
-            session.mode = .yolo
-            activeSession = session
-            showToast("Auto-mode (/goal) enabled")
+        if handleGoalSlashCommand(trimmed, session: session) {
             return
         }
 
@@ -1294,11 +1353,142 @@ public final class AppStore {
         openSubagentSession(childSessionId: run.id, title: run.title)
     }
 
+    /// Pause/resume the session goal through the real V4 goals commands (CAS, `snapshot.availability`).
     public func toggleGoalPaused() {
-        guard var session = activeSession else { return }
-        session.goalPaused.toggle()
-        activeSession = session
-        showToast(session.goalPaused ? "Goal timer paused" : "Goal timer resumed")
+        guard let session = activeSession else { return }
+        if isUITestSeededMode {
+            var seeded = session
+            seeded.goalPaused.toggle()
+            activeSession = seeded
+            showToast(seeded.goalPaused ? "Goal timer paused" : "Goal timer resumed")
+            return
+        }
+        guard v4Owns(session.id) else {
+            showToast("Goal controls are unavailable for this session")
+            return
+        }
+        let paused = session.goalPaused
+        let command = paused ? "resumeGoal" : "pauseGoal"
+        if let availability = v4Sync.conversation?.state["availability"] as? [String: Any],
+           let entry = availability[command] as? [String: Any],
+           (entry["allowed"] as? Bool) == false {
+            showToast(paused ? "No paused goal to resume" : "No active goal to pause")
+            return
+        }
+        Task { @MainActor in
+            do {
+                try await self.v4Command(command, payload: [:], sessionId: session.id, workspacePath: session.workspacePath, cas: true)
+                self.showToast(paused ? "Goal resumed" : "Goal paused")
+            } catch {
+                self.showToast("Couldn't change goal: \(error.localizedDescription)")
+                self.v4Resync(force: false)
+            }
+        }
+    }
+
+    // MARK: - Desktop App Commands (/compact, /compress, /goal, /target)
+
+    /// `/compact` and `/compress` request real host compaction; success is only reported after the RPC.
+    private func requestContextCompaction(for session: AgentTaskSession) {
+        if isUITestSeededMode {
+            showToast("Requested context compaction")
+            return
+        }
+        guard let conn = activeConnection, conn.state == .connected, conn.transport != .enterpriseSandbox else {
+            showToast("Connect to your computer to compact the context")
+            return
+        }
+        if v4Owns(session.id) {
+            Task { @MainActor in
+                do {
+                    try await self.v4Command("compact", payload: [:], sessionId: session.id, workspacePath: session.workspacePath)
+                    self.showToast("Requested context compaction")
+                } catch {
+                    let reason = (error as? V4CommandError)?.reasonCode
+                    if reason == "activeTurn" {
+                        self.showToast("Compact context after the current task finishes.")
+                    } else if reason == "compactOperationLock" {
+                        self.showToast("A compaction is already running or queued.")
+                    } else {
+                        self.showToast("Couldn't compact: \(error.localizedDescription)")
+                    }
+                }
+            }
+            return
+        }
+        guard !session.id.hasPrefix("task-") else {
+            showToast("Send a message to start this session before compacting")
+            return
+        }
+        Task { @MainActor in
+            do {
+                _ = try await self.rpcClient.call(
+                    channel: "zcode-task",
+                    method: "compactSession",
+                    args: [.fromJSONObject(self.hostTaskScope(for: session))],
+                    timeoutSec: 30
+                )
+                self.showToast("Requested context compaction")
+            } catch {
+                self.showToast("Couldn't compact: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Mirrors the desktop renderer's `/goal` parser (`DX`): returns true when the text was consumed.
+    private func handleGoalSlashCommand(_ raw: String, session: AgentTaskSession) -> Bool {
+        let parts = raw.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        guard let command = parts.first?.lowercased(), command == "/goal" || command == "/target" else { return false }
+        guard composerAttachments.isEmpty, composerQuotes.isEmpty else { return false }
+        // Desktop only routes goal commands through the V4 pane; elsewhere the text stays a normal prompt.
+        guard !isUITestSeededMode, v4Owns(session.id) else { return false }
+        let body = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        composerText = ""
+        guard !body.isEmpty else {
+            showToast("Add a goal after /goal")
+            return true
+        }
+        if session.mode == .plan {
+            showToast("Goal is unavailable in Plan mode. Switch modes to continue.")
+            return true
+        }
+        let head = body.split(separator: " ", maxSplits: 1).first.map(String.init)?.lowercased() ?? ""
+        if head == "resume" {
+            Task { @MainActor in
+                do {
+                    try await self.v4Command("resumeGoal", payload: [:], sessionId: session.id, workspacePath: session.workspacePath, cas: true)
+                    self.showToast("Goal resumed")
+                } catch {
+                    self.showToast("Couldn't resume goal: \(error.localizedDescription)")
+                }
+            }
+            return true
+        }
+        if head == "pause" || head == "clear" || head == "show" {
+            showToast("Use the Goal controls in the status panel")
+            return true
+        }
+        let objective = head == "replace"
+            ? String(body.dropFirst("replace".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            : body
+        guard !objective.isEmpty else {
+            showToast("Add a goal after /goal")
+            return true
+        }
+        Task { @MainActor in
+            do {
+                _ = try await self.v4Command(
+                    "sendGoalCommand",
+                    payload: ["text": objective, "displayText": raw],
+                    sessionId: session.id,
+                    workspacePath: session.workspacePath
+                )
+                self.showToast("Goal set")
+            } catch {
+                self.showToast("Couldn't set goal: \(error.localizedDescription)")
+            }
+        }
+        return true
     }
 
     public func binaryData(forPath path: String) -> Data? {
@@ -1486,14 +1676,18 @@ public final class AppStore {
         gitChanges[idx].isStaged.toggle()
     }
 
+    /// Seed-fixture Git mutation. Production uses `AppStore+Inspector` real `git` RPCs.
     public func stageAllGitChanges(_ staged: Bool) {
+        guard isUITestSeededMode else { return }
         for idx in gitChanges.indices {
             gitChanges[idx].isStaged = staged
         }
         showToast(staged ? "Staged all changes" : "Unstaged all changes")
     }
 
+    /// Seed-fixture Git commit. Production uses `commitInspectorStagedChanges` (`git.commit`).
     public func commitStagedChanges(message: String) {
+        guard isUITestSeededMode else { return }
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let stagedItems = gitChanges.filter(\.isStaged)
@@ -1521,7 +1715,9 @@ public final class AppStore {
         showToast("Committed \(hash)")
     }
 
+    /// Seed-fixture branch switch. Production uses `switchInspectorGitBranch` (`git.switchBranch`).
     public func switchGitBranch(_ branch: String) {
+        guard isUITestSeededMode else { return }
         activeGitBranch = branch
         if let pIdx = projects.firstIndex(where: { $0.id == activeProjectId }) {
             projects[pIdx].gitBranch = branch
@@ -1650,7 +1846,7 @@ public final class AppStore {
             sid: parsed.sid,
             passHash: parsed.passHash,
             remoteControlToken: parsed.remoteControlToken,
-            serverVersion: "3.16.3",
+            serverVersion: "",
             lastConnectedAt: Date(),
             state: .disconnected,
             latencyMs: 0

@@ -10,9 +10,49 @@ struct SubagentsSettingsView: View {
 
     enum ScopeFilter: String, CaseIterable, Identifiable {
         case all = "All"
-        case user = "User"
-        case workspace = "Workspace"
+        case enabled = "Enabled"
+        case disabled = "Disabled"
         var id: String { rawValue }
+
+        func matches(_ item: SubagentDefinitionItem) -> Bool {
+            switch self {
+            case .all: return true
+            case .enabled: return item.enabled
+            case .disabled: return !item.enabled
+            }
+        }
+    }
+
+    /// Real host model candidates (model-selection view first, provider settings as fallback).
+    private var modelCandidates: [(id: String, label: String, levels: [String])] {
+        if !store.liveModelOptions.isEmpty {
+            return store.liveModelOptions.map { option in
+                (option.id, "\(option.providerName) • \(option.modelId)", option.reasoningLevels)
+            }
+        }
+        return store.allModels.map { model in
+            (model.id, "\(model.providerName) • \(model.modelId)", model.reasoningLevels)
+        }
+    }
+
+    func reasoningLevels(forOverride override: String) -> [String] {
+        if override.isEmpty || override == "inherit" {
+            guard let preferred = store.preferredModelSelection else { return [] }
+            return store.liveModel(providerId: preferred.providerId, modelId: preferred.modelId)?.reasoningLevels ?? []
+        }
+        return modelCandidates.first(where: { $0.id == override })?.levels
+            ?? store.allModels.first(where: { $0.id == override || $0.modelId == override })?.reasoningLevels
+            ?? []
+    }
+
+    func defaultReasoningLevel(forOverride override: String) -> String {
+        reasoningLevels(forOverride: override).last ?? "inherit"
+    }
+
+    func normalizedReasoning(_ level: String, forOverride override: String) -> String {
+        let levels = reasoningLevels(forOverride: override)
+        if level == "inherit" || levels.isEmpty { return "inherit" }
+        return levels.contains(level) ? level : (levels.last ?? "inherit")
     }
 
     @State private var scopeFilter: ScopeFilter = .all
@@ -27,47 +67,43 @@ struct SubagentsSettingsView: View {
         let draft: SubagentDefinitionItem
     }
 
+    private func matchesSearch(_ item: SubagentDefinitionItem, _ q: String, extra: String = "") -> Bool {
+        guard !q.isEmpty else { return true }
+        return item.name.localizedCaseInsensitiveContains(q)
+            || item.description.localizedCaseInsensitiveContains(q)
+            || extra.localizedCaseInsensitiveContains(q)
+    }
+
     private var customAgents: [SubagentDefinitionItem] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         return store.subagents.filter { item in
-            guard item.source == "user" && !item.readOnly else { return false }
-            switch scopeFilter {
-            case .all: break
-            case .user:
-                if item.scope.lowercased() != "user" { return false }
-            case .workspace:
-                if item.scope.lowercased() != "workspace" { return false }
-            }
-            guard !q.isEmpty else { return true }
-            return item.name.localizedCaseInsensitiveContains(q)
-                || item.description.localizedCaseInsensitiveContains(q)
+            item.source == "user" && !item.readOnly
+                && scopeFilter.matches(item)
+                && matchesSearch(item, q)
         }
     }
 
     private var builtInAgents: [SubagentDefinitionItem] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         return store.subagents.filter { item in
-            guard item.source == "built-in" else { return false }
-            guard !q.isEmpty else { return true }
-            return item.name.localizedCaseInsensitiveContains(q)
-                || item.description.localizedCaseInsensitiveContains(q)
+            item.source == "built-in" && scopeFilter.matches(item) && matchesSearch(item, q)
         }
     }
 
     private var pluginAgentGroups: [(pluginName: String, agents: [SubagentDefinitionItem])] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let filtered = store.subagents.filter { item in
-            guard item.source == "plugin" else { return false }
-            let pName = item.pluginName ?? "plugin"
-            guard !q.isEmpty else { return true }
-            return item.name.localizedCaseInsensitiveContains(q)
-                || item.description.localizedCaseInsensitiveContains(q)
-                || pName.localizedCaseInsensitiveContains(q)
+            guard item.source == "plugin", scopeFilter.matches(item) else { return false }
+            return matchesSearch(item, q, extra: item.pluginName ?? "")
         }
         let grouped = Dictionary(grouping: filtered, by: { $0.pluginName ?? "plugin" })
         return grouped.keys.sorted().map { key in
             (key, grouped[key] ?? [])
         }
+    }
+
+    private var enabledCount: Int {
+        store.subagents.filter(\.enabled).count
     }
 
     var body: some View {
@@ -76,7 +112,7 @@ struct SubagentsSettingsView: View {
                 ZCodeSettingsPageHeader(
                     groupTitle: "Agent capabilities",
                     title: "Subagents",
-                    subtitle: "Create specialized subagents with isolated context windows, custom system prompts, tool sandboxes, and dedicated model overrides."
+                    subtitle: "Manage user-level subagent Markdown files consumed by ZCode Agent."
                 ) {
                     Button {
                         editorTarget = EditorTarget(
@@ -87,7 +123,7 @@ struct SubagentsSettingsView: View {
                                 description: "",
                                 systemPrompt: "You are a specialized subagent. Focus strictly on the delegated task and return concise, verified findings.",
                                 color: .blue,
-                                scope: scopeFilter == .workspace ? "workspace" : "user",
+                                scope: "user",
                                 source: "user",
                                 readOnly: false,
                                 enabled: true,
@@ -103,7 +139,7 @@ struct SubagentsSettingsView: View {
                         HStack(spacing: 5) {
                             Image(systemName: "plus")
                                 .font(.system(size: 11.5, weight: .bold))
-                            Text("Create")
+                            Text("New subagent")
                                 .font(.system(size: 12.5, weight: .semibold))
                         }
                         .foregroundStyle(palette.brandForeground)
@@ -112,43 +148,25 @@ struct SubagentsSettingsView: View {
                         .background(palette.brand, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
+                    .disabled(!store.isRemoteRPCReady)
                     .accessibilityIdentifier("createSubagentButton")
                 }
 
-                // Scope Filter + Manage Models Link Bar
-                HStack(spacing: 10) {
-                    Picker("Scope", selection: $scopeFilter) {
-                        ForEach(ScopeFilter.allCases) { sc in
-                            Text(sc.rawValue).tag(sc)
-                        }
+                Picker("Filter", selection: $scopeFilter) {
+                    ForEach(ScopeFilter.allCases) { sc in
+                        Text(sc.rawValue).tag(sc)
                     }
-                    .pickerStyle(.segmented)
-
-                    Button {
-                        onJumpToModels()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "cpu")
-                                .font(.system(size: 11.5, weight: .semibold))
-                            Text("Models")
-                                .font(.system(size: 12, weight: .semibold))
-                        }
-                        .foregroundStyle(palette.accentBlue)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(palette.accentBlue.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
                 }
+                .pickerStyle(.segmented)
 
                 ZCodeSettingsSearchBar(
                     text: $searchText,
-                    placeholder: "Search subagents by name, role, or plugin…"
+                    placeholder: "Search subagents..."
                 )
 
-                // Tier 1: Custom User & Workspace Subagents
+                // Installed (user) subagents
                 ZCodeSettingsCard(
-                    title: "Custom Subagents (\(customAgents.count))",
+                    title: "Installed",
                     subtitle: "Saved as Markdown frontmatter files in ~/.zcode/agents (User) or .zcode/agents (Workspace)."
                 ) {
                     if customAgents.isEmpty {
@@ -156,7 +174,7 @@ struct SubagentsSettingsView: View {
                             Image(systemName: "person.2.badge.gearshape")
                                 .font(.system(size: 24, weight: .light))
                                 .foregroundStyle(palette.foregroundMuted)
-                            Text("No custom subagents in this scope yet.")
+                            Text("No subagents found")
                                 .font(.system(size: 13.5, weight: .medium))
                                 .foregroundStyle(palette.foregroundSubtle)
                             Button {
@@ -168,12 +186,12 @@ struct SubagentsSettingsView: View {
                                         description: "Adversarial code & security reviewer for diffs before merging.",
                                         systemPrompt: "Review code diffs rigorously for race conditions, auth bypasses, and regressions. Cite file:line.",
                                         color: .orange,
-                                        scope: scopeFilter == .workspace ? "workspace" : "user",
+                                        scope: "user",
                                         source: "user",
                                         readOnly: false,
                                         enabled: true,
                                         modelOverride: "inherit",
-                                        reasoningOverride: "high",
+                                        reasoningOverride: "inherit",
                                         allowedTools: ["Read", "Grep", "Glob"],
                                         permissionMode: .plan,
                                         injectAgentsMd: true,
@@ -198,11 +216,10 @@ struct SubagentsSettingsView: View {
                     }
                 }
 
-                // Tier 2: Official Built-in Agents (`general-purpose`, `Explore`)
-                if !builtInAgents.isEmpty && scopeFilter == .all {
+                if !builtInAgents.isEmpty {
                     ZCodeSettingsCard(
-                        title: "Built-in Agents",
-                        subtitle: "Core ZCode system subagents. System prompts are locked, but you can override their execution model and reasoning effort."
+                        title: "Built-in subagents",
+                        subtitle: "Runtime defaults. System prompts are locked, but you can override their model and reasoning level."
                     ) {
                         ForEach(Array(builtInAgents.enumerated()), id: \.element.id) { idx, agent in
                             readOnlyOverrideAgentRow(agent, badgeText: "Built-in")
@@ -213,22 +230,25 @@ struct SubagentsSettingsView: View {
                     }
                 }
 
-                // Tier 3: Plugin Agents grouped by Plugin
-                if !pluginAgentGroups.isEmpty && scopeFilter == .all {
-                    ForEach(pluginAgentGroups, id: \.pluginName) { group in
-                        ZCodeSettingsCard(
-                            title: "Plugin Agents • \(group.pluginName)",
-                            subtitle: "Provided by the \(group.pluginName) plugin. Configure per-agent model and effort overrides."
-                        ) {
-                            ForEach(Array(group.agents.enumerated()), id: \.element.id) { idx, agent in
-                                readOnlyOverrideAgentRow(agent, badgeText: group.pluginName)
-                                if idx < group.agents.count - 1 {
-                                    Divider().overlay(palette.border).padding(.horizontal, 14)
-                                }
+                ForEach(pluginAgentGroups, id: \.pluginName) { group in
+                    ZCodeSettingsCard(
+                        title: "Plugin subagents • \(group.pluginName)",
+                        subtitle: "Provided by the \(group.pluginName) plugin. Only model and reasoning can be overridden."
+                    ) {
+                        ForEach(Array(group.agents.enumerated()), id: \.element.id) { idx, agent in
+                            readOnlyOverrideAgentRow(agent, badgeText: group.pluginName)
+                            if idx < group.agents.count - 1 {
+                                Divider().overlay(palette.border).padding(.horizontal, 14)
                             }
                         }
                     }
                 }
+
+                Text("\(store.subagents.count) subagents · \(enabledCount) enabled")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(palette.foregroundMuted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 2)
             }
             .padding(.horizontal, 16)
             .padding(.top, 12)
@@ -255,7 +275,7 @@ struct SubagentsSettingsView: View {
         ) {
             Button("Delete Subagent", role: .destructive) {
                 if let target = deletingAgent {
-                    store.deleteSubagent(target.id)
+                    Task { _ = await store.deleteSubagent(target.id) }
                 }
                 deletingAgent = nil
             }
@@ -295,10 +315,11 @@ struct SubagentsSettingsView: View {
 
                 Toggle("", isOn: Binding(
                     get: { agent.enabled },
-                    set: { store.setSubagentEnabled(agent.id, enabled: $0) }
+                    set: { newValue in Task { _ = await store.setSubagentEnabled(agent.id, enabled: newValue) } }
                 ))
                 .labelsHidden()
                 .tint(palette.accentBlue)
+                .disabled(!store.isRemoteRPCReady)
             }
 
             if !agent.description.isEmpty {
@@ -407,84 +428,62 @@ struct SubagentsSettingsView: View {
                 .lineLimit(2)
 
             if agent.canOverrideModelInline {
-                HStack(spacing: 8) {
-                    Menu {
-                        Button {
-                            store.setSubagentModelAndEffortOverride(
-                                id: agent.id,
-                                modelOverride: "inherit",
-                                reasoningOverride: agent.reasoningOverride
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("Model")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(palette.foregroundSubtle)
+                        Spacer()
+                        ZCodeSettingsSelect(
+                            options: [ZCodeSettingsSelectOption(value: "inherit", label: "Inherit session model")]
+                                + modelCandidates.map { ZCodeSettingsSelectOption(value: $0.id, label: $0.label) },
+                            selection: Binding(
+                                get: { agent.modelOverride },
+                                set: { newModel in
+                                    let newLevel = reasoningLevels(forOverride: newModel).last ?? "inherit"
+                                    Task {
+                                        _ = await store.setSubagentModelAndEffortOverride(
+                                            id: agent.id,
+                                            modelOverride: newModel,
+                                            reasoningOverride: newLevel
+                                        )
+                                    }
+                                }
+                            ),
+                            isEnabled: store.isRemoteRPCReady
+                        )
+                    }
+
+                    let levels = reasoningLevels(forOverride: agent.modelOverride)
+                    if levels.isEmpty {
+                        Text("Reasoning effort unavailable")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(palette.foregroundMuted)
+                    } else {
+                        HStack(spacing: 8) {
+                            Text("Reasoning")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(palette.foregroundSubtle)
+                            Spacer()
+                            ZCodeSettingsSelect(
+                                options: [ZCodeSettingsSelectOption(value: "inherit", label: "Default")]
+                                    + levels.map { ZCodeSettingsSelectOption(value: $0, label: $0.uppercased()) },
+                                selection: Binding(
+                                    get: { normalizedReasoning(agent.reasoningOverride, forOverride: agent.modelOverride) },
+                                    set: { newLevel in
+                                        Task {
+                                            _ = await store.setSubagentModelAndEffortOverride(
+                                                id: agent.id,
+                                                modelOverride: agent.modelOverride,
+                                                reasoningOverride: newLevel
+                                            )
+                                        }
+                                    }
+                                ),
+                                isEnabled: store.isRemoteRPCReady
                             )
-                        } label: {
-                            Label("Inherit Session Model", systemImage: isInheritedModel(agent.modelOverride) ? "checkmark" : "arrow.turn.down.right")
                         }
-                        Divider()
-                        ForEach(store.allModels) { m in
-                            Button {
-                                store.setSubagentModelAndEffortOverride(
-                                    id: agent.id,
-                                    modelOverride: m.id,
-                                    reasoningOverride: agent.reasoningOverride
-                                )
-                            } label: {
-                                if agent.modelOverride == m.id {
-                                    Label("\(m.providerName) • \(m.modelId)", systemImage: "checkmark")
-                                } else {
-                                    Text("\(m.providerName) • \(m.modelId)")
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "cpu")
-                                .font(.system(size: 11))
-                            Text(isInheritedModel(agent.modelOverride) ? "Inherit Model" : shortModelLabel(agent.modelOverride))
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .lineLimit(1)
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 9.5, weight: .semibold))
-                        }
-                        .foregroundStyle(isInheritedModel(agent.modelOverride) ? palette.foregroundSubtle : palette.accentBlue)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5.5)
-                        .background(palette.card, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
                     }
-
-                    Menu {
-                        ForEach(["inherit", "off", "low", "medium", "high", "max"], id: \.self) { lvl in
-                            Button {
-                                store.setSubagentModelAndEffortOverride(
-                                    id: agent.id,
-                                    modelOverride: agent.modelOverride,
-                                    reasoningOverride: lvl
-                                )
-                            } label: {
-                                let label = lvl == "inherit" ? "Default Effort" : lvl.uppercased()
-                                if agent.reasoningOverride == lvl {
-                                    Label(label, systemImage: "checkmark")
-                                } else {
-                                    Text(label)
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "brain")
-                                .font(.system(size: 11))
-                            Text(isInheritedEffort(agent.reasoningOverride) ? "Default Effort" : agent.reasoningOverride)
-                                .font(.system(size: 11.5, weight: .semibold))
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 9.5, weight: .semibold))
-                        }
-                        .foregroundStyle(isInheritedEffort(agent.reasoningOverride) ? palette.foregroundSubtle : palette.foreground)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5.5)
-                        .background(palette.card, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
-                    }
-
-                    Spacer()
                 }
             }
         }
@@ -521,6 +520,30 @@ struct SubagentEditorSheet: View {
             .filter { isNew || $0.id != draft.id }
             .map(\.name)
         return AppStore.validateSubagentName(draft.name, existingNames: existing, isNew: isNew)
+    }
+
+    private func levels(for override: String) -> [String] {
+        if override.isEmpty || override == "inherit" {
+            guard let preferred = store.preferredModelSelection else { return [] }
+            return store.liveModel(providerId: preferred.providerId, modelId: preferred.modelId)?.reasoningLevels ?? []
+        }
+        if let live = store.liveModelOptions.first(where: { $0.id == override }) {
+            return live.reasoningLevels
+        }
+        return store.allModels.first(where: { $0.id == override || $0.modelId == override })?.reasoningLevels ?? []
+    }
+
+    private var editorReasoningLevels: [String] {
+        levels(for: draft.modelOverride)
+    }
+
+    private func normalizeReasoningForEditor() {
+        let available = editorReasoningLevels
+        if available.isEmpty {
+            draft.reasoningOverride = "inherit"
+        } else if draft.reasoningOverride != "inherit", !available.contains(draft.reasoningOverride) {
+            draft.reasoningOverride = available.last ?? "inherit"
+        }
     }
 
     private var allowAllToolsBinding: Binding<Bool> {
@@ -593,12 +616,14 @@ struct SubagentEditorSheet: View {
                                             .font(.system(size: 11, design: .monospaced))
                                             .foregroundStyle(palette.foregroundMuted)
                                     }
-                                    Picker("Scope", selection: $draft.scope) {
-                                        Text("User (Global)").tag("user")
-                                        Text("Workspace").tag("workspace")
-                                    }
-                                    .pickerStyle(.segmented)
-                                    .disabled(!isNew)
+                                    ZCodeSettingsSelect(
+                                        options: [
+                                            ZCodeSettingsSelectOption(value: "user", label: "User (Global)"),
+                                            ZCodeSettingsSelectOption(value: "workspace", label: "Workspace")
+                                        ],
+                                        selection: $draft.scope,
+                                        isEnabled: isNew
+                                    )
                                 }
 
                                 // 8 Official Color Dots (`yellow`, `red`, `orange`, `green`, `cyan`, `blue`, `purple`, `pink`)
@@ -651,51 +676,62 @@ struct SubagentEditorSheet: View {
                         ) {
                             VStack(alignment: .leading, spacing: 13) {
                                 HStack {
-                                    Text("Model Override")
+                                    Text("Model")
                                         .font(.system(size: 13.5, weight: .medium))
                                         .foregroundStyle(palette.foreground)
                                     Spacer()
-                                    Picker("Model", selection: $draft.modelOverride) {
-                                        Text("Inherit Model").tag("inherit")
-                                        ForEach(store.allModels) { m in
-                                            Text("\(m.providerName) • \(m.modelId)").tag(m.id)
-                                        }
+                                    ZCodeSettingsSelect(
+                                        options: [ZCodeSettingsSelectOption(value: "inherit", label: "Inherit")]
+                                            + store.liveModelOptions.map {
+                                                ZCodeSettingsSelectOption(
+                                                    value: $0.id,
+                                                    label: "\($0.providerName) • \($0.modelId)"
+                                                )
+                                            }
+                                            + (store.liveModelOptions.isEmpty
+                                                ? store.allModels.map {
+                                                    ZCodeSettingsSelectOption(value: $0.id, label: "\($0.providerName) • \($0.modelId)")
+                                                }
+                                                : []),
+                                        selection: $draft.modelOverride
+                                    )
+                                }
+
+                                Divider().overlay(palette.border)
+
+                                if editorReasoningLevels.isEmpty {
+                                    Text("Reasoning effort unavailable")
+                                        .font(.system(size: 12.5))
+                                        .foregroundStyle(palette.foregroundMuted)
+                                } else {
+                                    HStack {
+                                        Text("Reasoning level")
+                                            .font(.system(size: 13.5, weight: .medium))
+                                            .foregroundStyle(palette.foreground)
+                                        Spacer()
+                                        ZCodeSettingsSelect(
+                                            options: [ZCodeSettingsSelectOption(value: "inherit", label: "Default")]
+                                                + editorReasoningLevels.map {
+                                                    ZCodeSettingsSelectOption(value: $0, label: $0.uppercased())
+                                                },
+                                            selection: $draft.reasoningOverride
+                                        )
                                     }
-                                    .pickerStyle(.menu)
-                                    .lineLimit(1)
                                 }
 
                                 Divider().overlay(palette.border)
 
                                 HStack {
-                                    Text("Reasoning Effort")
+                                    Text("Permission mode")
                                         .font(.system(size: 13.5, weight: .medium))
                                         .foregroundStyle(palette.foreground)
                                     Spacer()
-                                    Picker("Effort", selection: $draft.reasoningOverride) {
-                                        Text("Default").tag("inherit")
-                                        Text("off").tag("off")
-                                        Text("low").tag("low")
-                                        Text("medium").tag("medium")
-                                        Text("high").tag("high")
-                                        Text("max").tag("max")
-                                    }
-                                    .pickerStyle(.menu)
-                                }
-
-                                Divider().overlay(palette.border)
-
-                                HStack {
-                                    Text("Permission Mode")
-                                        .font(.system(size: 13.5, weight: .medium))
-                                        .foregroundStyle(palette.foreground)
-                                    Spacer()
-                                    Picker("Permission Mode", selection: $draft.permissionMode) {
-                                        ForEach(SubagentPermissionMode.allCases) { pm in
-                                            Text(pm.displayName).tag(pm)
-                                        }
-                                    }
-                                    .pickerStyle(.menu)
+                                    ZCodeSettingsSelect(
+                                        options: SubagentPermissionMode.allCases.map {
+                                            ZCodeSettingsSelectOption(value: $0, label: $0.displayName)
+                                        },
+                                        selection: $draft.permissionMode
+                                    )
                                 }
 
                                 Divider().overlay(palette.border)
@@ -897,13 +933,23 @@ struct SubagentEditorSheet: View {
                         if !draft.isAllTools && draft.allowedTools.isEmpty {
                             draft.allowedTools = ["Read"]
                         }
-                        store.saveSubagent(draft, isNew: isNew)
-                        dismiss()
+                        normalizeReasoningForEditor()
+                        let snapshot = draft
+                        Task {
+                            let ok = await store.saveSubagent(snapshot, isNew: isNew)
+                            if ok { await MainActor.run { dismiss() } }
+                        }
                     }
                     .fontWeight(.semibold)
-                    .disabled(nameError != nil || draft.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(nameError != nil || draft.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.isRemoteRPCReady)
                     .accessibilityIdentifier("saveSubagentButton")
                 }
+            }
+            .onChange(of: draft.modelOverride) { _, _ in
+                normalizeReasoningForEditor()
+            }
+            .onAppear {
+                normalizeReasoningForEditor()
             }
         }
         .preferredColorScheme(palette.isDark ? .dark : .light)

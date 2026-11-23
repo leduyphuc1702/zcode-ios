@@ -439,11 +439,12 @@ public enum ProviderAPIFormat: String, Codable, CaseIterable, Identifiable {
 
     public var id: String { rawValue }
 
+    /// Exact rendered labels from ZCode Desktop 3.16.3 (`rUn` in renderer/styles.js).
     public var displayName: String {
         switch self {
-        case .anthropicMessages: return "Anthropic Messages"
-        case .openaiChatCompletions: return "OpenAI Chat Completions"
-        case .openaiResponses: return "OpenAI Responses"
+        case .anthropicMessages: return "Anthropic messages (/v1/messages)"
+        case .openaiChatCompletions: return "Chat completions (/chat/completions)"
+        case .openaiResponses: return "Responses (/responses)"
         }
     }
 
@@ -461,6 +462,28 @@ public enum ModelConnectivityState: String, Codable, Equatable {
     case testing
     case connected
     case failed
+}
+
+/// Host `ConfigIssue` from `validateConfigSchema` (`provider-settings` view).
+public struct ProviderConfigIssue: Identifiable, Codable, Equatable {
+    public var code: String
+    public var path: [String]
+    public var message: String
+
+    public var id: String { "\(code)|\(path.joined(separator: "."))|\(message)" }
+
+    public init(code: String, path: [String], message: String) {
+        self.code = code
+        self.path = path
+        self.message = message
+    }
+
+    public init?(json: [String: Any]) {
+        guard let code = json["code"] as? String else { return nil }
+        self.code = code
+        self.path = (json["path"] as? [Any])?.map { String(describing: $0) } ?? []
+        self.message = (json["message"] as? String) ?? code
+    }
 }
 
 public struct ModelDescriptor: Identifiable, Codable, Equatable {
@@ -483,7 +506,21 @@ public struct ModelDescriptor: Identifiable, Codable, Equatable {
     public var supportsJsonSchemaOutput: Bool
     public var supportsNativeWebSearch: Bool
     public var supportsMidConversationSystem: Bool
+    /// Ordered low -> high; always the host's `optionSpecs.reasoningLevel.values`.
     public var reasoningLevels: [String]
+    /// Opaque host `optionSpecs.reasoningLevel.map` JS expression source.
+    public var reasoningMap: String
+    /// Opaque host `optionSpecs.maxOutputTokens.map` JS expression source.
+    public var maxOutputTokensMap: String
+    /// Preserved but not editable in the model dialog.
+    public var requiresMfjsToolSchema: Bool
+    /// Host model `kind` (e.g. `builtin`, `personal`) and readiness flags.
+    public var kind: String
+    public var selectable: Bool
+    public var executable: Bool
+    public var personalConfigJSON: String
+    public var effectiveConfigJSON: String
+    public var issues: [ProviderConfigIssue]
     public var badge: String?
     public var connectivityState: ModelConnectivityState
     public var connectivityMessage: String?
@@ -522,7 +559,16 @@ public struct ModelDescriptor: Identifiable, Codable, Equatable {
         supportsJsonSchemaOutput: Bool = true,
         supportsNativeWebSearch: Bool = false,
         supportsMidConversationSystem: Bool = true,
-        reasoningLevels: [String] = ["off", "low", "medium", "high", "max"],
+        reasoningLevels: [String] = [],
+        reasoningMap: String = "",
+        maxOutputTokensMap: String = "",
+        requiresMfjsToolSchema: Bool = false,
+        kind: String = "builtin",
+        selectable: Bool = true,
+        executable: Bool = true,
+        personalConfigJSON: String = "",
+        effectiveConfigJSON: String = "",
+        issues: [ProviderConfigIssue] = [],
         badge: String? = nil,
         connectivityState: ModelConnectivityState = .untested,
         connectivityMessage: String? = nil
@@ -548,6 +594,15 @@ public struct ModelDescriptor: Identifiable, Codable, Equatable {
         self.supportsNativeWebSearch = supportsNativeWebSearch
         self.supportsMidConversationSystem = supportsMidConversationSystem
         self.reasoningLevels = reasoningLevels
+        self.reasoningMap = reasoningMap
+        self.maxOutputTokensMap = maxOutputTokensMap
+        self.requiresMfjsToolSchema = requiresMfjsToolSchema
+        self.kind = kind
+        self.selectable = selectable
+        self.executable = executable
+        self.personalConfigJSON = personalConfigJSON
+        self.effectiveConfigJSON = effectiveConfigJSON
+        self.issues = issues
         self.badge = badge
         self.connectivityState = connectivityState
         self.connectivityMessage = connectivityMessage
@@ -558,18 +613,28 @@ public struct ModelProviderConfig: Identifiable, Codable, Equatable {
     public var id: String
     public var name: String
     public var baseURL: String
-    public var protocolKind: String // "anthropic-messages", "openai-chat-completions", "openai-responses", "zhipu-account"
+    public var protocolKind: String // "anthropic-messages", "openai-chat-completions", "openai-responses"
     public var group: String // "zai-family", "bigmodel-family", "standard-personal"
     public var templateId: String?
+    public var templateName: String?
     public var apiKeyManagementURL: String?
+    /// Plaintext API key exactly as returned by the host view (renderer masks it in the UI).
+    public var apiKey: String
     public var hasConfiguredAPIKey: Bool
+    public var accessType: String // "api-key" | "zhipu-coding-plan-api-key" | "zhipu-account"
     public var enabled: Bool
     public var isBuiltin: Bool
+    public var executable: Bool
     public var entitled: Bool
-    public var accountAvailability: String // "available", "unavailable", "pending"
+    public var accountAvailability: String // "available", "unavailable", "unknown"
+    public var accountUnavailableReason: String?
     public var statusText: String
     public var logoKey: String
-    public var revision: Int
+    /// Host `ProviderSettingsView.revision` (a STRING: JSON.stringify([builtin, personal])).
+    public var revision: String
+    public var personalConfigJSON: String
+    public var effectiveConfigJSON: String
+    public var issues: [ProviderConfigIssue]
     public var models: [ModelDescriptor]
 
     public var apiFormat: ProviderAPIFormat {
@@ -588,8 +653,21 @@ public struct ModelProviderConfig: Identifiable, Codable, Equatable {
         }
     }
 
+    /// Account/preset providers are the `zai-family`/`bigmodel-family` groups; custom providers are `standard-personal`.
     public var isAccountProvider: Bool {
-        id.hasPrefix("account:") || group == "zai-family" || group == "bigmodel-family" || isBuiltin
+        accessType == "zhipu-account" || (group != "standard-personal" && !group.isEmpty)
+    }
+
+    public var personalConfigDictionary: [String: Any] {
+        guard let data = personalConfigJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return obj
+    }
+
+    public var effectiveConfigDictionary: [String: Any] {
+        guard let data = effectiveConfigJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return obj
     }
 
     public init(
@@ -599,15 +677,23 @@ public struct ModelProviderConfig: Identifiable, Codable, Equatable {
         protocolKind: String = ProviderAPIFormat.anthropicMessages.rawValue,
         group: String? = nil,
         templateId: String? = nil,
+        templateName: String? = nil,
         apiKeyManagementURL: String? = nil,
+        apiKey: String = "",
         hasConfiguredAPIKey: Bool = false,
+        accessType: String = "api-key",
         enabled: Bool = true,
         isBuiltin: Bool = false,
+        executable: Bool = true,
         entitled: Bool = true,
         accountAvailability: String = "available",
+        accountUnavailableReason: String? = nil,
         statusText: String = "Ready",
         logoKey: String = "custom",
-        revision: Int = 1,
+        revision: String = "",
+        personalConfigJSON: String = "",
+        effectiveConfigJSON: String = "",
+        issues: [ProviderConfigIssue] = [],
         models: [ModelDescriptor] = []
     ) {
         self.id = id
@@ -616,221 +702,99 @@ public struct ModelProviderConfig: Identifiable, Codable, Equatable {
         self.protocolKind = protocolKind
         self.group = group ?? (isBuiltin ? "zai-family" : "standard-personal")
         self.templateId = templateId
+        self.templateName = templateName
         self.apiKeyManagementURL = apiKeyManagementURL
-        self.hasConfiguredAPIKey = hasConfiguredAPIKey
+        self.apiKey = apiKey
+        self.hasConfiguredAPIKey = hasConfiguredAPIKey || !apiKey.isEmpty
+        self.accessType = accessType
         self.enabled = enabled
         self.isBuiltin = isBuiltin
+        self.executable = executable
         self.entitled = entitled
         self.accountAvailability = accountAvailability
+        self.accountUnavailableReason = accountUnavailableReason
         self.statusText = statusText
         self.logoKey = logoKey
         self.revision = revision
+        self.personalConfigJSON = personalConfigJSON
+        self.effectiveConfigJSON = effectiveConfigJSON
+        self.issues = issues
         self.models = models
     }
 }
 
+/// Host-sourced entry of `ProviderSettingsView.providerTemplates`:
+/// `{ templateId, templateNameMap: { "zh-CN"?: string, "en-US"?: string }, config: ProviderConfig }`.
 public struct ProviderTemplateDescriptor: Identifiable, Equatable {
-    public let id: String // exact templateId in zcode-builtin.json
-    public let name: String
-    public let category: String // "zhipu" | "other"
-    public let apiFormat: ProviderAPIFormat
-    public let defaultBaseURL: String
-    public let apiKeyURL: String?
-    public let logoSymbol: String
-    public let accentHex: UInt32
-    public let defaultModelIds: [String]
+    public let id: String
+    public let templateNameMap: [String: String]
+    public let group: String?
+    public let apiType: String?
+    public let baseURL: String?
+    public let accessType: String?
+    public let logoKey: String?
 
-    public static let officialCatalog: [ProviderTemplateDescriptor] = [
-        // Z.ai & BigModel Official Group
-        ProviderTemplateDescriptor(
-            id: "zai-api",
-            name: "Z.ai Coding Plan",
-            category: "zhipu",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://api.z.ai/api/anthropic",
-            apiKeyURL: "https://z.ai/manage-apikey/apikey-list",
-            logoSymbol: "sparkles",
-            accentHex: 0x3B82F6,
-            defaultModelIds: ["GLM-5.3", "GLM-5.3-Flash"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "zai-standard-api",
-            name: "Z.ai API",
-            category: "zhipu",
-            apiFormat: .openaiChatCompletions,
-            defaultBaseURL: "https://api.z.ai/api/paas/v4",
-            apiKeyURL: "https://z.ai/manage-apikey/apikey-list",
-            logoSymbol: "bolt.horizontal.circle.fill",
-            accentHex: 0x2563EB,
-            defaultModelIds: ["GLM-5.3", "GLM-5.3-Flash", "GLM-5V-Turbo", "GLM-5.1", "GLM-5.1-Highspeed", "GLM-5", "GLM-5-Turbo", "GLM-4.7"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "bigmodel-api",
-            name: "BigModel Coding Plan",
-            category: "zhipu",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://open.bigmodel.cn/api/anthropic",
-            apiKeyURL: "https://bigmodel.cn/coding-plan/personal/overview",
-            logoSymbol: "cpu.fill",
-            accentHex: 0x4F46E5,
-            defaultModelIds: ["GLM-5.3", "GLM-5.3-Flash"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "bigmodel-standard-api",
-            name: "BigModel API",
-            category: "zhipu",
-            apiFormat: .openaiChatCompletions,
-            defaultBaseURL: "https://open.bigmodel.cn/api/paas/v4",
-            apiKeyURL: "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
-            logoSymbol: "server.rack",
-            accentHex: 0x6366F1,
-            defaultModelIds: ["GLM-5.3", "GLM-5.3-Flash", "GLM-5V-Turbo", "GLM-5.1", "GLM-5-Turbo", "GLM-4.7"]
-        ),
-        // Other Official Provider Templates (zcode-builtin.json)
-        ProviderTemplateDescriptor(
-            id: "anthropic",
-            name: "Anthropic",
-            category: "other",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://api.anthropic.com/v1",
-            apiKeyURL: "https://console.anthropic.com/settings/keys",
-            logoSymbol: "a.circle.fill",
-            accentHex: 0xD97757,
-            defaultModelIds: ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "openai",
-            name: "OpenAI",
-            category: "other",
-            apiFormat: .openaiResponses,
-            defaultBaseURL: "https://api.openai.com/v1",
-            apiKeyURL: "https://platform.openai.com/api-keys",
-            logoSymbol: "circle.hexagongrid.fill",
-            accentHex: 0x10A37F,
-            defaultModelIds: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6", "gpt-5.4", "gpt-5.4-pro", "gpt-5.4-mini", "gpt-5.3-codex"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "openrouter",
-            name: "OpenRouter",
-            category: "other",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://openrouter.ai/api",
-            apiKeyURL: "https://openrouter.ai/keys",
-            logoSymbol: "arrow.triangle.branch",
-            accentHex: 0x8B5CF6,
-            defaultModelIds: ["anthropic/claude-opus-5", "anthropic/claude-sonnet-5", "openai/gpt-5.6", "deepseek/deepseek-v4-pro", "z-ai/glm-5.3", "moonshotai/kimi-k3", "qwen/qwen3.8-max"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "deepseek",
-            name: "DeepSeek",
-            category: "other",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://api.deepseek.com/anthropic",
-            apiKeyURL: "https://platform.deepseek.com/api_keys",
-            logoSymbol: "waveform.path.ecg",
-            accentHex: 0x3B82F6,
-            defaultModelIds: ["deepseek-v4-pro", "deepseek-flash"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "moonshot-kimi",
-            name: "Kimi (Moonshot)",
-            category: "other",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://api.moonshot.cn/anthropic",
-            apiKeyURL: "https://platform.kimi.com/console/api-keys",
-            logoSymbol: "moon.stars.fill",
-            accentHex: 0x0EA5E9,
-            defaultModelIds: ["kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6", "k3-256k"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "minimax",
-            name: "MiniMax",
-            category: "other",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://api.minimaxi.com/anthropic",
-            apiKeyURL: "https://platform.minimaxi.com/console/access?tab=api-keys",
-            logoSymbol: "waveform.circle.fill",
-            accentHex: 0xEC4899,
-            defaultModelIds: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "xai",
-            name: "xAI (Grok)",
-            category: "other",
-            apiFormat: .openaiResponses,
-            defaultBaseURL: "https://api.x.ai/v1",
-            apiKeyURL: "https://console.x.ai",
-            logoSymbol: "xmark.diamond.fill",
-            accentHex: 0xA1A1AA,
-            defaultModelIds: ["grok-4.6", "grok-build-0.1", "grok-4.3"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "qwen-alibaba-model-studio-intl",
-            name: "Alibaba Cloud (Global)",
-            category: "other",
-            apiFormat: .openaiChatCompletions,
-            defaultBaseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-            apiKeyURL: "https://modelstudio.console.aliyun.com/ap-southeast-1?tab=dashboard",
-            logoSymbol: "cloud.fill",
-            accentHex: 0xF97316,
-            defaultModelIds: ["qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3-vl-plus"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "qwen-alibaba-model-studio-cn",
-            name: "Alibaba Cloud (China)",
-            category: "other",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://dashscope.aliyuncs.com/apps/anthropic",
-            apiKeyURL: "https://bailian.console.aliyun.com/cn-beijing?tab=model",
-            logoSymbol: "cloud.bolt.fill",
-            accentHex: 0xFB923C,
-            defaultModelIds: ["qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3-vl-plus"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "xiaomi-mimo",
-            name: "Xiaomi MiMo API",
-            category: "other",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://api.xiaomimimo.com/anthropic",
-            apiKeyURL: "https://platform.xiaomimimo.com/",
-            logoSymbol: "bolt.circle.fill",
-            accentHex: 0xFF6900,
-            defaultModelIds: ["mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.5-pro", "mimo-v2.5"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "xiaomi-mimo-token-plan",
-            name: "Xiaomi MiMo Token Plan",
-            category: "other",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://token-plan-cn.xiaomimimo.com/anthropic",
-            apiKeyURL: "https://platform.xiaomimimo.com/",
-            logoSymbol: "bolt.badge.clock.fill",
-            accentHex: 0xFB923C,
-            defaultModelIds: ["mimo-v2.6-pro", "mimo-v2.6-flash"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "opencode-zen-messages",
-            name: "OpenCode Zen (Anthropic)",
-            category: "other",
-            apiFormat: .anthropicMessages,
-            defaultBaseURL: "https://opencode.ai/zen/v1",
-            apiKeyURL: "https://opencode.ai/zen",
-            logoSymbol: "terminal.fill",
-            accentHex: 0x14B8A6,
-            defaultModelIds: ["claude-sonnet-5", "claude-opus-5"]
-        ),
-        ProviderTemplateDescriptor(
-            id: "opencode-zen-responses",
-            name: "OpenCode Zen (Responses)",
-            category: "other",
-            apiFormat: .openaiResponses,
-            defaultBaseURL: "https://opencode.ai/zen/v1",
-            apiKeyURL: "https://opencode.ai/zen",
-            logoSymbol: "terminal",
-            accentHex: 0x0D9488,
-            defaultModelIds: ["gpt-5.4", "gpt-5.3-codex"]
+    public init(
+        id: String,
+        templateNameMap: [String: String],
+        group: String? = nil,
+        apiType: String? = nil,
+        baseURL: String? = nil,
+        accessType: String? = nil,
+        logoKey: String? = nil
+    ) {
+        self.id = id
+        self.templateNameMap = templateNameMap
+        self.group = group
+        self.apiType = apiType
+        self.baseURL = baseURL
+        self.accessType = accessType
+        self.logoKey = logoKey
+    }
+
+    public init?(json: [String: Any]) {
+        guard let templateId = json["templateId"] as? String, !templateId.isEmpty else { return nil }
+        let names = (json["templateNameMap"] as? [String: String])
+            ?? ((json["templateNameMap"] as? [String: Any])?.compactMapValues { $0 as? String })
+            ?? [:]
+        let config = (json["config"] as? [String: Any]) ?? [:]
+        let api = (config["api"] as? [String: Any]) ?? [:]
+        let access = (config["access"] as? [String: Any]) ?? [:]
+        let logo = (config["logo"] as? [String: Any]) ?? [:]
+        self.init(
+            id: templateId,
+            templateNameMap: names,
+            group: config["group"] as? String,
+            apiType: api["type"] as? String,
+            baseURL: api["baseUrl"] as? String,
+            accessType: access["type"] as? String,
+            logoKey: logo["key"] as? String
         )
-    ]
+    }
+
+    /// Templates are grouped by the host `zhipu` family vs everything else (renderer `BGn`).
+    public var isZhipuFamily: Bool {
+        group == "zai-family" || group == "bigmodel-family" || id.hasPrefix("zai-") || id.hasPrefix("bigmodel-")
+    }
+
+    public var apiFormat: ProviderAPIFormat {
+        switch apiType {
+        case "anthropic-messages": return .anthropicMessages
+        case "openai-responses": return .openaiResponses
+        case "openai-chat-completions": return .openaiChatCompletions
+        default: return .openaiChatCompletions
+        }
+    }
+
+    public func displayName(locale: String = "en-US") -> String {
+        if let exact = templateNameMap[locale], !exact.isEmpty { return exact }
+        let language = String(locale.prefix(2)).lowercased()
+        if let match = templateNameMap.first(where: { $0.key.lowercased().hasPrefix(language) })?.value, !match.isEmpty {
+            return match
+        }
+        if let english = templateNameMap["en-US"], !english.isEmpty { return english }
+        return templateNameMap.values.first ?? id
+    }
 }
 
 // MARK: - Sessions, Turns, Tools & Interactive Prompts
@@ -1886,4 +1850,86 @@ public struct NotificationInboxItem: Identifiable, Codable, Equatable {
     public var sessionId: String
     public var createdAt: Date
     public var isRead: Bool
+}
+
+// MARK: - Usage stats (real `usage-stats.getAppUsageSnapshot` / `getEntitlementSnapshot` payloads)
+
+public struct UsageModelTotal: Identifiable, Equatable {
+    public var modelId: String
+    public var totalTokens: Int
+    public var id: String { modelId }
+}
+
+public struct UsageDailyPoint: Identifiable, Equatable {
+    public var date: String
+    public var totalTokens: Int
+    public var models: [UsageModelTotal]
+    public var id: String { date }
+}
+
+/// Parsed subset of the host app-usage snapshot. Every field comes from the host;
+/// nothing is synthesized when the host omits it.
+public struct UsageStatsSnapshot: Equatable {
+    public var range: String
+    public var generatedAt: Double?
+    public var totalTokens: Int
+    public var peakDayTokens: Int
+    public var longestSessionMs: Int
+    public var currentStreakDays: Int
+    public var longestStreakDays: Int
+    public var models: [UsageModelTotal]
+    public var dailyModelUsage: [UsageDailyPoint]
+}
+
+/// One `quota.limits[]` entry of the coding-plan entitlement snapshot.
+public struct CodingPlanLimit: Identifiable, Equatable {
+    public var type: String
+    public var unit: Int?
+    public var number: Int?
+    public var percentage: Double?
+    public var remaining: Double?
+    public var currentValue: Double?
+    public var usage: Double?
+    public var nextResetTime: String?
+    public var showName: String?
+
+    public var id: String { "\(type)|\(unit ?? -1)|\(number ?? -1)|\(showName ?? "")" }
+
+    public var resolvedPercentUsed: Double? {
+        if let percentage {
+            return percentage > 1 ? percentage / 100.0 : percentage
+        }
+        guard let currentValue else { return nil }
+        let total = currentValue + (remaining ?? 0)
+        guard total > 0 else { return nil }
+        return currentValue / total
+    }
+
+    public var displayTitle: String {
+        if let showName, !showName.isEmpty { return showName }
+        switch type {
+        case "TOKENS_LIMIT": return "Tokens"
+        case "TIME_LIMIT": return "Time"
+        case "CREDIT_LIMIT": return "Credits"
+        default: return type
+        }
+    }
+}
+
+/// Parsed subset of `usage-stats.getEntitlementSnapshot` (host returns `visibleSnapshot`).
+public struct CodingPlanEntitlementSnapshot: Equatable {
+    public var planLevel: String?
+    public var unavailableReason: String?
+    public var remaining: String?
+    public var limits: [CodingPlanLimit]
+    public var productNames: [String]
+    public var expiresAt: String?
+}
+
+/// Pending workspace-hook trust review item from `hooks.loadHooks.workspaceHookSnapshot`.
+public struct PendingHookTrustItem: Identifiable, Equatable {
+    public var bundleDigest: String
+    public var hookDeclarationDigest: String
+    public var reviewItemId: String
+    public var id: String { reviewItemId }
 }
