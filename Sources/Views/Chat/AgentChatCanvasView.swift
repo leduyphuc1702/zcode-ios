@@ -231,7 +231,7 @@ public struct AgentChatCanvasView: View {
                             }
                         }
                         .transition(.opacity)
-                        .zIndex(20)
+                        .zIndex(store.showSubagentDrawer ? 30 : 20)
 
                     CodingInspectorWindowView(store: store, isDockedPane: true)
                         .frame(width: store.isInspectorExpandedFull ? geo.size.width : min(geo.size.width * 0.92, 448))
@@ -257,7 +257,7 @@ public struct AgentChatCanvasView: View {
                                 }
                         )
                         .transition(reduceMotion ? .opacity : .move(edge: .trailing))
-                        .zIndex(25)
+                        .zIndex(store.showSubagentDrawer ? 31 : 25)
                 }
 
                 // Official ZCode 1:1 Slide-Over SubAgent Multi-Tab Transcript View

@@ -24,7 +24,6 @@
 		4ACFF218AC976DCBC02095BA /* AppStore+TaskActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 083D3B036D45CF6C26DA4DD8 /* AppStore+TaskActivity.swift */; };
 		5356AFDEA782B7D7503BB95C /* ComposerPopoverUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44BE42D2921209F9F8768B95 /* ComposerPopoverUITests.swift */; };
 		573ECAD4B418BD6C3F0C6827 /* ToolCallRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CC03E7B38AE5C47F6668C48 /* ToolCallRowView.swift */; };
-		5EDB91CE0F528C37C4D7A590 /* MessageTextSelectionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9F7367D2A4D907B5BC25138 /* MessageTextSelectionSheet.swift */; };
 		621AB09C4D015045CE6844F3 /* GitChangesAndDiffViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15A40B491EB56F3AE7155E1C /* GitChangesAndDiffViewer.swift */; };
 		676715276F3B14BC813F3BFF /* ConnectionURLParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 125718F257068BE4B56577A0 /* ConnectionURLParser.swift */; };
 		68DB6B22AD71A75E93028032 /* FileExplorerAndCodeViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA04D9DEA9573755CEDE330 /* FileExplorerAndCodeViewer.swift */; };
@@ -44,6 +43,7 @@
 		92081F74BC94EB342C07A94E /* ZCodeMobileE2EUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 519E650C90EF618B960A2FD7 /* ZCodeMobileE2EUITests.swift */; };
 		935135BBE10C7CA5962770AA /* NativeMediaDocumentViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB0773D4E22E0F5640DBD1AF /* NativeMediaDocumentViewer.swift */; };
 		96C9B0EA56038BACB86B19A6 /* ZCodeVQLCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = C69B1E89A391AD40E347D376 /* ZCodeVQLCodec.swift */; };
+		9C1D217BCD2B775D9081BD7B /* SelectableMessageText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 554C9AD2E62028B3EDF81784 /* SelectableMessageText.swift */; };
 		9C554A6AF149269E74D194C0 /* AppStore+ProjectTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BECCF783A3E0AA64E59421D /* AppStore+ProjectTree.swift */; };
 		9E05EEA60A22F5285AA8F47D /* LiveSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD0A11859108C2E9920D961 /* LiveSyncTests.swift */; };
 		9F69794568EFFCC6B329E660 /* SubagentsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0481138DDF4B591E9225890 /* SubagentsSettingsView.swift */; };
@@ -110,6 +110,7 @@
 		4EF5C5479CF1065EF2D6BFC4 /* SyntaxHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntaxHighlighter.swift; sourceTree = "<group>"; };
 		519E650C90EF618B960A2FD7 /* ZCodeMobileE2EUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeMobileE2EUITests.swift; sourceTree = "<group>"; };
 		5488EF76DB8324D0A7407DD8 /* ZCode.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = ZCode.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		554C9AD2E62028B3EDF81784 /* SelectableMessageText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectableMessageText.swift; sourceTree = "<group>"; };
 		6B3A5C708941170C81CB0711 /* AppStore+ComposerCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppStore+ComposerCatalog.swift"; sourceTree = "<group>"; };
 		73C64FAD71928A73EA3A7019 /* ModelProviderSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelProviderSettingsView.swift; sourceTree = "<group>"; };
 		7627E9AA18A7E1A3D5DFCE5D /* ZCodeOnboardingAndHubView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeOnboardingAndHubView.swift; sourceTree = "<group>"; };
@@ -121,7 +122,6 @@
 		A5E1167E86C6134271122327 /* AppStore+SettingsSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppStore+SettingsSync.swift"; sourceTree = "<group>"; };
 		B0481138DDF4B591E9225890 /* SubagentsSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubagentsSettingsView.swift; sourceTree = "<group>"; };
 		B296D89A887ECBA85C7B16C3 /* ZCodeMobileTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = ZCodeMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		B9F7367D2A4D907B5BC25138 /* MessageTextSelectionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageTextSelectionSheet.swift; sourceTree = "<group>"; };
 		BE1E67CAD789E9E31380BAA4 /* ContextWindowPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextWindowPopover.swift; sourceTree = "<group>"; };
 		BE936A12FAE0B1D6A9AB6B4E /* ProjectTreeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectTreeTests.swift; sourceTree = "<group>"; };
 		BEEF67AED666A980DECF571A /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
@@ -260,8 +260,8 @@
 				17A7FE7393D697023ADC9444 /* AgentChatCanvasView.swift */,
 				365AF81EBFD79497ACA43675 /* ChatTurnCardView.swift */,
 				BE1E67CAD789E9E31380BAA4 /* ContextWindowPopover.swift */,
-				B9F7367D2A4D907B5BC25138 /* MessageTextSelectionSheet.swift */,
 				EF96C5A8D5FF09BAEE9FAB99 /* ModelPickerPopover.swift */,
+				554C9AD2E62028B3EDF81784 /* SelectableMessageText.swift */,
 				3CC03E7B38AE5C47F6668C48 /* ToolCallRowView.swift */,
 				46A0CBD93B5C25576D85F6E6 /* ZCodeComposerView.swift */,
 			);
@@ -490,7 +490,6 @@
 				621AB09C4D015045CE6844F3 /* GitChangesAndDiffViewer.swift in Sources */,
 				19F25C9FF02EFC5A59FBD808 /* IntegratedTerminalAndWorkflowView.swift in Sources */,
 				819F7A7D226281FBB37029F4 /* KeychainStore.swift in Sources */,
-				5EDB91CE0F528C37C4D7A590 /* MessageTextSelectionSheet.swift in Sources */,
 				CDE6BB9AF553D23FB53D0EBF /* ModelPickerPopover.swift in Sources */,
 				AD3A006D13240DBC24640294 /* ModelProviderSettingsView.swift in Sources */,
 				935135BBE10C7CA5962770AA /* NativeMediaDocumentViewer.swift in Sources */,
@@ -498,6 +497,7 @@
 				E261A4BD824300AD8F8A5355 /* SampleAssetGenerator.swift in Sources */,
 				46A433FEB480BC3E8E1EBF85 /* SecurityLockAndPatternView.swift in Sources */,
 				910322FA7F5936090C7207FC /* SeedWorkspaceFactory.swift in Sources */,
+				9C1D217BCD2B775D9081BD7B /* SelectableMessageText.swift in Sources */,
 				76C8000FD9E5A5692CE1CAAD /* SettingsPagesDetailViews.swift in Sources */,
 				9F69794568EFFCC6B329E660 /* SubagentsSettingsView.swift in Sources */,
 				1636649924905FA1722B314B /* SyntaxHighlighter.swift in Sources */,
@@ -586,7 +586,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 31610;
+				CURRENT_PROJECT_VERSION = 31611;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -695,7 +695,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 31610;
+				CURRENT_PROJECT_VERSION = 31611;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

@@ -6,6 +6,8 @@ final class V4SyncState {
     /// nil = not probed yet, false = host lacks V4 (legacy zcode-task facade is used instead).
     var available: Bool?
     var handshakeDone = false
+    /// Relay bridge the handshake was made on; a new bridge needs its own hello.
+    var handshakeBridgeId: String?
     var handshakeTask: Task<Bool, Never>?
     var assembler = V4WireFrameAssembler()
     var conversationFrameSubs: [String: Int32] = [:]
@@ -46,6 +48,7 @@ final class V4SyncState {
     /// Everything bound to the current host connection; channel listeners are already gone at this point.
     func resetConnection() {
         handshakeDone = false
+        handshakeBridgeId = nil
         handshakeTask?.cancel()
         handshakeTask = nil
         assembler.reset()
@@ -90,7 +93,9 @@ extension AppStore {
     func v4EnsureHandshake() async -> Bool {
         guard !isUITestSeededMode else { return false }
         if v4Sync.available == false { return false }
-        if v4Sync.handshakeDone { return true }
+        let bridgeId = await rpcClient.currentBridge()?.bridgeSessionId
+        if v4Sync.handshakeDone, v4Sync.handshakeBridgeId == bridgeId { return true }
+        v4Sync.handshakeDone = false
         if let running = v4Sync.handshakeTask { return await running.value }
         let task = Task { @MainActor () -> Bool in
             do {
@@ -105,6 +110,7 @@ extension AppStore {
                 ]
                 _ = try await self.rpcClient.call(channel: "zcode-agent", method: "initializeConversationV4", args: [.fromJSONObject(hello)], timeoutSec: 10)
                 self.v4Sync.handshakeDone = true
+                self.v4Sync.handshakeBridgeId = bridgeId
                 self.v4Sync.available = true
                 await self.v4ListenLifecycle()
                 return true
@@ -117,6 +123,11 @@ extension AppStore {
         let ok = await task.value
         v4Sync.handshakeTask = nil
         return ok
+    }
+
+    static func isHandshakeRequired(_ error: Error) -> Bool {
+        let parts = [(error as? V4CommandError)?.reasonCode, (error as? V4CommandError)?.message, error.localizedDescription]
+        return parts.contains { ($0 ?? "").localizedCaseInsensitiveContains("handshakeRequired") }
     }
 
     private static func isUnsupportedMethod(_ error: Error) -> Bool {
@@ -422,6 +433,7 @@ extension AppStore {
     ) async throws -> [String: Any] {
         let identity = workspaceIdentityByPath[workspacePath]
         var attempt = 0
+        var rehandshaked = false
         var baseRevision = v4Sync.conversation.flatMap { $0.sessionId == sessionId ? $0.revision : nil }
         while true {
             var envelope: [String: Any] = [
@@ -437,10 +449,24 @@ extension AppStore {
             var arg = v4WorkspaceArg(workspacePath, identity)
             if let projectId { arg["projectId"] = projectId }
             arg["envelope"] = envelope
-            let value = try await rpcClient.call(channel: "zcode-agent", method: "sendConversationCommandV4", args: [.fromJSONObject(arg)], timeoutSec: 30)
-            let dict = value.decodeJSONDictionary() ?? [:]
-            let ack = (dict["ack"] as? [String: Any]) ?? dict
+            let ack: [String: Any]
+            do {
+                let value = try await rpcClient.call(channel: "zcode-agent", method: "sendConversationCommandV4", args: [.fromJSONObject(arg)], timeoutSec: 30)
+                let dict = value.decodeJSONDictionary() ?? [:]
+                ack = (dict["ack"] as? [String: Any]) ?? dict
+            } catch where !rehandshaked && Self.isHandshakeRequired(error) {
+                rehandshaked = true
+                v4Sync.handshakeDone = false
+                guard await v4EnsureHandshake() else { throw error }
+                continue
+            }
             let status = (ack["status"] as? String) ?? "accepted"
+            if !rehandshaked, status != "accepted", status != "duplicate", status != "noop",
+               Self.isHandshakeRequired(V4CommandError(status: status, reasonCode: ack["reasonCode"] as? String, message: ack["message"] as? String)) {
+                rehandshaked = true
+                v4Sync.handshakeDone = false
+                if await v4EnsureHandshake() { continue }
+            }
             switch status {
             case "accepted", "duplicate", "noop":
                 return ack
@@ -913,6 +939,11 @@ extension AppStore {
         pane.status = projection.status
         pane.statusNotice = projection.statusNotice
         pane.todos = projection.todos
+        if let model = projection.model {
+            pane.model = model
+        } else if let label = projection.messages.last(where: { !($0.modelLabel ?? "").isEmpty })?.modelLabel {
+            pane.model = LiveModelSelection(providerId: "", modelId: label)
+        }
         pane.isLoading = false
         pane.errorText = nil
         if pane != subagentPane { subagentPane = pane }

@@ -313,3 +313,28 @@ final class V4ConversationMapperTests: XCTestCase {
         XCTAssertFalse(outcome.isBlocked)
     }
 }
+
+@MainActor
+final class V4HandshakeRecoveryTests: XCTestCase {
+    func testHandshakeRequiredIsDetectedFromAckAndTransportErrors() {
+        XCTAssertTrue(AppStore.isHandshakeRequired(V4CommandError(status: "rejected", reasonCode: "fault.connection.handshakeRequired", message: nil)))
+        XCTAssertTrue(AppStore.isHandshakeRequired(NSError(domain: "ZCodeRPC", code: 1, userInfo: [NSLocalizedDescriptionKey: "fault.connection.handshakeRequired"])))
+        XCTAssertFalse(AppStore.isHandshakeRequired(V4CommandError(status: "stale", reasonCode: "revision.stale", message: nil)))
+    }
+}
+
+final class SelectableMessageTextTests: XCTestCase {
+    func testInlineMarkdownKeepsPlainTextForPartialSelection() {
+        let rendered = SelectableMessageText.render(
+            markdown: "Run **swift build** then `make test` and [docs](https://example.com)",
+            font: .systemFont(ofSize: 15), color: .white, lineSpacing: 4, codeBackground: .darkGray
+        )
+        XCTAssertEqual(rendered.string, "Run swift build then make test and docs")
+        let codeRange = (rendered.string as NSString).range(of: "make test")
+        let codeFont = rendered.attribute(.font, at: codeRange.location, effectiveRange: nil) as? UIFont
+        XCTAssertTrue(codeFont?.fontDescriptor.symbolicTraits.contains(.traitMonoSpace) ?? false)
+        let boldFont = rendered.attribute(.font, at: (rendered.string as NSString).range(of: "swift").location, effectiveRange: nil) as? UIFont
+        XCTAssertTrue(boldFont?.fontDescriptor.symbolicTraits.contains(.traitBold) ?? false)
+        XCTAssertNotNil(rendered.attribute(.link, at: (rendered.string as NSString).range(of: "docs").location, effectiveRange: nil))
+    }
+}

@@ -7,7 +7,6 @@ public struct ChatTurnCardView: View {
     var readOnly: Bool = false
     @Environment(\.zcodePalette) private var palette
     @State private var isThoughtExpanded: Bool = false
-    @State private var showSelectTextSheet: Bool = false
     @State private var showEditMessageSheet: Bool = false
     @State private var editDraft: String = ""
 
@@ -38,20 +37,6 @@ public struct ChatTurnCardView: View {
             } else {
                 assistantTurnView
             }
-        }
-        .sheet(isPresented: $showSelectTextSheet) {
-            MessageTextSelectionSheet(
-                text: message.content,
-                senderName: quoteSenderName,
-                onQuote: { excerpt in
-                    quoteText(excerpt)
-                },
-                onCopy: { excerpt in
-                    UIPasteboard.general.string = excerpt
-                    store.showToast("Copied text")
-                }
-            )
-            .environment(\.zcodePalette, palette)
         }
     }
 
@@ -138,11 +123,14 @@ public struct ChatTurnCardView: View {
                     }
 
                     if !message.content.isEmpty {
-                        Text(message.content)
-                            .font(.system(size: 15))
-                            .foregroundStyle(palette.foreground)
-                            .lineSpacing(3)
-                            .fixedSize(horizontal: false, vertical: true)
+                        SelectableMessageText(
+                            plain: message.content,
+                            font: .systemFont(ofSize: 15),
+                            color: UIColor(palette.foreground),
+                            lineSpacing: 3,
+                            linkColor: UIColor(palette.accentBlue),
+                            onQuote: selectionQuoteHandler
+                        )
                     }
                 }
                 .padding(.horizontal, 14)
@@ -152,13 +140,25 @@ public struct ChatTurnCardView: View {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .strokeBorder(palette.border, lineWidth: 1)
                 )
-                .contextMenu {
-                    messageContextMenuItems
-                }
 
-                if canEditMessage {
-                    HStack {
-                        Spacer(minLength: 0)
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    if hasQuotableContent {
+                        Button {
+                            UIPasteboard.general.string = message.content
+                            store.showToast("Copied message")
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 13, weight: .regular))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .frame(width: 32, height: 30)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Copy message")
+                        .accessibilityIdentifier("copyUserMessageButton_\(message.id)")
+                    }
+                    if canEditMessage {
                         Button {
                             beginEditingMessage()
                         } label: {
@@ -209,38 +209,25 @@ public struct ChatTurnCardView: View {
         .accessibilityIdentifier("userMessageQuote_\(quote.id)")
     }
 
-    @ViewBuilder
-    private var messageContextMenuItems: some View {
-        if canEditMessage {
-            Button {
-                beginEditingMessage()
-            } label: {
-                Label("Edit", systemImage: "pencil")
-            }
+    /// Read-only transcripts (subagent pane) offer Copy only, like the desktop's read-only pane.
+    private var selectionQuoteHandler: ((String) -> Void)? {
+        readOnly ? nil : { excerpt in quoteText(excerpt) }
+    }
 
-            Divider()
-        }
+    private var codeSpanBackground: UIColor {
+        palette.isDark ? UIColor(red: 0.175, green: 0.175, blue: 0.175, alpha: 1) : UIColor(red: 0.91, green: 0.91, blue: 0.92, alpha: 1)
+    }
 
-        if hasQuotableContent {
-            Button {
-                quoteText(message.content)
-            } label: {
-                Label("Quote message", systemImage: "text.quote")
-            }
-
-            Button {
-                showSelectTextSheet = true
-            } label: {
-                Label("Select text", systemImage: "selection.pin.in.out")
-            }
-
-            Button {
-                UIPasteboard.general.string = message.content
-                store.showToast("Copied message")
-            } label: {
-                Label("Copy message", systemImage: "doc.on.doc")
-            }
-        }
+    private func selectableMarkdown(_ text: String, size: CGFloat, color: Color, lineSpacing: CGFloat) -> some View {
+        SelectableMessageText(
+            markdown: text,
+            font: .systemFont(ofSize: size),
+            color: UIColor(color),
+            lineSpacing: lineSpacing,
+            codeBackground: codeSpanBackground,
+            linkColor: UIColor(palette.accentBlue),
+            onQuote: selectionQuoteHandler
+        )
     }
 
     // MARK: - Assistant Turn (Official ZCode Editorial Typography & Action Row)
@@ -304,11 +291,7 @@ public struct ChatTurnCardView: View {
                                 RoundedRectangle(cornerRadius: 1.5)
                                     .fill(palette.borderStrong)
                                     .frame(width: 3)
-                                Text(renderInlineMarkdown(quoteText))
-                                    .font(.system(size: 15))
-                                    .foregroundStyle(palette.foregroundSubtle)
-                                    .lineSpacing(4)
-                                    .fixedSize(horizontal: false, vertical: true)
+                                selectableMarkdown(quoteText, size: 15, color: palette.foregroundSubtle, lineSpacing: 4)
                             }
                             .padding(.vertical, 2)
 
@@ -320,11 +303,7 @@ public struct ChatTurnCardView: View {
                                             .fill(palette.foregroundMuted)
                                             .frame(width: 5, height: 5)
                                             .padding(.top, 8)
-                                        Text(renderInlineMarkdown(item))
-                                            .font(.system(size: 15.5))
-                                            .foregroundStyle(palette.foreground)
-                                            .lineSpacing(4)
-                                            .fixedSize(horizontal: false, vertical: true)
+                                        selectableMarkdown(item, size: 15.5, color: palette.foreground, lineSpacing: 4)
                                     }
                                 }
                             }
@@ -354,6 +333,7 @@ public struct ChatTurnCardView: View {
                                     Text(code)
                                         .font(.system(size: 13, design: .monospaced))
                                         .foregroundStyle(palette.foreground)
+                                        .textSelection(.enabled)
                                         .padding(12)
                                 }
                             }
@@ -361,20 +341,13 @@ public struct ChatTurnCardView: View {
                             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(palette.border, lineWidth: 1))
 
                         case .paragraph(let paragraphText):
-                            Text(renderInlineMarkdown(paragraphText))
-                                .font(.system(size: 15.5))
-                                .foregroundStyle(palette.foreground)
-                                .lineSpacing(4.5)
-                                .fixedSize(horizontal: false, vertical: true)
+                            selectableMarkdown(paragraphText, size: 15.5, color: palette.foreground, lineSpacing: 4.5)
                         }
                     }
                 }
-                .contextMenu {
-                    messageContextMenuItems
-                }
             }
 
-            // Official ZCode Turn Action Row: Copy • Thumbs Up • Thumbs Down • Fork • Quote • Timestamp (HIG 34pt touch areas)
+            // Official ZCode Turn Action Row: Copy • Thumbs Up • Thumbs Down • Fork • Quote (HIG 34pt touch areas)
             HStack(spacing: 4) {
                 Button {
                     UIPasteboard.general.string = message.content
@@ -449,11 +422,6 @@ public struct ChatTurnCardView: View {
                     .accessibilityLabel("Quote message")
                     .accessibilityIdentifier("quoteMessageButton_\(message.id)")
                 }
-
-                Text(formattedTurnTime(message.timestamp))
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(palette.foregroundMuted)
-                    .padding(.leading, 6)
 
                 Spacer()
             }
@@ -532,30 +500,6 @@ public struct ChatTurnCardView: View {
             }
         }
         return blocks
-    }
-
-    private func renderInlineMarkdown(_ text: String) -> AttributedString {
-        if var parsed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-            let codeBg = palette.isDark
-                ? Color(red: 0.175, green: 0.175, blue: 0.175)
-                : Color(red: 0.91, green: 0.91, blue: 0.92)
-            for run in parsed.runs {
-                if let intent = run.inlinePresentationIntent, intent.contains(.code) {
-                    parsed[run.range].font = .system(size: 13.5, weight: .regular, design: .monospaced)
-                    parsed[run.range].backgroundColor = codeBg
-                    parsed[run.range].foregroundColor = palette.foreground
-                }
-            }
-            return parsed
-        }
-        return AttributedString(text)
-    }
-
-    private func formattedTurnTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "hh:mm a"
-        return formatter.string(from: date)
     }
 }
 

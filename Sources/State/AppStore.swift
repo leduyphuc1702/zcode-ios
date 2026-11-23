@@ -987,6 +987,10 @@ public final class AppStore {
             feedback: 0,
             quotes: outgoingQuotes.isEmpty ? nil : outgoingQuotes
         )
+        if session.status == .error, let last = session.messages.last, last.role == "user", last.content == userMsg.content {
+            session.messages.removeLast()
+        }
+        session.statusNoticeText = nil
         session.messages.append(userMsg)
         session.status = .running
         session.updatedAt = Date()

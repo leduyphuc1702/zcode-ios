@@ -1116,6 +1116,8 @@ public struct SubagentPaneState: Equatable {
     public var status: TaskSessionStatus = .idle
     public var statusNotice: String?
     public var todos: [TodoChecklistItem] = []
+    /// Model the child session runs on (`state.config.modelSelection`).
+    public var model: LiveModelSelection?
     public var isLoading = true
     public var errorText: String?
 }

@@ -1017,6 +1017,7 @@ public struct ZCodeUnifiedTaskStatusPanelView: View {
 public struct ZCodeSubagentSlideOverDrawerView: View {
     @Bindable var store: AppStore
     @Environment(\.zcodePalette) private var palette
+    @State private var todosExpanded = false
 
     public init(store: AppStore) {
         self.store = store
@@ -1029,10 +1030,107 @@ public struct ZCodeSubagentSlideOverDrawerView: View {
                 .fill(palette.border)
                 .frame(height: 1)
             content
+            if let pane = store.subagentPane, !pane.todos.isEmpty || pane.model != nil {
+                statusFooter(pane)
+            }
         }
         .background(palette.background)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("subagentSlideOverDrawer")
+    }
+
+    /// The child pane's todo list and model, shown where the main chat shows its todo pill and composer model.
+    private func statusFooter(_ pane: SubagentPaneState) -> some View {
+        let done = pane.todos.filter { $0.status == "completed" }.count
+        let active = pane.todos.first(where: { $0.status == "in_progress" }) ?? pane.todos.first(where: { $0.status != "completed" })
+        return VStack(alignment: .leading, spacing: 8) {
+            if !pane.todos.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) { todosExpanded.toggle() }
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: done == pane.todos.count ? "checkmark" : "arrow.right")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(done == pane.todos.count ? palette.success : palette.foregroundSubtle)
+                            Text(todosExpanded ? "Tasks (\(done)/\(pane.todos.count))" : (active?.content ?? "Tasks (\(done)/\(pane.todos.count))"))
+                                .font(.system(size: 13, weight: todosExpanded ? .semibold : .regular))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .lineLimit(1)
+                            Spacer(minLength: 6)
+                            if !todosExpanded {
+                                Text("\(done)/\(pane.todos.count)")
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(palette.foregroundMuted)
+                            }
+                            Image(systemName: todosExpanded ? "chevron.down" : "chevron.up")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(palette.foregroundMuted)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("subagentTodoToggle")
+
+                    if todosExpanded {
+                        ForEach(pane.todos) { item in
+                            HStack(alignment: .top, spacing: 8) {
+                                Group {
+                                    if item.status == "completed" {
+                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(palette.success)
+                                    } else if item.status == "in_progress" {
+                                        Image(systemName: "arrow.right").foregroundStyle(palette.foregroundSubtle)
+                                    } else {
+                                        Image(systemName: "circle").foregroundStyle(palette.foregroundMuted)
+                                    }
+                                }
+                                .font(.system(size: 12))
+                                .frame(width: 14)
+                                .padding(.top, 2)
+                                Text(item.content)
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(item.status == "completed" ? palette.foregroundMuted : palette.foreground)
+                                    .strikethrough(item.status == "completed", color: palette.foregroundMuted)
+                                    .lineLimit(3)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(palette.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+                .accessibilityIdentifier("subagentTodoList")
+            }
+
+            if let model = pane.model {
+                HStack(spacing: 6) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 11.5))
+                    Text(model.modelId)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let level = model.reasoningLevel, !level.isEmpty {
+                        Text(ZCodeComposerView.reasoningTitle(level))
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(palette.foregroundMuted)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(palette.foregroundSubtle)
+                .padding(.horizontal, 4)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("subagentModelLabel")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
+        .background(palette.background)
+        .overlay(alignment: .top) {
+            Rectangle().fill(palette.border).frame(height: 1)
+        }
     }
 
     private var header: some View {
