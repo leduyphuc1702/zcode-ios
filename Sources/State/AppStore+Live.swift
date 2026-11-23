@@ -80,6 +80,12 @@ final class LiveSyncState {
     var permissionOptions: [String: [[String: Any]]] = [:]
     var streamingMessageId: [String: String] = [:]
     var suppressBridgeResubscribe = false
+    /// Bridges whose resubscription the opener runs itself; the bridge-change handler skips them.
+    var selfManagedBridgeIds: Set<String> = []
+    /// Task the host reported as active in the last bootstrap (the one the phone should reopen).
+    var bootstrapActiveTaskId: String?
+    /// Set while `selectSession` changes the active project; it opens the task's bridge itself.
+    var selectingSession = false
     var resubscribeTask: Task<Void, Never>?
     var reconnectTask: Task<Void, Never>?
     var reconnectAttempts = 0
@@ -449,53 +455,61 @@ extension AppStore {
     // MARK: - Realtime subscriptions
 
     func installLiveConnectionHandlers() async {
-        await rpcClient.setBridgeChangeHandler { [weak self] _ in
+        await rpcClient.setBridgeChangeHandler { [weak self] identity in
             Task { @MainActor in
-                guard let self, !self.liveSync.suppressBridgeResubscribe else { return }
+                guard let self, !self.liveSync.suppressBridgeResubscribe,
+                      !self.liveSync.selfManagedBridgeIds.contains(identity.bridgeSessionId) else { return }
                 self.liveSync.workspaceSubs.removeAll()
                 self.liveSync.modelViewSubId = nil
                 self.liveSync.activeTaskSubId = nil
                 self.liveSync.activeTaskId = nil
-                self.scheduleResubscribe(handlersCleared: true)
+                self.scheduleResubscribe(handlersCleared: true, bridgeId: identity.bridgeSessionId)
             }
         }
         await rpcClient.setBridgeDegradedHandler { [weak self] reason in
             Task { @MainActor in
+                LoadBench.mark("bridge degraded \(reason)")
                 self?.recoverDegradedBridge(reason: reason)
             }
         }
         await rpcClient.setBootstrapRequiredHandler { [weak self] in
             Task { @MainActor in
+                LoadBench.mark("bootstrap required")
                 self?.rebootstrapRelay(reason: "bootstrap-required")
             }
         }
         await rpcClient.setConnectionLostHandler { [weak self] reason in
             Task { @MainActor in
+                LoadBench.mark("connection lost \(reason)")
                 self?.handleHostConnectionLost(reason: reason)
             }
         }
         await rpcClient.setPeerStatusHandler { [weak self] online in
             Task { @MainActor in
+                LoadBench.mark("peer online=\(online)")
                 self?.handlePeerStatus(online: online)
             }
         }
         await rpcClient.setTerminalErrorHandler { [weak self] code, message in
             Task { @MainActor in
+                LoadBench.mark("terminal error \(code) \(message)")
                 self?.handleTerminalError(code: code, message: message)
             }
         }
     }
 
-    func scheduleResubscribe(handlersCleared: Bool) {
+    func scheduleResubscribe(handlersCleared: Bool, bridgeId: String? = nil) {
         liveSync.resubscribeTask?.cancel()
         liveSync.resubscribeTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 150_000_000)
             guard !Task.isCancelled else { return }
+            if let bridgeId, self.liveSync.selfManagedBridgeIds.contains(bridgeId) { return }
             await self.resubscribeAll(handlersCleared: handlersCleared)
         }
     }
 
     func resubscribeAll(handlersCleared: Bool) async {
+        LoadBench.mark("resubscribeAll cleared=\(handlersCleared) connected=\(isLiveHostConnected)")
         guard isLiveHostConnected || pairingPhase == .pairedSyncing else { return }
         if !handlersCleared {
             for subId in liveSync.workspaceSubs.values { await rpcClient.unlisten(subId) }
@@ -518,23 +532,26 @@ extension AppStore {
         liveSync.activeTaskSubId = nil
         liveSync.activeTaskId = nil
 
-        if let subId = try? await rpcClient.listen(channel: "model-selection", event: "onDidChange", onEvent: { [weak self] _ in
-            Task { @MainActor in await self?.refreshLiveModelView() }
-        }) {
-            liveSync.modelViewSubId = subId
+        // The open conversation goes first; everything else runs alongside it instead of in front of it.
+        await withTaskGroup(of: Void.self) { group in
+            if let session = activeSession, !session.id.hasPrefix("task-") {
+                group.addTask { @MainActor in await self.subscribeActiveTask(session) }
+            }
+            group.addTask { @MainActor in
+                for project in self.projects {
+                    await self.subscribeWorkspaceEvents(project)
+                }
+                if let subId = try? await self.rpcClient.listen(channel: "model-selection", event: "onDidChange", onEvent: { [weak self] _ in
+                    Task { @MainActor in await self?.refreshLiveModelView() }
+                }) {
+                    self.liveSync.modelViewSubId = subId
+                }
+                await self.refreshLiveModelView()
+            }
+            group.addTask { @MainActor in await self.subscribeHostSettings() }
+            group.addTask { @MainActor in await self.subscribeSessionsIndexes() }
+            group.addTask { @MainActor in await self.subscribeControllerTaskIndex() }
         }
-        await refreshLiveModelView()
-        await subscribeHostSettings()
-
-        for project in projects {
-            await subscribeWorkspaceEvents(project)
-        }
-
-        if let session = activeSession, !session.id.hasPrefix("task-") {
-            await subscribeActiveTask(session)
-        }
-        await subscribeSessionsIndexes()
-        await subscribeControllerTaskIndex()
     }
 
     /// Live status badges for every session; over the relay only the bridged workspace is reachable.

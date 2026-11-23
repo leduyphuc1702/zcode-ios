@@ -694,6 +694,7 @@ public actor ZCodeRPCClient {
 
         nextBridgeGeneration += 1
         let generation = nextBridgeGeneration
+        LoadBench.markAsync("openWorkspaceBridge gen=\(generation) force=\(forceReopen) key=\(workspaceKey.suffix(24))")
         let bridgeSessionId = "bridge-\(UUID().uuidString.lowercased())"
         let requestId = "workspace-bridge-\(UUID().uuidString.lowercased())"
         let recoveryId: String? = forceReopen ? "rec-\(UUID().uuidString.lowercased())" : nil

@@ -342,6 +342,9 @@ public final class AppStore {
         if appLockEnabled {
             isLocked = true
         }
+        #if DEBUG
+        if !shouldSeed { runLoadBenchIfRequested() }
+        #endif
     }
 
     // MARK: - Computed Conveniences
@@ -628,6 +631,7 @@ public final class AppStore {
     private func switchRemoteWorkspaceBridgeIfNeeded(projectId: String) {
         guard !isUITestSeededMode,
               !isBulkSyncingWorkspaces,
+              !liveSync.selectingSession,
               let conn = activeConnection,
               conn.state == .connected,
               let project = projects.first(where: { $0.id == projectId }) else {
@@ -732,7 +736,9 @@ public final class AppStore {
         if session.id != activeSessionId, subagentPane != nil { closeSubagentSession() }
         activeSessionId = session.id
         if projects.contains(where: { $0.id == session.projectId }) {
+            liveSync.selectingSession = true
             activeProjectId = session.projectId
+            liveSync.selectingSession = false
         }
         let wasUnread = session.unread
         if let idx = sessions.firstIndex(where: { $0.id == session.id }) {
@@ -740,6 +746,7 @@ public final class AppStore {
         }
         showSidebarDrawer = false
         mobilePage = .chat
+        LoadBench.mark("selectSession conn=\(activeConnection?.state == .connected) id=\(session.id)")
 
         if !isUITestSeededMode,
            let conn = activeConnection,
@@ -749,17 +756,32 @@ public final class AppStore {
             let wsPath = session.workspacePath
             let wsIdentity = session.workspaceIdentity ?? workspaceIdentityByPath[wsPath]
             let wsKey = ZCodeRPCClient.resolveWorkspaceKey(workspacePath: wsPath, workspaceIdentity: wsIdentity)
+            Task { @MainActor in await self.v4PreviewCachedConversation(session) }
             Task { @MainActor in
+                var bridgeChanged = false
+                LoadBench.mark("select task started")
                 if conn.transport == .cloudRelayV2 {
-                    try? await self.openBridge(for: session)
+                    let previousBridgeId = await self.rpcClient.currentBridge()?.bridgeSessionId
+                    LoadBench.mark("select got bridge")
+                    do { try await self.openBridge(for: session) } catch { LoadBench.mark("openBridge failed \(error.localizedDescription)") }
+                    LoadBench.mark("bridge opened changed=\(await self.rpcClient.currentBridge()?.bridgeSessionId != previousBridgeId)")
+                    if let bridgeId = await self.rpcClient.currentBridge()?.bridgeSessionId, bridgeId != previousBridgeId {
+                        self.liveSync.selfManagedBridgeIds.insert(bridgeId)
+                        bridgeChanged = true
+                    }
                     await self.rpcClient.sendMobileViewStateUpdate(workspaceKey: wsKey, taskId: sid)
                 }
                 if wasUnread {
                     var args = self.hostTaskScope(for: session)
                     args["unread"] = false
-                    _ = try? await self.rpcClient.call(channel: "zcode-task", method: "setTaskUnread", args: [.fromJSONObject(args)], timeoutSec: 8.0)
+                    let client = self.rpcClient
+                    Task { _ = try? await client.call(channel: "zcode-task", method: "setTaskUnread", args: [.fromJSONObject(args)], timeoutSec: 8.0) }
                 }
-                if let current = self.sessions.first(where: { $0.id == sid }) {
+                if bridgeChanged {
+                    // A new bridge drops every listener; resubscribe once here (active task first) rather than
+                    // racing the bridge-change handler's own pass.
+                    await self.resubscribeAll(handlersCleared: true)
+                } else if let current = self.sessions.first(where: { $0.id == sid }) {
                     await self.subscribeActiveTask(current)
                 }
                 await self.hydrateWorkspaceFilesAndGit(workspacePath: wsPath, projectId: session.projectId)
@@ -1951,6 +1973,7 @@ public final class AppStore {
                 }
             }
 
+            LoadBench.mark("paired")
             await rpcClient.setWorkspaceListUpdateHandler { [weak self] summaries, activeKey, _ in
                 Task { @MainActor in
                     self?.applyPushedWorkspaceListUpdate(summaries, activeWorkspaceKey: activeKey)
@@ -1977,7 +2000,13 @@ public final class AppStore {
             showConnectionHub = false
             liveSync.reconnectAttempts = 0
             if !silent {
-                mobilePage = .home
+                // Reopen the task the host reports as active (already subscribing), like the web client.
+                if let taskId = liveSync.bootstrapActiveTaskId, taskId == activeSessionId,
+                   sessions.contains(where: { $0.id == taskId && !$0.archived }) {
+                    mobilePage = .chat
+                } else {
+                    mobilePage = .home
+                }
                 playNotificationHaptic(.success)
                 showToast("Connected to \(target.name) (\(ms)ms)")
             }
@@ -2030,6 +2059,7 @@ public final class AppStore {
                 preferredWorkspaceKey: resumeKey,
                 preferredTaskId: resumeTaskId
             )
+            LoadBench.mark("bootstrap active=\(snapshot.activeTaskId ?? "-")")
             if snapshot.desktopAppVersion == nil, snapshot.workspaces.isEmpty {
                 return false
             }
@@ -2041,6 +2071,10 @@ public final class AppStore {
             }
             preferredActiveWorkspaceKey = snapshot.activeWorkspaceKey
             preferredActiveTaskId = snapshot.activeTaskId
+            liveSync.bootstrapActiveTaskId = snapshot.activeTaskId
+            if let bridgeId = snapshot.openedBridge?.bridgeSessionId {
+                liveSync.selfManagedBridgeIds.insert(bridgeId)
+            }
 
             for ws in snapshot.workspaces {
                 if let wsId = ws.workspaceIdentity, !wsId.isEmpty {
@@ -2063,6 +2097,15 @@ public final class AppStore {
                 for t in ws.tasks {
                     nextSessions.append(Self.makeAgentSession(from: t, projectId: projId))
                 }
+            }
+            // Bootstrap may list no tasks; a stub lets the active conversation subscribe before `project.readTree` lands.
+            if let taskId = snapshot.activeTaskId, !taskId.isEmpty, !nextSessions.contains(where: { $0.id == taskId }),
+               let ws = snapshot.workspaces.first(where: { $0.workspaceKey == snapshot.activeWorkspaceKey }) {
+                let stub = RemoteTaskSummary(
+                    id: taskId, title: "", workspacePath: ws.workspacePath, workspaceIdentity: ws.workspaceIdentity,
+                    status: "idle", pinned: false, archived: false, unread: false, updatedAt: Date()
+                )
+                nextSessions.append(Self.makeAgentSession(from: stub, projectId: Self.stableProjectId(for: ws.workspaceKey)))
             }
         }
 
@@ -2136,16 +2179,31 @@ public final class AppStore {
             self.isBulkSyncingWorkspaces = false
         }
 
+        // Like the web client, the bootstrap's active conversation subscribes while the sidebar tree loads.
+        let subscriptions = Task { @MainActor in await self.resubscribeAll(handlersCleared: false) }
+        activeHydrationTask = subscriptions
+
         // Desktop sidebar parity: `project.readTree` covers every known workspace (projects + project-less tasks);
         // older hosts fall back to the per-open-workspace fan-out.
-        if !(await loadProjectTree(preferredActiveTaskId: preferredActiveTaskId)) {
+        var bridgeReplaced = false
+        let treeLoaded = await loadProjectTree(preferredActiveTaskId: preferredActiveTaskId)
+        LoadBench.mark("tree loaded=\(treeLoaded) tasks=\(sessions.count)")
+        if !treeLoaded {
             sidebarTreeLoaded = false
+            await subscriptions.value
+            let bridgeBefore = await rpcClient.currentBridge()?.bridgeSessionId
             await loadAllWorkspaceTasks(preferredActiveTaskId: preferredActiveTaskId)
+            bridgeReplaced = await rpcClient.currentBridge()?.bridgeSessionId != bridgeBefore
         }
 
         let primaryProject = self.activeProject
         activeHydrationTask = Task { @MainActor in
-            await self.resubscribeAll(handlersCleared: false)
+            if bridgeReplaced {
+                await self.resubscribeAll(handlersCleared: true)
+            } else if let session = self.activeSession, !session.id.hasPrefix("task-") {
+                await self.subscribeActiveTask(session)
+            }
+            await subscriptions.value
             if let primaryProject {
                 await self.hydrateWorkspaceFilesAndGit(workspacePath: primaryProject.rootPath, projectId: primaryProject.id)
                 await self.syncAllSettingsFromRemoteDesktop()

@@ -120,6 +120,7 @@ extension AppStore {
                 await self.v4ListenLifecycle()
                 return true
             } catch {
+                LoadBench.mark("handshake failed \(error.localizedDescription)")
                 if Self.isUnsupportedMethod(error) { self.v4Sync.available = false }
                 return false
             }
@@ -231,7 +232,10 @@ extension AppStore {
             v4Sync.conversation = current
             switch result {
             case .applied:
-                if current.hasSnapshot { v4Sync.snapshotWatchdog?.cancel() }
+                if current.hasSnapshot {
+                    v4Sync.snapshotWatchdog?.cancel()
+                    LoadBench.noteLive(current.sessionId, "frame")
+                }
                 v4SchedulePublish()
             case .gap:
                 v4Resync(force: !current.hasSnapshot)
@@ -250,8 +254,10 @@ extension AppStore {
     /// Subscribes the V4 conversation stream for `session`; false means the caller should use the legacy task stream.
     func v4SubscribeConversation(_ session: AgentTaskSession) async -> Bool {
         guard !isUITestSeededMode, !session.id.hasPrefix("task-") else { return false }
+        LoadBench.mark("v4 subscribe requested \(session.id)")
         guard await v4EnsureHandshake() else { return false }
         if let conv = v4Sync.conversation, conv.sessionId == session.id, conv.subscriptionId != nil || v4Sync.subscribeInFlight == session.id {
+            LoadBench.mark("v4 subscribe skipped (already) \(session.id)")
             return true
         }
         let path = session.workspacePath
@@ -291,6 +297,7 @@ extension AppStore {
         var arg = v4WorkspaceArg(path, identity)
         arg["sessionId"] = session.id
         if let base = conv.base { arg["base"] = base }
+        LoadBench.mark("subscribe \(session.id) cached=\(conv.hasSnapshot)")
         do {
             let value: VQLValue
             do {
@@ -311,6 +318,8 @@ extension AppStore {
             let resumed = (ack["mode"] as? String) == "resume" && arg["base"] != nil
                 && (ack["logEpoch"] as? String) == v4Sync.conversation?.logEpoch
             if !resumed, v4Sync.conversation?.hasSnapshot == true { v4Sync.conversation?.awaitFreshSnapshot() }
+            LoadBench.mark("ack \(ack["mode"] as? String ?? "?") resumed=\(resumed) \(session.id)")
+            if resumed { LoadBench.noteLive(session.id, "resume") }
             v4Sync.awaitingAck = false
             liveSync.activeTaskId = session.id
             let staged = v4Sync.staged
@@ -454,6 +463,20 @@ extension AppStore {
     }
 
     // MARK: - Local cache
+
+    /// Shows the cached transcript of `session` right away (read-only) while its bridge and subscription come up.
+    func v4PreviewCachedConversation(_ session: AgentTaskSession) async {
+        guard !isUITestSeededMode, !session.id.hasPrefix("task-"), session.messages.isEmpty else { return }
+        let key = v4ConversationCacheKey(sessionId: session.id, path: session.workspacePath, identity: workspaceIdentityByPath[session.workspacePath])
+        guard let payload = await V4LocalCache.loadConversation(key: key),
+              let conv = V4ConversationState(cachePayload: payload, sessionId: session.id), conv.hasSnapshot,
+              v4Sync.conversation?.sessionId != session.id || v4Sync.conversation?.hasSnapshot != true,
+              let idx = sessions.firstIndex(where: { $0.id == session.id }), sessions[idx].messages.isEmpty else { return }
+        let projection = V4ConversationMapper.project(conv) { _ in 0 }
+        sessions[idx].messages = projection.messages
+        sessions[idx].todos = projection.todos
+        LoadBench.mark("cache preview \(session.id) msgs=\(projection.messages.count)")
+    }
 
     func v4ConversationCacheKey(sessionId: String, path: String, identity: String?) -> String {
         V4LocalCache.key("conversation", activeConnectionId, ZCodeRPCClient.resolveWorkspaceKey(workspacePath: path, workspaceIdentity: identity), sessionId)

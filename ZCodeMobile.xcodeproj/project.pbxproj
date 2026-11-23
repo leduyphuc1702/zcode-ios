@@ -51,6 +51,7 @@
 		9F69794568EFFCC6B329E660 /* SubagentsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0481138DDF4B591E9225890 /* SubagentsSettingsView.swift */; };
 		9FB957241A1BDCB8C3586498 /* ChatTurnCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 365AF81EBFD79497ACA43675 /* ChatTurnCardView.swift */; };
 		A2150379974FCD6864A93778 /* CommandCenterSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D414E304EA1890084AE0718 /* CommandCenterSheetView.swift */; };
+		A52D76DB9D8AA00B74D80038 /* LoadBench.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6E1F322D8E4ECF67F359BF1 /* LoadBench.swift */; };
 		AD3A006D13240DBC24640294 /* ModelProviderSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73C64FAD71928A73EA3A7019 /* ModelProviderSettingsView.swift */; };
 		AF6897886CB7D6CDCDCED5FB /* ZCodeOnboardingAndHubView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7627E9AA18A7E1A3D5DFCE5D /* ZCodeOnboardingAndHubView.swift */; };
 		B71E562C886D85E72BA7C204 /* ZCodeComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46A0CBD93B5C25576D85F6E6 /* ZCodeComposerView.swift */; };
@@ -142,6 +143,7 @@
 		ED9D97A18BD8FEFCC2CE75A0 /* V4ProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V4ProtocolTests.swift; sourceTree = "<group>"; };
 		EF96C5A8D5FF09BAEE9FAB99 /* ModelPickerPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerPopover.swift; sourceTree = "<group>"; };
 		F52F4C3A00113F895908DF99 /* ZCodeTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeTheme.swift; sourceTree = "<group>"; };
+		F6E1F322D8E4ECF67F359BF1 /* LoadBench.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadBench.swift; sourceTree = "<group>"; };
 		FB266185DD2C969EC0F06565 /* RootWorkspaceContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootWorkspaceContainerView.swift; sourceTree = "<group>"; };
 		FC0D314D4EB315D1FE682433 /* ZCodeRPCClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeRPCClient.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -161,6 +163,7 @@
 				A5E1167E86C6134271122327 /* AppStore+SettingsSync.swift */,
 				083D3B036D45CF6C26DA4DD8 /* AppStore+TaskActivity.swift */,
 				0FB486095FF73380919FDD44 /* AppStore+V4.swift */,
+				F6E1F322D8E4ECF67F359BF1 /* LoadBench.swift */,
 				08937AF5D7EA3C6AF718FA72 /* SeedWorkspaceFactory.swift */,
 				279FFBDA4D7E5E1C3C640985 /* V4ConversationMapper.swift */,
 				86BFDD9DFE01B136CC6A3069 /* V4LocalCache.swift */,
@@ -504,6 +507,7 @@
 				DBB84856E3A4AB2E1DCB41CB /* InspectorPreviewModels.swift in Sources */,
 				19F25C9FF02EFC5A59FBD808 /* IntegratedTerminalAndWorkflowView.swift in Sources */,
 				819F7A7D226281FBB37029F4 /* KeychainStore.swift in Sources */,
+				A52D76DB9D8AA00B74D80038 /* LoadBench.swift in Sources */,
 				CDE6BB9AF553D23FB53D0EBF /* ModelPickerPopover.swift in Sources */,
 				AD3A006D13240DBC24640294 /* ModelProviderSettingsView.swift in Sources */,
 				935135BBE10C7CA5962770AA /* NativeMediaDocumentViewer.swift in Sources */,
@@ -602,7 +606,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 31614;
+				CURRENT_PROJECT_VERSION = 31615;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -711,7 +715,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 31614;
+				CURRENT_PROJECT_VERSION = 31615;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
