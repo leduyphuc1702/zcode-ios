@@ -299,6 +299,78 @@ final class ZCodeMobileE2EUITests: XCTestCase {
         app.buttons["closeSettingsButton"].tap()
     }
 
+    @MainActor
+    func test03SettingsModelProviderAndSubagentStudio1to1UX() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "--uitesting-seed-workspace"]
+        app.launch()
+
+        let settingsBtn = app.buttons["sidebarSettingsButton"]
+        XCTAssertTrue(settingsBtn.waitForExistence(timeout: 8))
+        settingsBtn.tap()
+
+        // 1. Settings Root (3 Official ZCode Groups / 16 Sections)
+        let modelNav = app.buttons["settingsNav_modelProvider"]
+        XCTAssertTrue(modelNav.waitForExistence(timeout: 4))
+        saveScreenshot(name: "21-Settings-Root-ZCode-1to1")
+
+        // 2. Open Model Settings -> Verify Built-in Z.ai Plans + Custom Providers + Add Provider Sheet
+        modelNav.tap()
+        let addProviderBtn = app.buttons["addProviderButton"]
+        XCTAssertTrue(addProviderBtn.waitForExistence(timeout: 4))
+        saveScreenshot(name: "22-Settings-Model-Providers-List")
+
+        addProviderBtn.tap()
+        XCTAssertTrue(app.buttons["createCustomProviderButton"].waitForExistence(timeout: 4))
+        saveScreenshot(name: "23-Settings-Add-Provider-17-Templates")
+        app.navigationBars.buttons["Cancel"].tap()
+
+        // Open Anthropic Provider Studio -> Inspect API Key + Models + Add Model Sheet
+        let anthropicRow = app.buttons["providerRow_anthropic"]
+        if anthropicRow.waitForExistence(timeout: 4) {
+            anthropicRow.tap()
+            let addModelBtn = app.buttons["addModelButton"]
+            XCTAssertTrue(addModelBtn.waitForExistence(timeout: 4))
+            saveScreenshot(name: "24a-Settings-Provider-Detail-Top")
+
+            app.swipeUp()
+            saveScreenshot(name: "24b-Settings-Provider-Detail-Models-Connectivity")
+
+            addModelBtn.tap()
+            XCTAssertTrue(app.buttons["saveModelConfigButton"].waitForExistence(timeout: 4))
+            saveScreenshot(name: "25-Settings-Model-Config-Capabilities-Editor")
+            app.navigationBars.buttons["Cancel"].tap()
+
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+        }
+
+        // Back to Settings Root (on iPhone stack)
+        let subagentsNav = app.buttons["settingsNav_subagents"]
+        if !subagentsNav.exists {
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+        }
+
+        // 3. Open Subagents Studio -> Custom, Built-in & Plugin Agents + Create Subagent Sheet
+        XCTAssertTrue(subagentsNav.waitForExistence(timeout: 4))
+        subagentsNav.tap()
+        let createSubagentBtn = app.buttons["createSubagentButton"]
+        XCTAssertTrue(createSubagentBtn.waitForExistence(timeout: 4))
+        saveScreenshot(name: "26-Settings-Subagents-Studio-List")
+
+        createSubagentBtn.tap()
+        let nameField = app.textFields["subagentNameField"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 4))
+        saveScreenshot(name: "27-Settings-Create-Subagent-Editor-Top")
+
+        app.swipeUp()
+        let allowAllToggle = app.switches.matching(NSPredicate(format: "label CONTAINS 'Allow All Tools'")).firstMatch
+        if allowAllToggle.exists {
+            allowAllToggle.tap()
+        }
+        saveScreenshot(name: "28-Settings-Create-Subagent-Tools-Grid")
+        app.navigationBars.buttons["Cancel"].tap()
+    }
+
     private func saveScreenshot(name: String) {
         let shot = XCUIScreen.main.screenshot()
         let attachment = XCTAttachment(screenshot: shot)

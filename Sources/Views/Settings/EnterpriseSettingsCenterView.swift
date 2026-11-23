@@ -1,50 +1,143 @@
 import SwiftUI
-import Charts
 
-public enum SettingsSectionKind: String, CaseIterable, Identifiable {
-    case general
-    case appearance
-    case models
-    case remoteDevices
-    case codingPlan
-    case security
-    case mcp
-    case skills
-    case plugins
-    case subagents
-    case commands
-    case hooks
-    case memory
-    case automations
-    case browserCUA
-    case fileSearch
-    case archives
-    case usage
-    case shortcutsAbout
+// MARK: - Exact ZCode v3.16.3 Settings Navigation Tree (3 Official Groups, 16 Official Sections)
+
+public enum SettingsGroupKind: String, CaseIterable, Identifiable {
+    case basics
+    case agentCapabilities
+    case dataAndStats
 
     public var id: String { rawValue }
 
+    /// Exact `settings.sidebar.group.*` strings from ZCode v3.16.3 `IntlProvider`
     public var title: String {
         switch self {
-        case .general: return "General & Language"
-        case .appearance: return "Appearance & Code Editor"
-        case .models: return "Models & Providers"
-        case .remoteDevices: return "Remote Devices & Servers"
-        case .codingPlan: return "Coding Plan & Off-Peak"
-        case .security: return "Security, Face ID & Proxy"
-        case .mcp: return "MCP Servers"
-        case .skills: return "Skills Catalog"
-        case .plugins: return "Plugins & Marketplaces"
+        case .basics: return "Basics"
+        case .agentCapabilities: return "Agent capabilities"
+        case .dataAndStats: return "Data and statistics"
+        }
+    }
+
+    public var sections: [SettingsSectionKind] {
+        SettingsSectionKind.allCases.filter { $0.group == self }
+    }
+}
+
+public enum SettingsSectionKind: String, CaseIterable, Identifiable, Hashable {
+    // Group 1: Basics
+    case general = "general"
+    case appearance = "appearance"
+    case modelProvider = "modelProvider"
+    case browser = "browser"
+    case remoteDevices = "remoteDevices"
+    case computerUse = "computerUse"
+    case shortcuts = "shortcuts"
+
+    // Group 2: Agent capabilities
+    case memory = "memory"
+    case subagents = "subagents"
+    case plugin = "plugin"
+    case mcp = "mcp"
+    case skill = "skill"
+    case commands = "commands"
+    case hooks = "hooks"
+
+    // Group 3: Data and statistics
+    case usage = "usage"
+    case archives = "archives"
+
+    public var id: String { rawValue }
+
+    public var group: SettingsGroupKind {
+        switch self {
+        case .general, .appearance, .modelProvider, .browser, .remoteDevices, .computerUse, .shortcuts:
+            return .basics
+        case .memory, .subagents, .plugin, .mcp, .skill, .commands, .hooks:
+            return .agentCapabilities
+        case .usage, .archives:
+            return .dataAndStats
+        }
+    }
+
+    /// Exact ZCode v3.16.3 Sidebar Navigation Title (`settings.nav.*`)
+    public var title: String {
+        switch self {
+        case .general: return "General"
+        case .appearance: return "Appearance"
+        case .modelProvider: return "Model settings"
+        case .browser: return "Browser Use"
+        case .remoteDevices: return "Remote devices"
+        case .computerUse: return "Computer Use"
+        case .shortcuts: return "Keyboard Shortcuts"
+        case .memory: return "Memory"
         case .subagents: return "Subagents"
-        case .commands: return "Slash Commands"
-        case .hooks: return "Hooks & Workspace Trust"
-        case .memory: return "Persistent Memory"
-        case .automations: return "Automations (Cron)"
-        case .browserCUA: return "Computer Use & Browser"
-        case .fileSearch: return "Workspace File Search"
-        case .archives: return "Archived Sessions"
-        case .usage: return "Usage & Token Analytics"
-        case .shortcutsAbout: return "Migration, Shortcuts & About"
+        case .plugin: return "Plugins"
+        case .mcp: return "MCP Servers"
+        case .skill: return "Skills"
+        case .commands: return "Commands"
+        case .hooks: return "Hooks"
+        case .usage: return "Usage stats"
+        case .archives: return "Archive management"
+        }
+    }
+
+    /// Exact ZCode v3.16.3 Sidebar Subtitle (`settings.nav.*`)
+    public var navSubtitle: String {
+        switch self {
+        case .general: return "Language and current window experience"
+        case .appearance: return "Theme, UI font size, and code presentation"
+        case .modelProvider: return "Configure custom model providers"
+        case .browser: return "Configure integrated browser behavior and permissions"
+        case .remoteDevices: return "Manage SSH, WSL, and Docker connections"
+        case .computerUse: return "Manage screen access and desktop automation permissions"
+        case .shortcuts: return "View and customize global and composer shortcuts"
+        case .memory: return "Enable or disable agent long-term memory and view memory files"
+        case .subagents: return "Manage custom and plugin subagents"
+        case .plugin: return "Enable or disable installed plugins"
+        case .mcp: return "Manage MCP server configurations"
+        case .skill: return "Manage workspace and user skills"
+        case .commands: return "Manage custom slash commands"
+        case .hooks: return "Manage task lifecycle hooks"
+        case .usage: return "Local session token, streak, and model summaries"
+        case .archives: return "Review and delete archived sessions across projects"
+        }
+    }
+
+    /// Exact ZCode v3.16.3 Page Header Description (`settings.<section>.description`)
+    public var headerDescription: String {
+        switch self {
+        case .general:
+            return "Language, window, and desktop startup behavior."
+        case .appearance:
+            return "Customize how the interface, font size, and code diffs appear."
+        case .modelProvider:
+            return "Manage custom model providers. Once configured, they can be selected during chat."
+        case .browser:
+            return "Manage embedded browser rendering, permissions, and certificate policies."
+        case .remoteDevices:
+            return "Manage your ZCode Remote workstations, SSH servers, WSL distributions, and Docker containers."
+        case .computerUse:
+            return "Check macOS screen and Accessibility permissions and adjust Computer Use entry visibility."
+        case .shortcuts:
+            return "Tap any shortcut to customize the key combination for iPad Magic Keyboard and remote desktop."
+        case .memory:
+            return "Save and reuse long-term context in workspaces. Applies to new sessions."
+        case .subagents:
+            return "Manage user-level, workspace, and plugin subagent Markdown files consumed by ZCode Agent."
+        case .plugin:
+            return "Enable or disable installed plugins. Plugins bundle skills, commands, hooks, and MCP servers."
+        case .mcp:
+            return "Manage MCP server configurations used by ZCode Agent."
+        case .skill:
+            return "Manage workspace and user skills. Enabled skills can be referenced in chat with $skill-name."
+        case .commands:
+            return "Manage ZCode Agent .md command files. Commands can be invoked with /command-name in chat."
+        case .hooks:
+            return "Manage task lifecycle hooks to automatically execute commands on specific events."
+        case .usage:
+            return "Review activity, Coding Plan quotas, and model usage aggregated from sessions."
+        case .archives:
+            return "Review, restore, or permanently delete archived sessions."
         }
     }
 
@@ -52,587 +145,713 @@ public enum SettingsSectionKind: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "slider.horizontal.3"
         case .appearance: return "paintbrush"
-        case .models: return "cpu"
-        case .remoteDevices: return "qrcode.viewfinder"
-        case .codingPlan: return "sparkles.rectangle.stack"
-        case .security: return "lock.shield"
-        case .mcp: return "puzzlepiece.extension"
-        case .skills: return "wand.and.stars"
-        case .plugins: return "shippingbox"
-        case .subagents: return "person.2.wave.2"
-        case .commands: return "terminal"
-        case .hooks: return "link.badge.plus"
+        case .modelProvider: return "cpu"
+        case .browser: return "globe"
+        case .remoteDevices: return "laptopcomputer.and.iphone"
+        case .computerUse: return "cursorarrow.click.2"
+        case .shortcuts: return "keyboard"
         case .memory: return "brain.head.profile"
-        case .automations: return "clock.badge.checkmark"
-        case .browserCUA: return "macwindow.on.rectangle"
-        case .fileSearch: return "doc.text.magnifyingglass"
-        case .archives: return "archivebox"
+        case .subagents: return "person.2.badge.gearshape"
+        case .plugin: return "puzzlepiece.extension"
+        case .mcp: return "point.3.filled.connected.trianglepath.dotted"
+        case .skill: return "sparkles.rectangle.stack"
+        case .commands: return "slash.circle"
+        case .hooks: return "bolt.horizontal.circle"
         case .usage: return "chart.bar.xaxis"
-        case .shortcutsAbout: return "info.circle"
+        case .archives: return "archivebox"
         }
     }
 }
 
-/// Complete 19-Category Official ZCode Enterprise Settings Center
+// MARK: - Root Settings Shell (Adaptive Mobile Stack on iPhone + 2-Column Split on iPad)
+
 public struct EnterpriseSettingsCenterView: View {
     @Bindable var store: AppStore
     @Environment(\.zcodePalette) private var palette
     @Environment(\.dismiss) private var dismiss
-    @State private var filterText: String = ""
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
-    private var matchingSections: [SettingsSectionKind] {
-        let q = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return SettingsSectionKind.allCases }
-        return SettingsSectionKind.allCases.filter { $0.title.localizedCaseInsensitiveContains(q) }
+    @State private var searchQuery: String = ""
+    @State private var navigationPath: [SettingsSectionKind] = []
+    @State private var selectedSectionForSplit: SettingsSectionKind = .modelProvider
+
+    public init(store: AppStore) {
+        self.store = store
     }
 
     public var body: some View {
-        NavigationStack {
-            List {
-                Section("Configuration & Preferences") {
-                    ForEach(matchingSections.prefix(6)) { sec in
-                        NavigationLink(value: sec) {
-                            settingsRow(sec)
-                        }
-                        .accessibilityIdentifier("settingsNav_\(sec.rawValue)")
-                    }
-                }
+        Group {
+            if sizeClass == .regular {
+                iPadSplitSettingsLayout
+            } else {
+                iPhoneCompactSettingsLayout
+            }
+        }
+        .preferredColorScheme(palette.isDark ? .dark : .light)
+        .task {
+            await store.syncAllSettingsFromRemoteDesktop()
+        }
+    }
 
-                Section("Agent Ecosystem (MCP, Skills, Plugins, Hooks)") {
-                    ForEach(matchingSections.dropFirst(6).prefix(8)) { sec in
-                        NavigationLink(value: sec) {
-                            settingsRow(sec)
-                        }
-                        .accessibilityIdentifier("settingsNav_\(sec.rawValue)")
-                    }
-                }
+    // MARK: - iPhone Mobile Layout (1:1 ZCode Tokens & Grouping)
 
-                Section("Governance, Analytics & System") {
-                    ForEach(matchingSections.dropFirst(14)) { sec in
-                        NavigationLink(value: sec) {
-                            settingsRow(sec)
+    private var iPhoneCompactSettingsLayout: some View {
+        NavigationStack(path: $navigationPath) {
+            ZStack {
+                palette.background.ignoresSafeArea()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        ZCodeSettingsSearchBar(
+                            text: $searchQuery,
+                            placeholder: "Search settings, models, subagents, MCP…"
+                        )
+
+                        remoteSyncBanner
+
+                        ForEach(SettingsGroupKind.allCases) { group in
+                            let items = filteredSections(in: group)
+                            if !items.isEmpty {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(group.title.uppercased())
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .tracking(0.6)
+                                        .foregroundStyle(palette.foregroundMuted)
+                                        .padding(.horizontal, 4)
+
+                                    VStack(spacing: 0) {
+                                        ForEach(Array(items.enumerated()), id: \.element.id) { idx, sec in
+                                            NavigationLink(value: sec) {
+                                                settingsSidebarRow(sec, isSelected: false)
+                                            }
+                                            .buttonStyle(.plain)
+                                            .accessibilityIdentifier("settingsNav_\(sec.rawValue)")
+
+                                            if idx < items.count - 1 {
+                                                Divider()
+                                                    .overlay(palette.border)
+                                                    .padding(.leading, 50)
+                                            }
+                                        }
+                                    }
+                                    .background(palette.panel, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                            .strokeBorder(palette.border, lineWidth: 1)
+                                    )
+                                }
+                            }
                         }
-                        .accessibilityIdentifier("settingsNav_\(sec.rawValue)")
+
+                        sidebarFooterQuickControls
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 32)
                 }
             }
-            .searchable(text: $filterText, prompt: "Search all 19 ZCode settings...")
             .navigationTitle(L10n.text("Settings", vi: "Cài đặt", zh: "设置", lang: store.language))
             .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(for: SettingsSectionKind.self) { section in
-                SettingsDetailDestinationView(store: store, section: section)
-            }
-            .task {
-                await store.refreshHostSettings()
-                await store.refreshLiveModelView()
-            }
+            .toolbarBackground(palette.header, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.left")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Workspace")
+                                .font(.system(size: 14, weight: .medium))
+                        }
+                        .foregroundStyle(palette.foreground)
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
+                        .font(.system(size: 14.5, weight: .semibold))
+                        .foregroundStyle(palette.accentBlue)
                         .accessibilityIdentifier("closeSettingsButton")
                 }
+            }
+            .navigationDestination(for: SettingsSectionKind.self) { section in
+                SettingsSectionRouterView(
+                    store: store,
+                    section: section,
+                    onJumpToSection: { target in
+                        if navigationPath.last != target {
+                            navigationPath.append(target)
+                        }
+                    }
+                )
             }
         }
     }
 
-    private func settingsRow(_ sec: SettingsSectionKind) -> some View {
+    // MARK: - iPad / Landscape 2-Column Split Layout (Exact ZCode `268px + 1fr` Shell)
+
+    private var iPadSplitSettingsLayout: some View {
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Button {
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: "arrow.left")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Back to Workspace")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(palette.foreground)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 10)
+                        .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("closeSettingsButton")
+
+                    Spacer()
+                }
+                .padding(14)
+
+                ZCodeSettingsSearchBar(text: $searchQuery, placeholder: "Filter settings…")
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        ForEach(SettingsGroupKind.allCases) { group in
+                            let items = filteredSections(in: group)
+                            if !items.isEmpty {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(group.title)
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundStyle(palette.foregroundMuted)
+                                        .padding(.horizontal, 10)
+
+                                    ForEach(items) { sec in
+                                        Button {
+                                            selectedSectionForSplit = sec
+                                        } label: {
+                                            HStack(spacing: 10) {
+                                                Image(systemName: sec.icon)
+                                                    .font(.system(size: 13.5, weight: .medium))
+                                                    .frame(width: 20)
+                                                    .foregroundStyle(selectedSectionForSplit == sec ? palette.foreground : palette.foregroundSubtle)
+                                                Text(sec.title)
+                                                    .font(.system(size: 13.5, weight: selectedSectionForSplit == sec ? .semibold : .regular))
+                                                    .foregroundStyle(selectedSectionForSplit == sec ? palette.foreground : palette.foregroundSubtle)
+                                                Spacer()
+                                                if let badge = sectionBadgeText(sec) {
+                                                    ZCodeSettingsPill(text: badge, tone: sec == .remoteDevices && store.activeConnection?.state == .connected ? .success : .neutral)
+                                                }
+                                            }
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 8)
+                                            .background(
+                                                selectedSectionForSplit == sec ? palette.card : Color.clear,
+                                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            )
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityIdentifier("settingsNav_\(sec.rawValue)")
+                                    }
+                                }
+                            }
+                        }
+
+                        sidebarFooterQuickControls
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 20)
+                }
+            }
+            .frame(width: 276)
+            .background(palette.sidebar)
+            .overlay(alignment: .trailing) {
+                Rectangle().fill(palette.border).frame(width: 1)
+            }
+
+            NavigationStack {
+                SettingsSectionRouterView(
+                    store: store,
+                    section: selectedSectionForSplit,
+                    onJumpToSection: { target in
+                        selectedSectionForSplit = target
+                    }
+                )
+            }
+        }
+        .background(palette.background)
+    }
+
+    // MARK: - Helpers & Footer
+
+    private func filteredSections(in group: SettingsGroupKind) -> [SettingsSectionKind] {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return group.sections }
+        return group.sections.filter {
+            $0.title.localizedCaseInsensitiveContains(q)
+                || $0.navSubtitle.localizedCaseInsensitiveContains(q)
+                || $0.headerDescription.localizedCaseInsensitiveContains(q)
+        }
+    }
+
+    private func sectionBadgeText(_ sec: SettingsSectionKind) -> String? {
+        switch sec {
+        case .modelProvider:
+            let enabledModels = store.allModels.count
+            return "\(store.providers.count) · \(enabledModels)m"
+        case .remoteDevices:
+            if let conn = store.activeConnection, conn.state == .connected {
+                return "Online"
+            }
+            return store.connections.isEmpty ? nil : "\(store.connections.count)"
+        case .subagents:
+            return "\(store.subagents.count)"
+        case .plugin:
+            return "\(store.plugins.filter(\.installed).count)"
+        case .mcp:
+            return store.mcpServers.isEmpty ? nil : "\(store.mcpServers.count)"
+        case .skill:
+            return "\(store.skills.count)"
+        case .commands:
+            return "\(store.slashCommands.count)"
+        case .hooks:
+            return store.hooks.isEmpty ? nil : "\(store.hooks.count)"
+        case .archives:
+            let c = store.sessions.filter(\.archived).count
+            return c > 0 ? "\(c)" : nil
+        default:
+            return nil
+        }
+    }
+
+    private func settingsSidebarRow(_ sec: SettingsSectionKind, isSelected: Bool) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: sec.icon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(palette.accentBlue)
-                .frame(width: 28, height: 28)
-                .background(palette.accentBlue.opacity(0.14), in: RoundedRectangle(cornerRadius: 7))
-            Text(sec.title)
-                .font(.system(size: 14.5, weight: .medium))
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(palette.card)
+                    .frame(width: 32, height: 32)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(palette.border, lineWidth: 1)
+                    )
+                Image(systemName: sec.icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(palette.foreground)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(sec.title)
+                        .font(.system(size: 14.5, weight: .medium))
+                        .foregroundStyle(palette.foreground)
+                    if let badge = sectionBadgeText(sec) {
+                        ZCodeSettingsPill(
+                            text: badge,
+                            tone: sec == .remoteDevices && store.activeConnection?.state == .connected ? .success : .neutral
+                        )
+                    }
+                }
+                Text(sec.navSubtitle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 6)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(palette.foregroundMuted)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+        .contentShape(Rectangle())
+    }
+
+    private var remoteSyncBanner: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(store.activeConnection?.state == .connected ? palette.success : palette.foregroundMuted)
+                .frame(width: 8, height: 8)
+
+            VStack(alignment: .leading, spacing: 2) {
+                if let conn = store.activeConnection, conn.state == .connected {
+                    Text("Synced with \(conn.name)")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(palette.foreground)
+                    Text("Provider configs, subagents, MCPs, skills & hooks sync over ZCode V4 RPC")
+                        .font(.system(size: 11))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .lineLimit(1)
+                } else {
+                    Text("Standalone Mobile Settings")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(palette.foreground)
+                    Text("Connect a ZCode Desktop workstation to mirror host settings live")
+                        .font(.system(size: 11))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            if store.activeConnection?.state == .connected {
+                Button {
+                    Task { await store.syncAllSettingsFromRemoteDesktop() }
+                } label: {
+                    if store.isSyncingSettings {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .frame(width: 28, height: 28)
+                            .background(palette.card, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(palette.panel, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(palette.border, lineWidth: 1)
+        )
+    }
+
+    /// Exact ZCode Sidebar Footer (`settings.onboarding` dashed button + Account/Theme/Locale bar)
+    private var sidebarFooterQuickControls: some View {
+        VStack(spacing: 10) {
+            Button {
+                dismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                    store.openConnectionHub()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Onboarding & Z.AI Remote Pairing")
+                        .font(.system(size: 13, weight: .medium))
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundStyle(palette.foregroundSubtle)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(palette.panel.opacity(0.6), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(palette.borderStrong, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                )
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 8) {
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(palette.accentBlue.opacity(0.2))
+                        .frame(width: 24, height: 24)
+                        .overlay(
+                            Text(String((store.zaiAccount?.displayName ?? store.userDisplayName).prefix(1)).uppercased())
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(palette.accentBlue)
+                        )
+                    Text(store.zaiAccount?.displayName ?? "Not signed in")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(palette.foreground)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Menu {
+                    ForEach(ZCodeThemeMode.allCases) { m in
+                        Button {
+                            store.themeMode = m
+                        } label: {
+                            Label(m.displayName, systemImage: store.themeMode == m ? "checkmark" : "circle")
+                        }
+                    }
+                } label: {
+                    Image(systemName: palette.isDark ? "moon.fill" : "sun.max.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(width: 28, height: 28)
+                        .background(palette.card, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+
+                Menu {
+                    ForEach(AppLanguage.allCases) { lang in
+                        Button {
+                            store.language = lang
+                        } label: {
+                            Text(lang.displayName)
+                        }
+                    }
+                } label: {
+                    Text(store.language.rawValue.uppercased())
+                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .padding(.horizontal, 7)
+                        .frame(height: 28)
+                        .background(palette.card, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(palette.panel, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(palette.border, lineWidth: 1)
+            )
         }
     }
 }
 
-struct SettingsDetailDestinationView: View {
+// MARK: - Section Router
+
+struct SettingsSectionRouterView: View {
     @Bindable var store: AppStore
     let section: SettingsSectionKind
+    var onJumpToSection: (SettingsSectionKind) -> Void
+
     @Environment(\.zcodePalette) private var palette
 
-    @State private var showPatternSetup = false
-    @State private var newMCPName = ""
-    @State private var newMCPCommand = ""
-    @State private var newMemorySlug = ""
-    @State private var newMemoryBody = ""
-
-    @ViewBuilder
-    private var liveModelsSection: some View {
-        if store.liveModelGroups.isEmpty {
-            Section {
-                Text(store.isLiveHostConnected
-                     ? "Loading models from your computer…"
-                     : "Connect to ZCode Desktop to see the providers and models configured there.")
-                    .foregroundStyle(.secondary)
-            }
-        } else {
-            ForEach(store.liveModelGroups) { group in
-                Section(group.name) {
-                    ForEach(group.models) { model in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(model.modelId)
-                                    .font(.system(size: 14.5, weight: .medium))
-                                if let window = model.contextWindow, window > 0 {
-                                    Text("\(window / 1000)K context")
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer()
-                            if model.supportsImage {
-                                Image(systemName: "photo").foregroundStyle(.secondary)
-                            }
-                            if !model.reasoningLevels.isEmpty {
-                                Image(systemName: "brain").foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-            }
-            Section {
-                Text("Providers and API keys are managed in ZCode Desktop. Changes there appear here automatically.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var seededModelsSection: some View {
-        Section("Configured Providers") {
-            ForEach($store.providers) { $provider in
-                Toggle(isOn: $provider.enabled) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(provider.name)
-                            .font(.system(size: 14.5, weight: .semibold))
-                        Text("\(provider.baseURL) • \(provider.models.count) models")
-                            .font(.system(size: 11.5, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-    }
-
     var body: some View {
-        Form {
+        ZStack {
+            palette.background.ignoresSafeArea()
+
             switch section {
-            case .general:
-                Section("Operator Profile & Interface Language (English Default)") {
-                    TextField("Profile Display Name", text: $store.userDisplayName)
-                    Picker("App Language", selection: $store.language) {
-                        ForEach(AppLanguage.allCases) { lang in
-                            Text(lang.displayName).tag(lang)
-                        }
-                    }
-                    Toggle("Haptic Feedback", isOn: $store.hapticsEnabled)
-                }
-                Section("Task & Event Notifications") {
-                    Toggle("Enable Notifications", isOn: $store.notificationsEnabled)
-                    Toggle("Approval Required Alerts", isOn: $store.notifyApprovals)
-                    Toggle("User Question / Elicitation Alerts", isOn: $store.notifyQuestions)
-                    Toggle("Task Completed Alerts", isOn: $store.notifyCompletions)
-                    Toggle("Task Error Alerts", isOn: $store.notifyFailures)
-                }
-
-            case .appearance:
-                Section("ZCode Theme Mode") {
-                    ForEach(ZCodeThemeMode.allCases) { mode in
-                        Button {
-                            store.themeMode = mode
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(mode.displayName)
-                                        .font(.system(size: 14.5, weight: .semibold))
-                                        .foregroundStyle(palette.foreground)
-                                    Text(mode.subtitle)
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                if store.themeMode == mode {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(palette.accentBlue)
-                                }
-                            }
-                        }
-                        .accessibilityIdentifier("themeOption_\(mode.rawValue)")
-                    }
-                }
-                Section("Code Viewer & Syntax Highlighting") {
-                    Picker("Syntax Palette", selection: $store.syntaxTheme) {
-                        ForEach(ZCodeSyntaxTheme.allCases) { st in
-                            Text(st.displayName).tag(st)
-                        }
-                    }
-                    Stepper("Code Font Size: \(Int(store.codeFontSize))pt", value: $store.codeFontSize, in: 10...22, step: 1)
-                    Toggle("Show Gutter Line Numbers", isOn: $store.showLineNumbers)
-                    Toggle("Wrap Long Lines", isOn: $store.wrapCodeLines)
-                }
-                Section("Conversation Stream") {
-                    Toggle("Show Collapsible Reasoning Blocks", isOn: $store.showReasoningBlocks)
-                    Toggle("Show Sticky Todo Progress Bar", isOn: $store.showTodoTracker)
-                    Toggle("Compact Tool Execution Cards", isOn: $store.compactToolCards)
-                }
-
-            case .models:
-                if !store.isUITestSeededMode {
-                    liveModelsSection
-                } else {
-                    seededModelsSection
-                }
-
-            case .remoteDevices:
-                Section("Z.AI Account") {
-                    if let acct = store.zaiAccount {
-                        LabeledContent("Signed In", value: acct.displayName)
-                        if let email = acct.email, !email.isEmpty {
-                            LabeledContent("Email", value: email)
-                        }
-                        LabeledContent("Region", value: acct.region.title)
-                        Button("Sign Out of Z.AI", role: .destructive) {
-                            store.signOutZaiAccount()
-                        }
-                    } else {
-                        Text("Not signed in to Z.AI")
-                            .foregroundStyle(.secondary)
-                        Button("Sign in with Z.AI…") {
-                            store.showSettingsSheet = false
-                            store.didSkipAccountStep = false
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                                store.openConnectionHub()
-                            }
-                        }
-                    }
-                }
-                Section("Paired Workstations") {
-                    if store.connections.isEmpty {
-                        Text("No paired ZCode computers yet.")
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(store.connections) { conn in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(conn.name).font(.system(size: 14, weight: .semibold))
-                            Text(conn.url).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.secondary)
-                            Text("\(conn.transport.title) • \(conn.state == .connected ? "Connected (\(conn.latencyMs)ms)" : "Disconnected")").font(.system(size: 12)).foregroundStyle(.secondary)
-                        }
-                    }
-                    Button("Enter Z.AI Remote Link / Scan QR…") {
-                        store.showSettingsSheet = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                            store.openConnectionHub()
-                        }
-                    }
-                    Button("Open Saved Workstations Sheet") {
-                        store.showSettingsSheet = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                            store.showConnectionsSheet = true
-                        }
-                    }
-                }
-
-            case .codingPlan:
-                Section("Z.ai Enterprise Coding Plan") {
-                    LabeledContent("Subscription Tier", value: "Enterprise Max")
-                    LabeledContent("Monthly Quota Used", value: "18.4% (3.68M / 20M tokens)")
-                    ProgressView(value: 0.184)
-                }
-                Section("Off-Peak Batch Execution") {
-                    TextField("Off-Peak Window", text: $store.offPeakWindowSchedule)
-                }
-
-            case .security:
-                Section("App Unlock Gate") {
-                    Toggle("Require Unlock on Launch", isOn: $store.appLockEnabled)
-                    Toggle("Allow Face ID / Touch ID", isOn: $store.biometricUnlockEnabled)
-                    Button(store.hasPatternConfigured ? "Change 3×3 Security Pattern" : "Set 3×3 Security Pattern") {
-                        showPatternSetup = true
-                    }
-                    if store.hasPatternConfigured {
-                        Button("Lock App Now (Test Gate)") {
-                            store.showSettingsSheet = false
-                            store.isLocked = true
-                        }
-                    }
-                }
-                Section("Enterprise Network & TLS Proxy") {
-                    TextField("HTTP/HTTPS Proxy (e.g. http://proxy.corp:8080)", text: $store.httpProxyURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                }
-
-            case .mcp:
-                Section("Model Context Protocol (MCP) Servers") {
-                    ForEach($store.mcpServers) { $server in
-                        VStack(alignment: .leading, spacing: 5) {
-                            Toggle(isOn: $server.enabled) {
-                                HStack {
-                                    Text(server.name).font(.system(size: 14.5, weight: .semibold))
-                                    Text(server.transport.uppercased())
-                                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Color.secondary.opacity(0.18), in: Capsule())
-                                }
-                            }
-                            Text(server.endpointOrCommand)
-                                .font(.system(size: 11.5, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                            Text("Tools (\(server.tools.count)): \(server.tools.joined(separator: ", "))")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 3)
-                    }
-                }
-                Section("Register MCP Server") {
-                    TextField("Server Name", text: $newMCPName)
-                    TextField("Command or HTTP/SSE Endpoint", text: $newMCPCommand)
-                        .textInputAutocapitalization(.never)
-                    Button("Add MCP Server") {
-                        store.mcpServers.append(
-                            MCPServerItem(id: UUID().uuidString, name: newMCPName, transport: newMCPCommand.hasPrefix("http") ? "http" : "stdio", endpointOrCommand: newMCPCommand, enabled: true, connected: true, tools: ["inspect", "execute"], resourcesCount: 1)
-                        )
-                        newMCPName = ""
-                        newMCPCommand = ""
-                        store.showToast("MCP server registered")
-                    }
-                    .disabled(newMCPName.isEmpty || newMCPCommand.isEmpty)
-                }
-
-            case .skills:
-                Section("Installed Agent Skills") {
-                    ForEach($store.skills) { $skill in
-                        VStack(alignment: .leading, spacing: 5) {
-                            Toggle(skill.name, isOn: $skill.enabled)
-                                .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                            Text("\(skill.scope) • \(skill.summary)")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-            case .plugins:
-                Section("ZCode Plugins & Marketplaces") {
-                    ForEach($store.plugins) { $plugin in
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack {
-                                Text("\(plugin.name) v\(plugin.version)")
-                                    .font(.system(size: 14, weight: .semibold))
-                                Spacer()
-                                if plugin.installed {
-                                    Toggle("", isOn: $plugin.enabled).labelsHidden()
-                                } else {
-                                    Button("Install") {
-                                        plugin.installed = true
-                                        plugin.enabled = true
-                                        store.showToast("Installed \(plugin.name)")
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    .controlSize(.small)
-                                }
-                            }
-                            Text("\(plugin.marketplace) • \(plugin.summary)")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
+            case .modelProvider:
+                ModelProviderSettingsView(store: store)
             case .subagents:
-                Section("Specialized Subagents") {
-                    ForEach($store.subagents) { $agent in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Toggle(agent.name, isOn: $agent.enabled)
-                                .font(.system(size: 14, weight: .semibold))
-                            Text(agent.description)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                            Text("Model: \(agent.modelOverride) • Tools: \(agent.toolsSummary)")
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-            case .commands:
-                Section("Slash Commands") {
-                    ForEach(store.slashCommands) { cmd in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(cmd.trigger)
-                                .font(.system(size: 13.5, weight: .bold, design: .monospaced))
-                            Text("\(cmd.scope) • \(cmd.summary)")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-            case .hooks:
-                Section("Workspace Trust") {
-                    Toggle("Trust Workspace Lifecycle Hooks", isOn: $store.workspaceHookTrustGranted)
-                }
-                Section("Configured Hook Rules") {
-                    ForEach($store.hooks) { $hook in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Toggle("\(hook.event) — \(hook.matcher)", isOn: $hook.enabled)
-                                .font(.system(size: 13.5, weight: .semibold, design: .monospaced))
-                            Text(hook.command)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-            case .memory:
-                Section("Persistent Agent Memories (MEMORY.md)") {
-                    ForEach(store.memories) { mem in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(mem.slug)
-                                    .font(.system(size: 13.5, weight: .bold, design: .monospaced))
-                                Spacer()
-                                Text(mem.type.uppercased())
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Text(mem.body)
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                Section("Add Memory Fact") {
-                    TextField("Slug (e.g. api-rate-limit)", text: $newMemorySlug)
-                        .textInputAutocapitalization(.never)
-                    TextField("Fact details...", text: $newMemoryBody, axis: .vertical)
-                    Button("Save Memory") {
-                        store.memories.insert(
-                            MemoryNoteItem(id: UUID().uuidString, slug: newMemorySlug, type: "project", description: newMemorySlug, body: newMemoryBody, updatedAt: Date()),
-                            at: 0
-                        )
-                        newMemorySlug = ""
-                        newMemoryBody = ""
-                        store.showToast("Memory persisted")
-                    }
-                    .disabled(newMemorySlug.isEmpty || newMemoryBody.isEmpty)
-                }
-
-            case .automations:
-                Section("Scheduled Cron Automations") {
-                    ForEach($store.automations) { $job in
-                        VStack(alignment: .leading, spacing: 5) {
-                            Toggle(job.name, isOn: $job.enabled)
-                                .font(.system(size: 14, weight: .semibold))
-                            Text("Cron: \(job.cronExpression) • Last: \(job.lastRunStatus)")
-                                .font(.system(size: 11.5, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                            Button("Run Now") {
-                                job.lastRunStatus = "Succeeded just now"
-                                job.lastRunAt = Date()
-                                store.showToast("Triggered \(job.name)")
-                            }
-                            .font(.system(size: 12, weight: .semibold))
-                        }
-                    }
-                }
-
-            case .browserCUA:
-                Section("Remote Computer Use (CUA) & Browser") {
-                    Toggle("Enable Remote CUA Observation Cards", isOn: $store.cuaHelperEnabled)
-                    TextField("Allowed Domains", text: $store.browserAllowedDomains, axis: .vertical)
-                        .font(.system(size: 12.5, design: .monospaced))
-                }
-
-            case .fileSearch:
-                Section("Workspace Indexing & Ignore Rules") {
-                    TextEditor(text: $store.fileSearchIgnorePatterns)
-                        .font(.system(size: 12.5, design: .monospaced))
-                        .frame(minHeight: 120)
-                }
-
-            case .archives:
-                Section("Archived Conversations") {
-                    let archived = store.sessions.filter(\.archived)
-                    if archived.isEmpty {
-                        Text("No archived conversations.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(archived) { item in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.title).font(.system(size: 14, weight: .medium))
-                                    Text(item.workspacePath).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button("Restore") {
-                                    store.restoreSession(item.id)
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                            }
-                        }
-                    }
-                }
-
-            case .usage:
-                Section("7-Day Token Usage (Native Swift Charts)") {
-                    Chart(store.tokenUsageStats) { item in
-                        BarMark(
-                            x: .value("Day", item.dayLabel),
-                            y: .value("Input (K)", item.inputTokensK)
-                        )
-                        .foregroundStyle(palette.accentBlue)
-
-                        BarMark(
-                            x: .value("Day", item.dayLabel),
-                            y: .value("Output (K)", item.outputTokensK)
-                        )
-                        .foregroundStyle(palette.success)
-                    }
-                    .frame(height: 190)
-                    .padding(.vertical, 8)
-                }
-                Section("Summary") {
-                    let totalIn = store.tokenUsageStats.map(\.inputTokensK).reduce(0, +)
-                    let totalOut = store.tokenUsageStats.map(\.outputTokensK).reduce(0, +)
-                    let totalCost = store.tokenUsageStats.map(\.costUSD).reduce(0, +)
-                    LabeledContent("7-Day Input Tokens", value: "\(totalIn)K")
-                    LabeledContent("7-Day Output Tokens", value: "\(totalOut)K")
-                    LabeledContent("Prompt Cache Hit Rate", value: "78.6%")
-                    LabeledContent("7-Day Total Cost", value: String(format: "$%.2f", totalCost))
-                }
-
-            case .shortcutsAbout:
-                Section("Session Migration") {
-                    Button("Scan & Import Local CLI Sessions") {
-                        store.showToast("Scanned ~/.zcode — all sessions up to date")
-                    }
-                }
-                Section("Hardware Keyboard Shortcuts (iPad / Magic Keyboard)") {
-                    LabeledContent("Command Center", value: "⌘ K")
-                    LabeledContent("New Session", value: "⌘ N")
-                    LabeledContent("Toggle Inspector", value: "⌘ ⇧ I")
-                    LabeledContent("Send Prompt", value: "⌘ ↩")
-                }
-                Section("About ZCode Enterprise Mobile") {
-                    LabeledContent("Version", value: "3.16.3 (Build 31603)")
-                    LabeledContent("Architecture", value: "100% Native SwiftUI + PDFKit")
-                    LabeledContent("WebView Dependency", value: "None (Zero WebKit)")
-                    LabeledContent("Wire Protocol", value: "SocketProtocol 13B + VQL + Relay V2")
-                }
+                SubagentsSettingsView(store: store, onJumpToModels: {
+                    onJumpToSection(.modelProvider)
+                })
+            default:
+                SettingsPagesDetailViews(
+                    store: store,
+                    section: section,
+                    onJumpToSection: onJumpToSection
+                )
             }
         }
         .navigationTitle(section.title)
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $showPatternSetup) {
-            PatternSetupSheetView(store: store)
+        .toolbarBackground(palette.header, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+    }
+}
+
+// MARK: - Shared 1:1 ZCode Settings Design System Primitives
+
+public enum ZCodePillTone {
+    case neutral
+    case accent
+    case success
+    case warning
+    case danger
+}
+
+struct ZCodeSettingsPill: View {
+    let text: String
+    var tone: ZCodePillTone = .neutral
+    @Environment(\.zcodePalette) private var palette
+
+    private var fg: Color {
+        switch tone {
+        case .neutral: return palette.foregroundSubtle
+        case .accent: return palette.accentBlue
+        case .success: return palette.success
+        case .warning: return palette.warning
+        case .danger: return palette.destructive
         }
+    }
+
+    private var bg: Color {
+        switch tone {
+        case .neutral: return palette.card
+        case .accent: return palette.accentBlue.opacity(0.14)
+        case .success: return palette.success.opacity(0.15)
+        case .warning: return palette.warning.opacity(0.15)
+        case .danger: return palette.destructive.opacity(0.15)
+        }
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(fg)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(bg, in: Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(fg.opacity(tone == .neutral ? 0.16 : 0.28), lineWidth: 0.75)
+            )
+    }
+}
+
+struct ZCodeSettingsPageHeader<Trailing: View>: View {
+    let groupTitle: String
+    let title: String
+    let subtitle: String
+    @ViewBuilder var trailing: () -> Trailing
+    @Environment(\.zcodePalette) private var palette
+
+    init(
+        groupTitle: String,
+        title: String,
+        subtitle: String,
+        @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }
+    ) {
+        self.groupTitle = groupTitle
+        self.title = title
+        self.subtitle = subtitle
+        self.trailing = trailing
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 6) {
+                Text("Settings")
+                    .foregroundStyle(palette.foregroundMuted)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(palette.foregroundMuted)
+                Text(groupTitle)
+                    .foregroundStyle(palette.foregroundSubtle)
+                Spacer()
+                trailing()
+            }
+            .font(.system(size: 11.5, weight: .medium))
+
+            Text(title)
+                .font(.system(size: 20, weight: .bold))
+                .foregroundStyle(palette.foreground)
+
+            Text(subtitle)
+                .font(.system(size: 13))
+                .foregroundStyle(palette.foregroundSubtle)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.bottom, 4)
+    }
+}
+
+struct ZCodeSettingsCard<Content: View>: View {
+    var title: String? = nil
+    var subtitle: String? = nil
+    @ViewBuilder var content: () -> Content
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let title {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(palette.foreground)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 12))
+                            .foregroundStyle(palette.foregroundSubtle)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 13)
+                .padding(.bottom, 10)
+
+                Divider().overlay(palette.border)
+            }
+
+            VStack(alignment: .leading, spacing: 0) {
+                content()
+            }
+        }
+        .background(palette.panel, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(palette.border, lineWidth: 1)
+        )
+    }
+}
+
+struct ZCodeSettingsRow<Control: View>: View {
+    let title: String
+    var subtitle: String? = nil
+    var badge: String? = nil
+    @ViewBuilder var control: () -> Control
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(palette.foreground)
+                    if let badge {
+                        ZCodeSettingsPill(text: badge, tone: .accent)
+                    }
+                }
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 8)
+            control()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+}
+
+struct ZCodeSettingsSearchBar: View {
+    @Binding var text: String
+    let placeholder: String
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13.5, weight: .medium))
+                .foregroundStyle(palette.foregroundMuted)
+            TextField(placeholder, text: $text)
+                .font(.system(size: 14))
+                .foregroundStyle(palette.foreground)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(palette.foregroundMuted)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(palette.inputBorder, lineWidth: 1)
+        )
     }
 }

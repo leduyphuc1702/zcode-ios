@@ -65,53 +65,97 @@ public enum SeedWorkspaceFactory {
     public static func defaultProviders() -> [ModelProviderConfig] {
         [
             ModelProviderConfig(
-                id: "builtin-zai",
-                name: "Z.ai Coding Plan (Official)",
-                baseURL: "https://api.z.ai/v1",
-                protocolKind: "zai",
+                id: "account:zai-individual-coding-plan",
+                name: "Z.ai Coding Plan",
+                baseURL: "https://api.z.ai/api/anthropic",
+                protocolKind: "anthropic-messages",
+                group: "zai-family",
+                templateId: "zai-api",
+                apiKeyManagementURL: "https://z.ai/manage-apikey/subscription",
+                hasConfiguredAPIKey: true,
                 enabled: true,
                 isBuiltin: true,
-                statusText: "Connected • Enterprise Pro",
+                entitled: true,
+                accountAvailability: "available",
+                statusText: "Z.ai Account • Coding Plan",
+                logoKey: "zai",
                 models: [
-                    ModelDescriptor(id: "zai/glm-5.1-coding", name: "GLM-5.1 Coding", providerId: "builtin-zai", providerName: "Z.ai", contextWindowK: 200, supportsVision: true, supportsReasoning: true, badge: "Default"),
-                    ModelDescriptor(id: "zai/glm-5-turbo", name: "GLM-5 Turbo", providerId: "builtin-zai", providerName: "Z.ai", contextWindowK: 128, supportsVision: true, supportsReasoning: true, badge: "Fast")
+                    ModelDescriptor(id: "zai/GLM-5.3", modelId: "GLM-5.3", name: "GLM-5.3", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 200, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, badge: "Default"),
+                    ModelDescriptor(id: "zai/GLM-5.3-Flash", modelId: "GLM-5.3-Flash", name: "GLM-5.3 Flash", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 200, maxOutputTokens: 16_384, supportsVision: true, supportsReasoning: true, badge: "Fast"),
+                    ModelDescriptor(id: "zai/GLM-5.1", modelId: "GLM-5.1", name: "GLM-5.1 Coding", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 200, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, badge: nil),
+                    ModelDescriptor(id: "zai/GLM-5V-Turbo", modelId: "GLM-5V-Turbo", name: "GLM-5V Turbo", providerId: "account:zai-individual-coding-plan", providerName: "Z.ai Coding Plan", contextWindowK: 128, maxOutputTokens: 16_384, supportsVision: true, supportsVideo: true, supportsReasoning: true, badge: "Vision")
+                ]
+            ),
+            ModelProviderConfig(
+                id: "account:zai-team-coding-plan",
+                name: "Z.ai Team Coding Plan",
+                baseURL: "https://api.z.ai/api/anthropic",
+                protocolKind: "anthropic-messages",
+                group: "zai-family",
+                apiKeyManagementURL: "https://z.ai/manage-apikey/subscription",
+                hasConfiguredAPIKey: false,
+                enabled: true,
+                isBuiltin: true,
+                entitled: false,
+                accountAvailability: "unavailable",
+                statusText: "Team Organization Plan",
+                logoKey: "zai",
+                models: [
+                    ModelDescriptor(id: "zai-team/GLM-5.3", modelId: "GLM-5.3", name: "GLM-5.3 (Team)", providerId: "account:zai-team-coding-plan", providerName: "Z.ai Team", contextWindowK: 200, supportsVision: true, supportsReasoning: true)
+                ]
+            ),
+            ModelProviderConfig(
+                id: "account:zai-start-plan",
+                name: "Z.ai Start Plan",
+                baseURL: "https://api.z.ai/api/anthropic",
+                protocolKind: "anthropic-messages",
+                group: "zai-family",
+                apiKeyManagementURL: "https://z.ai/manage-apikey/subscription",
+                hasConfiguredAPIKey: true,
+                enabled: true,
+                isBuiltin: true,
+                entitled: true,
+                accountAvailability: "available",
+                statusText: "Starter Entitlement",
+                logoKey: "zai",
+                models: [
+                    ModelDescriptor(id: "zai-start/GLM-5.3-Flash", modelId: "GLM-5.3-Flash", name: "GLM-5.3 Flash", providerId: "account:zai-start-plan", providerName: "Z.ai Start", contextWindowK: 128, supportsVision: true, supportsReasoning: true)
                 ]
             ),
             ModelProviderConfig(
                 id: "anthropic",
                 name: "Anthropic",
                 baseURL: "https://api.anthropic.com/v1",
-                protocolKind: "anthropic",
+                protocolKind: "anthropic-messages",
+                group: "standard-personal",
+                templateId: "anthropic",
+                apiKeyManagementURL: "https://console.anthropic.com/settings/keys",
+                hasConfiguredAPIKey: false,
                 enabled: true,
-                isBuiltin: true,
-                statusText: "Ready",
+                isBuiltin: false,
+                statusText: "Anthropic Messages API",
+                logoKey: "anthropic",
                 models: [
-                    ModelDescriptor(id: "anthropic/claude-opus-4-7", name: "Claude Opus 4.7", providerId: "anthropic", providerName: "Anthropic", contextWindowK: 200, supportsVision: true, supportsReasoning: true, badge: "Max"),
-                    ModelDescriptor(id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", providerId: "anthropic", providerName: "Anthropic", contextWindowK: 200, supportsVision: true, supportsReasoning: true, badge: nil)
+                    ModelDescriptor(id: "anthropic/claude-opus-4-7", modelId: "claude-opus-4-7", name: "Claude Opus 4.7", providerId: "anthropic", providerName: "Anthropic", builtin: false, contextWindowK: 200, maxOutputTokens: 32_768, supportsVision: true, supportsPdf: true, supportsReasoning: true, badge: "Max"),
+                    ModelDescriptor(id: "anthropic/claude-sonnet-4-6", modelId: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", providerId: "anthropic", providerName: "Anthropic", builtin: false, contextWindowK: 200, maxOutputTokens: 16_384, supportsVision: true, supportsPdf: true, supportsReasoning: true, badge: nil)
                 ]
             ),
             ModelProviderConfig(
                 id: "openai",
                 name: "OpenAI",
                 baseURL: "https://api.openai.com/v1",
-                protocolKind: "openai",
+                protocolKind: "openai-responses",
+                group: "standard-personal",
+                templateId: "openai",
+                apiKeyManagementURL: "https://platform.openai.com/api-keys",
+                hasConfiguredAPIKey: false,
                 enabled: true,
-                isBuiltin: true,
-                statusText: "Ready",
+                isBuiltin: false,
+                statusText: "OpenAI Responses API",
+                logoKey: "openai",
                 models: [
-                    ModelDescriptor(id: "openai/gpt-5.4", name: "GPT-5.4 Codex", providerId: "openai", providerName: "OpenAI", contextWindowK: 256, supportsVision: true, supportsReasoning: true, badge: nil)
-                ]
-            ),
-            ModelProviderConfig(
-                id: "google",
-                name: "Google DeepMind",
-                baseURL: "https://generativelanguage.googleapis.com/v1beta",
-                protocolKind: "gemini",
-                enabled: true,
-                isBuiltin: true,
-                statusText: "Ready",
-                models: [
-                    ModelDescriptor(id: "google/gemini-3.1-pro", name: "Gemini 3.1 Pro", providerId: "google", providerName: "Google", contextWindowK: 1000, supportsVision: true, supportsReasoning: true, badge: "1M")
+                    ModelDescriptor(id: "openai/gpt-5.4", modelId: "gpt-5.4", name: "GPT-5.4", providerId: "openai", providerName: "OpenAI", builtin: false, contextWindowK: 256, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, badge: nil),
+                    ModelDescriptor(id: "openai/gpt-5.3-codex", modelId: "gpt-5.3-codex", name: "GPT-5.3 Codex", providerId: "openai", providerName: "OpenAI", builtin: false, contextWindowK: 256, maxOutputTokens: 32_768, supportsVision: true, supportsReasoning: true, badge: "Codex")
                 ]
             )
         ]
@@ -1122,9 +1166,86 @@ public enum SeedWorkspaceFactory {
 
     public static func defaultSubagents() -> [SubagentDefinitionItem] {
         [
-            SubagentDefinitionItem(id: "sa-explore", name: "Explore", description: "Fast read-only fan-out codebase search and symbol locator.", modelOverride: "zai/glm-5-turbo", toolsSummary: "Read, Search, Glob", enabled: true),
-            SubagentDefinitionItem(id: "sa-arch", name: "plan-architect", description: "Designs system architecture, API contracts, and schemas.", modelOverride: "anthropic/claude-opus-4-7", toolsSummary: "Read, CodeGraph, GitNexus", enabled: true),
-            SubagentDefinitionItem(id: "sa-judge", name: "visual-judge", description: "Visual acceptance gate for rendered layouts and documents.", modelOverride: "google/gemini-3.1-pro", toolsSummary: "Read, Screenshot Inspect", enabled: true)
+            SubagentDefinitionItem(
+                id: "built-in:built-in:general-purpose",
+                name: "general-purpose",
+                description: "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks autonomously.",
+                systemPrompt: "You are ZCode's general-purpose subagent. Research thoroughly, verify facts in code, and return concise actionable findings.",
+                color: .blue,
+                scope: "built-in",
+                source: "built-in",
+                readOnly: true,
+                enabled: true,
+                modelOverride: "inherit",
+                reasoningOverride: "inherit",
+                allowedTools: ["*"],
+                filePath: "built-in:general-purpose"
+            ),
+            SubagentDefinitionItem(
+                id: "built-in:built-in:Explore",
+                name: "Explore",
+                description: "Read-only search agent for broad fan-out codebase searches across files, directories, and naming conventions.",
+                systemPrompt: "You are ZCode's fast read-only Explore subagent. Locate relevant files, symbols, and call chains quickly without modifying files.",
+                color: .cyan,
+                scope: "built-in",
+                source: "built-in",
+                readOnly: true,
+                enabled: true,
+                modelOverride: "inherit",
+                reasoningOverride: "low",
+                allowedTools: ["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "TodoWrite"],
+                filePath: "built-in:Explore"
+            ),
+            SubagentDefinitionItem(
+                id: "user:user:plan-architect",
+                name: "plan-architect",
+                description: "Analyzes requirements and designs system architecture, API contracts, and database schemas without writing implementation code.",
+                systemPrompt: "Analyze system requirements, trade-offs, API boundaries, and data schemas. Return a structured architecture blueprint with file-level impact.",
+                color: .purple,
+                scope: "user",
+                source: "user",
+                readOnly: false,
+                enabled: true,
+                modelOverride: "inherit",
+                reasoningOverride: "high",
+                allowedTools: ["Read", "Grep", "Glob", "WebFetch", "TodoWrite"],
+                injectAgentsMd: true,
+                filePath: "~/.zcode/agents/plan-architect.md"
+            ),
+            SubagentDefinitionItem(
+                id: "plugin:documents:visual-judge",
+                name: "documents:visual-judge",
+                description: "Single visual acceptance gate for rendered DOCX, PDF, PPTX, and XLSX page images.",
+                systemPrompt: "Inspect rendered page PNGs for visual layout, typography, alignment, and asset quality. Return structured JSON pass/fail verdicts per page.",
+                color: .orange,
+                scope: "user",
+                source: "plugin",
+                readOnly: true,
+                enabled: true,
+                modelOverride: "inherit",
+                reasoningOverride: "medium",
+                allowedTools: ["Read", "Bash"],
+                filePath: "plugin:documents/visual-judge.md",
+                pluginId: "documents@zcode-plugins-official",
+                pluginName: "Documents"
+            ),
+            SubagentDefinitionItem(
+                id: "plugin:pdf:visual-judge",
+                name: "pdf:visual-judge",
+                description: "Visual quality gate for generated PDF reports, academic papers, and posters.",
+                systemPrompt: "Evaluate rendered PDF page images for clipping, overlap, contrast, and layout polish.",
+                color: .pink,
+                scope: "user",
+                source: "plugin",
+                readOnly: true,
+                enabled: true,
+                modelOverride: "inherit",
+                reasoningOverride: "medium",
+                allowedTools: ["Read", "Bash"],
+                filePath: "plugin:pdf/visual-judge.md",
+                pluginId: "pdf@zcode-plugins-official",
+                pluginName: "PDF"
+            )
         ]
     }
 

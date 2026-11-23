@@ -111,7 +111,7 @@ Most mobile wrappers for desktop AI coding tools embed a remote web page inside 
   </tr>
 </table>
 
-### 4. Syntax Code Gutter, Native `PDFKit` Preview & 19-Category Enterprise Settings
+### 4. Syntax Code Gutter, Native `PDFKit` Preview & 1:1 ZCode Settings Hub
 
 <table>
   <tr>
@@ -126,9 +126,31 @@ Most mobile wrappers for desktop AI coding tools embed a remote web page inside 
       <sub><b>Native Media &amp; <code>PDFKit</code></b><br />Pinch-to-zoom vector PDFs, architecture PNGs &amp; structured CSV benchmark tables</sub>
     </td>
     <td width="33%" align="center">
-      <img src="docs/screenshots/12-enterprise-settings-center.png" alt="19-Category Enterprise Settings" />
+      <img src="docs/screenshots/12-enterprise-settings-center.png" alt="1:1 ZCode Settings Center" />
       <br />
-      <sub><b>19-Category Settings Center</b><br />Models, MCP servers, Skills, Hooks, Memory, Face ID / Pattern Lock &amp; Token Charts</sub>
+      <sub><b>1:1 ZCode Settings Hub</b><br />3 official groups &amp; 16 sections synced live over Desktop VQL RPC</sub>
+    </td>
+  </tr>
+</table>
+
+### 5. 1:1 ZCode Model & Provider Studio and Subagent Studio
+
+<table>
+  <tr>
+    <td width="33%" align="center">
+      <img src="docs/screenshots/13-settings-model-provider-studio.png" alt="Model & Provider Studio" />
+      <br />
+      <sub><b>Model &amp; Provider Studio</b><br />17 official templates, Keychain API keys, Base URL &amp; per-model Connectivity Test</sub>
+    </td>
+    <td width="33%" align="center">
+      <img src="docs/screenshots/14-settings-model-capabilities-editor.png" alt="Model Capabilities & Reasoning Editor" />
+      <br />
+      <sub><b>Model Capability Matrix</b><br />Context/Output presets, Multimodal inputs &amp; ordered Reasoning Effort levels</sub>
+    </td>
+    <td width="33%" align="center">
+      <img src="docs/screenshots/16-settings-create-subagent-tools.png" alt="Subagent Studio & Tool Permissions" />
+      <br />
+      <sub><b>Subagent Studio</b><br />Built-in overrides, custom agents, 9-tool permissions grid &amp; Markdown prompt editor</sub>
     </td>
   </tr>
 </table>
@@ -187,7 +209,7 @@ All low-latency RPC invocations (`zcode-task`, `terminalService`, workspace file
 | **Composer & Steering** | Multi-line adaptive composer, model & effort selector (`Low` / `Medium` / `High` / `Max`), mode switcher (`Ask` / `Plan` / `Build` / `Auto`), **`↑ Steer`** live prompt queue, `+` / `/` / `@` contextual popovers | `SwiftUI` |
 | **Task & SubAgent Management** | Unified floating Task Status Panel (`Git tools`, `Progress`, `Goal` timer, `Agents`), multi-tab slide-over SubAgent transcript viewer with artifact previews | `SwiftUI` |
 | **Coding Inspector** | Workspace file tree, syntax-highlighted viewer (`GitHub Dark`, `One Dark Pro`, `Solarized`), line range comments attached to composer, Unified/Split Git diff viewer + commit flow, `PDFKit` / PNG / CSV preview, multi-tab Terminal, Workflow DAG | `PDFKit`, `SwiftUI` |
-| **Enterprise & Security** | 19-category Settings Center, MCP / Skills / Plugins / Hooks / Memory / Cron Automations, Token analytics charts, iOS Keychain credential isolation, Face ID / Touch ID & 3×3 SHA-256 Pattern Lock, `EN` / `VI` / `ZH` localization (`English` default) | `Security`, `LocalAuthentication`, `Charts` |
+| **Enterprise & Security** | 1:1 ZCode Settings Hub (3 groups, 16 official sections), Model & Provider Studio (17 templates + connectivity tests), Subagent Studio (Built-in/Plugin overrides + custom agent editor), MCP (Form + JSON), Skills, Plugins, Commands, Hooks, Memory, Token analytics charts, Keychain isolation, Face ID & SHA-256 Pattern Lock | `Security`, `LocalAuthentication`, `Charts` |
 
 ---
 
@@ -225,7 +247,7 @@ zcode-ios/
 │       ├── Inspector/                           # Syntax Code Viewer, Split Git Diff, PDFKit Viewer, Terminal & DAG
 │       ├── Common/                              # Root 3-pane adaptive iPad/iPhone shell, Command Center & Marketplace
 │       ├── Security/                            # Biometric Face ID & 9-node Pattern Unlock Gate
-│       └── Settings/                            # 19-Category Enterprise Settings & Swift Charts Usage Analytics
+│       └── Settings/                            # 1:1 ZCode Settings Studio (Models, Subagents, MCP, Skills, Usage)
 ├── Tests/ZCodeMobileTests/                      # Unit tests (CRC32 vectors, VQL round-trip, URL parser, Zero-Demo init)
 └── UITests/ZCodeMobileUITests/                  # Full E2E Simulator test suites (Onboarding + 20-screen Workspace audit)
 ```
