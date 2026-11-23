@@ -48,6 +48,33 @@ public struct AgentChatCanvasView: View {
                                             }
                                         }
 
+                                        if session.status == .running && Self.isAwaitingFirstOutput(session) {
+                                            HStack(spacing: 8) {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                                Text("Working…")
+                                                    .font(.system(size: 13))
+                                                    .foregroundStyle(palette.foregroundSubtle)
+                                            }
+                                            .accessibilityIdentifier("chatWorkingIndicator")
+                                        }
+
+                                        if let notice = session.statusNoticeText, !notice.isEmpty {
+                                            HStack(alignment: .top, spacing: 8) {
+                                                Image(systemName: session.status == .error ? "exclamationmark.triangle.fill" : "info.circle")
+                                                    .foregroundStyle(session.status == .error ? palette.destructive : palette.foregroundSubtle)
+                                                Text(notice)
+                                                    .font(.system(size: 13))
+                                                    .foregroundStyle(palette.foreground)
+                                                    .textSelection(.enabled)
+                                            }
+                                            .padding(10)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(palette.card, in: RoundedRectangle(cornerRadius: 10))
+                                            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(palette.border, lineWidth: 1))
+                                            .accessibilityIdentifier("chatStatusNotice")
+                                        }
+
                                         if let perm = session.pendingPermission {
                                             permissionCard(perm)
                                                 .id("pending-permission")
@@ -78,6 +105,12 @@ public struct AgentChatCanvasView: View {
                                     withAnimation(.easeOut(duration: 0.2)) {
                                         proxy.scrollTo("chat-bottom-anchor", anchor: .bottom)
                                     }
+                                }
+                                .onChange(of: Self.streamingFingerprint(session)) { _, _ in
+                                    proxy.scrollTo("chat-bottom-anchor", anchor: .bottom)
+                                }
+                                .onChange(of: session.id) { _, _ in
+                                    proxy.scrollTo("chat-bottom-anchor", anchor: .bottom)
                                 }
                             }
 
@@ -598,6 +631,17 @@ public struct AgentChatCanvasView: View {
         .padding(14)
         .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.borderStrong, lineWidth: 1))
+    }
+
+    static func isAwaitingFirstOutput(_ session: AgentTaskSession) -> Bool {
+        guard let last = session.messages.last else { return true }
+        if last.role != "assistant" { return true }
+        return last.content.isEmpty && (last.thought ?? "").isEmpty && last.tools.isEmpty
+    }
+
+    static func streamingFingerprint(_ session: AgentTaskSession) -> Int {
+        guard let last = session.messages.last else { return 0 }
+        return last.content.count &+ (last.thought?.count ?? 0) &* 7 &+ last.tools.count &* 131
     }
 
     private func planCard(_ plan: PlanReviewPrompt) -> some View {

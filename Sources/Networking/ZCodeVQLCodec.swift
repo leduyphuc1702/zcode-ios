@@ -224,6 +224,13 @@ public enum ZCodeVQLCodec {
         return rpcPayload
     }
 
+    public static func buildRawRPCEventDisposePayload(id: Int32) -> Data {
+        var rpcPayload = Data()
+        encode(.array([.int32(103), .int32(id)]), into: &rpcPayload)
+        encode(.undefined, into: &rpcPayload)
+        return rpcPayload
+    }
+
     public static func buildRPCRequestFrame(id: Int32, channel: String, method: String, args: [VQLValue]) -> Data {
         wrapSocketFrame(payload: buildRawRPCRequestPayload(id: id, channel: channel, method: method, args: args))
     }

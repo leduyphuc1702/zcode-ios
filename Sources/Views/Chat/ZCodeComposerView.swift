@@ -466,27 +466,31 @@ public struct ZCodeComposerView: View {
     }
 
     private var permissionShieldMenu: some View {
-        let mode = store.activeSession?.mode ?? .yolo
-        let isElevated = (mode == .yolo || mode == .autoEdit || mode == .build)
+        let mode = store.activeSession?.mode ?? .build
+        let isElevated = (mode == .yolo || mode == .autoEdit)
         return Menu {
-            ForEach(AgentExecutionMode.allCases) { itemMode in
-                Button {
-                    store.playSelectionHaptic()
-                    if var s = store.activeSession {
-                        s.mode = itemMode
-                        store.activeSession = s
+            Picker("Mode", selection: Binding(
+                get: { store.activeSession?.mode == .ask ? .build : (store.activeSession?.mode ?? .build) },
+                set: { store.selectMode($0) }
+            )) {
+                ForEach(AgentExecutionMode.officialCases) { itemMode in
+                    Label {
+                        Text(itemMode.label)
+                        Text(itemMode.subtitle)
+                    } icon: {
+                        Image(systemName: itemMode.icon)
                     }
-                } label: {
-                    Label("\(itemMode.label) — \(itemMode.subtitle)", systemImage: itemMode.icon)
+                    .tag(itemMode)
                 }
             }
+            .pickerStyle(.inline)
         } label: {
             Image(systemName: "exclamationmark.shield")
                 .font(.system(size: 16, weight: .regular))
                 .foregroundStyle(isElevated ? palette.warning : palette.foregroundSubtle)
                 .frame(width: 24, height: 30)
                 .contentShape(Rectangle().inset(by: -6))
-                .accessibilityLabel("Execution permission mode: \(mode.label)")
+                .accessibilityLabel("Mode: \(mode.label)")
         }
         .accessibilityIdentifier("composerModePicker")
     }
@@ -518,25 +522,53 @@ public struct ZCodeComposerView: View {
         .accessibilityIdentifier("contextTelemetryButton")
     }
 
+    private var currentLiveSelection: LiveModelSelection? {
+        guard let session = store.activeSession else { return store.preferredModelSelection }
+        return store.modelSelection(for: session)
+    }
+
     private var modelSlugMenu: some View {
-        let modelId = store.activeSession?.modelId ?? "anthropic/claude-opus-4-7"
+        let live = !store.isUITestSeededMode
+        let currentModelId = live ? (currentLiveSelection?.modelId ?? "") : (store.activeSession?.modelId ?? "")
         return Menu {
-            ForEach(store.providers.filter(\.enabled)) { provider in
-                Section(provider.name) {
-                    ForEach(provider.models) { model in
-                        Button {
-                            if var s = store.activeSession {
-                                s.modelId = model.id
-                                store.activeSession = s
+            if live {
+                if store.liveModelGroups.isEmpty {
+                    Text("Loading models from host…")
+                }
+                ForEach(store.liveModelGroups) { group in
+                    Section(group.name) {
+                        ForEach(group.models) { model in
+                            Button {
+                                store.selectModel(model)
+                            } label: {
+                                let isCurrent = model.modelId == currentLiveSelection?.modelId && model.providerId == currentLiveSelection?.providerId
+                                if isCurrent {
+                                    Label(model.modelId, systemImage: "checkmark")
+                                } else {
+                                    Text(model.modelId)
+                                }
                             }
-                        } label: {
-                            Text("\(model.name) (\(model.contextWindowK)K)")
+                        }
+                    }
+                }
+            } else {
+                ForEach(store.providers.filter(\.enabled)) { provider in
+                    Section(provider.name) {
+                        ForEach(provider.models) { model in
+                            Button {
+                                if var s = store.activeSession {
+                                    s.modelId = model.id
+                                    store.activeSession = s
+                                }
+                            } label: {
+                                Text("\(model.name) (\(model.contextWindowK)K)")
+                            }
                         }
                     }
                 }
             }
         } label: {
-            Text(modelSlug(for: modelId))
+            Text(currentModelId.isEmpty ? "Select model" : modelSlug(for: currentModelId))
                 .font(.system(size: 13, weight: .regular))
                 .foregroundStyle(palette.foregroundSubtle)
                 .lineLimit(1)
@@ -545,31 +577,66 @@ public struct ZCodeComposerView: View {
         .accessibilityIdentifier("composerModelPicker")
     }
 
+    @ViewBuilder
     private var effortLevelMenu: some View {
-        let effort = store.activeSession?.effort ?? .high
-        return Menu {
-            ForEach(ReasoningEffortLevel.allCases) { level in
-                Button {
-                    if var s = store.activeSession {
-                        s.effort = level
-                        store.activeSession = s
+        if store.isUITestSeededMode {
+            let effort = store.activeSession?.effort ?? .high
+            Menu {
+                ForEach(ReasoningEffortLevel.allCases) { level in
+                    Button {
+                        if var s = store.activeSession {
+                            s.effort = level
+                            store.activeSession = s
+                        }
+                    } label: {
+                        Text(level.fullTitle)
                     }
-                } label: {
-                    Text(level.fullTitle)
                 }
+            } label: {
+                effortMenuLabel(effort.fullTitle)
             }
-        } label: {
-            HStack(spacing: 3) {
-                Text(effort.fullTitle)
-                    .font(.system(size: 13.5, weight: .regular))
-                    .foregroundStyle(palette.foregroundMuted)
-                    .fixedSize()
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9.5, weight: .medium))
-                    .foregroundStyle(palette.foregroundMuted)
+            .accessibilityIdentifier("composerEffortPicker")
+        } else {
+            let levels = store.reasoningLevels(for: store.activeSession)
+            if !levels.isEmpty {
+                let current = currentLiveSelection?.reasoningLevel ?? levels.last ?? ""
+                Menu {
+                    Picker("Reasoning", selection: Binding(
+                        get: { current },
+                        set: { store.selectReasoningLevel($0) }
+                    )) {
+                        ForEach(levels, id: \.self) { level in
+                            Text(Self.reasoningTitle(level)).tag(level)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    effortMenuLabel(Self.reasoningTitle(current))
+                }
+                .accessibilityIdentifier("composerEffortPicker")
             }
         }
-        .accessibilityIdentifier("composerEffortPicker")
+    }
+
+    private func effortMenuLabel(_ title: String) -> some View {
+        HStack(spacing: 3) {
+            Text(title)
+                .font(.system(size: 13.5, weight: .regular))
+                .foregroundStyle(palette.foregroundMuted)
+                .fixedSize()
+            Image(systemName: "chevron.down")
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(palette.foregroundMuted)
+        }
+    }
+
+    static func reasoningTitle(_ level: String) -> String {
+        switch level.lowercased() {
+        case "xhigh": return "Extra High"
+        case "medium", "med": return "Medium"
+        case "": return "Default"
+        default: return level.prefix(1).uppercased() + level.dropFirst()
+        }
     }
 
     @ViewBuilder

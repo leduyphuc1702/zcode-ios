@@ -292,36 +292,58 @@ public enum AgentExecutionMode: String, Codable, CaseIterable, Identifiable {
 
     public var id: String { rawValue }
 
+    /// Modes offered by the official ZCode composer, in menu order.
+    public static let officialCases: [AgentExecutionMode] = [.build, .autoEdit, .plan, .yolo]
+
+    /// Maps a ZCode task mode string (including legacy aliases) to a mode.
+    public init(wire: String?) {
+        switch wire {
+        case "edit": self = .autoEdit
+        case "plan": self = .plan
+        case "guarded": self = .guarded
+        case "yolo", "bypassPermissions", "dontAsk": self = .yolo
+        default: self = .build
+        }
+    }
+
+    /// Value sent to `zcode-task.setMode` / `createTask`.
+    public var wireValue: String {
+        switch self {
+        case .ask, .build: return "build"
+        case .autoEdit: return "edit"
+        case .plan: return "plan"
+        case .guarded: return "guarded"
+        case .yolo: return "yolo"
+        }
+    }
+
     public var label: String {
         switch self {
-        case .ask: return "Ask"
-        case .autoEdit: return "Auto Edit"
-        case .plan: return "Plan"
-        case .build: return "Build"
+        case .ask, .build: return "Ask before changes"
+        case .autoEdit: return "Edit automatically"
+        case .plan: return "Plan mode"
         case .guarded: return "Guarded"
-        case .yolo: return "Full Access"
+        case .yolo: return "Full access"
         }
     }
 
     public var subtitle: String {
         switch self {
-        case .ask: return "Ask before file edits and shell commands"
-        case .autoEdit: return "Auto-apply file edits, ask for shell commands"
-        case .plan: return "Explore and present architecture plan before coding"
-        case .build: return "Autonomous coding & test verification"
-        case .guarded: return "Strict enterprise policy & sandboxed commands"
-        case .yolo: return "Execute all tools autonomously without prompts"
+        case .ask, .build: return "Ask before each file changes."
+        case .autoEdit: return "Edit selected files or relevant workspace files automatically."
+        case .plan: return "Inspect the code and present a plan before editing."
+        case .guarded: return "Strict policy with sandboxed commands."
+        case .yolo: return "Edit and run commands with fewer confirmations."
         }
     }
 
     public var icon: String {
         switch self {
-        case .ask: return "hand.raised"
-        case .autoEdit: return "pencil.and.outline"
-        case .plan: return "map"
-        case .build: return "hammer"
+        case .ask, .build: return "hand.raised"
+        case .autoEdit: return "pencil.line"
+        case .plan: return "list.bullet.clipboard"
         case .guarded: return "lock.shield"
-        case .yolo: return "bolt.fill"
+        case .yolo: return "exclamationmark.shield"
         }
     }
 }
@@ -637,6 +659,10 @@ public struct AgentTaskSession: Identifiable, Codable, Equatable {
     public var goalPaused: Bool
     public var subagentRuns: [SubagentSessionRun]
     public var statusNoticeText: String?
+    /// Provider of `modelId` as reported by the host model selection.
+    public var modelProviderId: String?
+    /// Host reasoning level string (values come from the model's option specs).
+    public var reasoningLevel: String?
 
     public init(
         id: String,
@@ -670,8 +696,12 @@ public struct AgentTaskSession: Identifiable, Codable, Equatable {
         goalElapsedText: String? = nil,
         goalPaused: Bool = false,
         subagentRuns: [SubagentSessionRun] = [],
-        statusNoticeText: String? = nil
+        statusNoticeText: String? = nil,
+        modelProviderId: String? = nil,
+        reasoningLevel: String? = nil
     ) {
+        self.modelProviderId = modelProviderId
+        self.reasoningLevel = reasoningLevel
         self.id = id
         self.traceId = traceId
         self.projectId = projectId

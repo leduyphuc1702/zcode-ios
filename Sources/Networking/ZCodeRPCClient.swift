@@ -39,6 +39,13 @@ public struct RemoteTaskSummary: Equatable, Sendable {
     public let archived: Bool
     public let unread: Bool
     public let updatedAt: Date
+    public var createdAt: Date? = nil
+    public var mode: String? = nil
+    /// Model picker value (`provider/model$level`).
+    public var model: String? = nil
+    public var thoughtLevel: String? = nil
+    /// `permission` or `userInput` when the task is blocked on the user.
+    public var pendingInteractionKind: String? = nil
 }
 
 public struct RelayBridgeIdentity: Equatable, Sendable {
@@ -119,6 +126,9 @@ public actor ZCodeRPCClient {
     private var phaseCallback: (@Sendable (RelayPairingPhase) -> Void)?
     private var workspaceListUpdateHandler: (@Sendable ([RemoteWorkspaceSummary], String?, String?) -> Void)?
     private var eventHandlers: [Int32: @Sendable (VQLValue) -> Void] = [:]
+    private var bridgeChangeHandler: (@Sendable (RelayBridgeIdentity) -> Void)?
+    private var bridgeDegradedHandler: (@Sendable (String) -> Void)?
+    private var connectionLostHandler: (@Sendable (String) -> Void)?
     private var fragmentBuffers: [Int: [Int: Data]] = [:]
     private var receiveTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
@@ -137,6 +147,21 @@ public actor ZCodeRPCClient {
     ) {
         self.workspaceListUpdateHandler = handler
     }
+
+    /// Fired after every successful `workspace-bridge-ready`; all channel subscriptions are gone at that point and must be re-registered.
+    public func setBridgeChangeHandler(_ handler: (@Sendable (RelayBridgeIdentity) -> Void)?) {
+        self.bridgeChangeHandler = handler
+    }
+
+    public func setBridgeDegradedHandler(_ handler: (@Sendable (String) -> Void)?) {
+        self.bridgeDegradedHandler = handler
+    }
+
+    public func setConnectionLostHandler(_ handler: (@Sendable (String) -> Void)?) {
+        self.connectionLostHandler = handler
+    }
+
+    public var isRelay: Bool { isRelayMode }
 
     public func currentBridge() -> RelayBridgeIdentity? {
         activeBridgeIdentity
@@ -284,6 +309,11 @@ public actor ZCodeRPCClient {
             ?? (dict["createdAt"] as? Double)
             ?? (Date().timeIntervalSince1970 * 1000)
         let updatedDate = Date(timeIntervalSince1970: rawTs > 9_999_999_999 ? rawTs / 1000.0 : rawTs)
+        let createdDate: Date? = {
+            guard let raw = (dict["createdAt"] as? Double) ?? (dict["createdAt"] as? Int).map(Double.init) else { return nil }
+            return Date(timeIntervalSince1970: raw > 9_999_999_999 ? raw / 1000.0 : raw)
+        }()
+        let pending = dict["pendingInteraction"] as? [String: Any]
 
         return RemoteTaskSummary(
             id: tid,
@@ -294,7 +324,12 @@ public actor ZCodeRPCClient {
             pinned: pinned,
             archived: archived,
             unread: unread,
-            updatedAt: updatedDate
+            updatedAt: updatedDate,
+            createdAt: createdDate,
+            mode: dict["mode"] as? String,
+            model: dict["model"] as? String,
+            thoughtLevel: dict["thoughtLevel"] as? String,
+            pendingInteractionKind: pending?["kind"] as? String
         )
     }
 
@@ -537,9 +572,10 @@ public actor ZCodeRPCClient {
     public func openWorkspaceBridge(
         workspaceKey: String,
         taskId: String? = nil,
-        timeoutSec: Double = 4.0
+        timeoutSec: Double = 4.0,
+        forceReopen: Bool = false
     ) async throws -> RelayBridgeIdentity {
-        if let current = activeBridgeIdentity, current.workspaceKey == workspaceKey {
+        if !forceReopen, let current = activeBridgeIdentity, current.workspaceKey == workspaceKey {
             return current
         }
 
@@ -576,8 +612,12 @@ public actor ZCodeRPCClient {
             fallbackWorkspaceKey: workspaceKey
         )
         self.activeBridgeIdentity = identity
+        if !isInitialized {
+            await waitUntilInitialized(maxWaitSec: 1.5)
+        }
 
         await sendMobileViewStateUpdate(workspaceKey: identity.workspaceKey, taskId: identity.initialTaskId ?? taskId)
+        bridgeChangeHandler?(identity)
         return identity
     }
 
@@ -654,6 +694,7 @@ public actor ZCodeRPCClient {
         nextPhysicalSeq = 1
         nextMessageSeq = 1
         fragmentBuffers.removeAll()
+        eventHandlers.removeAll()
         let oldReplies = pendingReplies
         pendingReplies.removeAll()
         for (_, cont) in oldReplies {
@@ -801,6 +842,12 @@ public actor ZCodeRPCClient {
         )
         try await sendChannelPayload(rawPayload, on: task)
         return subId
+    }
+
+    public func unlisten(_ subId: Int32) async {
+        guard eventHandlers.removeValue(forKey: subId) != nil, let task = webSocketTask else { return }
+        if isRelayMode, activeBridgeIdentity == nil { return }
+        try? await sendChannelPayload(ZCodeVQLCodec.buildRawRPCEventDisposePayload(id: subId), on: task)
     }
 
     private func waitUntilInitialized(maxWaitSec: Double) async {
@@ -975,9 +1022,27 @@ public actor ZCodeRPCClient {
                         self.pairingContinuation = nil
                         pairCont.resume(throwing: error)
                     }
+                    if !Task.isCancelled {
+                        self.handleSocketClosed(error)
+                    }
                     break
                 }
             }
+        }
+    }
+
+    private func handleSocketClosed(_ error: Error) {
+        let wasPaired = pairingAlreadyMatched || !isRelayMode
+        activeBridgeIdentity = nil
+        isInitialized = false
+        let replies = pendingReplies
+        pendingReplies.removeAll()
+        for (_, cont) in replies {
+            cont.resume(throwing: error)
+        }
+        eventHandlers.removeAll()
+        if wasPaired {
+            connectionLostHandler?(error.localizedDescription)
         }
     }
 
@@ -1159,6 +1224,13 @@ public actor ZCodeRPCClient {
                 let activeKey = result["activeWorkspaceKey"] as? String
                 let activeTask = result["activeTaskId"] as? String
                 workspaceListUpdateHandler?(list, activeKey, activeTask)
+                return
+            }
+
+            if zcodeType == "bridge-degraded" {
+                if let identity = activeBridgeIdentity, identity.matchesTransportPayload(payload) {
+                    bridgeDegradedHandler?((payload["reason"] as? String) ?? "rpc-transport-fault")
+                }
                 return
             }
 

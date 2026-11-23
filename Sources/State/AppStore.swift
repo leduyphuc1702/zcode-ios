@@ -124,12 +124,17 @@ public final class AppStore {
     // MARK: - Composer State
     public var composerText: String = ""
     public var composerAttachments: [ComposerAttachment] = []
-    private var activeStreamTask: Task<Void, Never>?
+    var activeStreamTask: Task<Void, Never>?
     private var activeConnectTask: Task<Void, Never>?
-    private var activeHydrationTask: Task<Void, Never>?
-    private var isBulkSyncingWorkspaces: Bool = false
-    private var workspaceIdentityByPath: [String: String] = [:]
-    private let rpcClient = ZCodeRPCClient()
+    var activeHydrationTask: Task<Void, Never>?
+    var isBulkSyncingWorkspaces: Bool = false
+    var workspaceIdentityByPath: [String: String] = [:]
+    let rpcClient = ZCodeRPCClient()
+
+    // MARK: - Live Host Model Selection (zcode `model-selection` channel)
+    public var liveModelGroups: [LiveModelProviderGroup] = []
+    public var preferredModelSelection: LiveModelSelection? = nil
+    @ObservationIgnored let liveSync = LiveSyncState()
 
     private let prefsKey = "zcode_mobile_enterprise_prefs_v2"
     private let connectionsKey = "zcode_saved_connections_v2"
@@ -528,20 +533,7 @@ public final class AppStore {
                     _ = try? await self.rpcClient.openWorkspaceBridge(workspaceKey: wsKey, taskId: nil, timeoutSec: 4.0)
                 }
             }
-            let projectTasks = await self.fetchTasksForWorkspace(
-                workspacePath: wsPath,
-                workspaceIdentity: wsIdentity,
-                projectId: projectId,
-                timeoutSec: 3.5
-            )
-            if !projectTasks.isEmpty {
-                var merged = self.sessions.filter { $0.projectId != projectId }
-                merged.append(contentsOf: projectTasks)
-                self.sessions = merged
-                if !self.sessions.contains(where: { $0.id == self.activeSessionId }) {
-                    self.activeSessionId = projectTasks.first?.id ?? ""
-                }
-            }
+            self.scheduleWorkspaceRefresh(projectId: projectId, workspacePath: wsPath, workspaceIdentity: wsIdentity)
             await self.hydrateWorkspaceFilesAndGit(workspacePath: wsPath, projectId: projectId)
         }
     }
@@ -585,15 +577,17 @@ public final class AppStore {
         activeProjectId = project.id
         expandedProjectIds.insert(project.id)
         let newId = "task-\(UUID().uuidString.prefix(8))"
+        let inheritedMode = activeSession?.mode ?? (isUITestSeededMode ? .yolo : .build)
+        let inheritedModel: LiveModelSelection? = isUITestSeededMode ? nil : (activeSession.flatMap { modelSelection(for: $0) } ?? preferredModelSelection)
         let newSession = AgentTaskSession(
             id: newId,
-            traceId: "trc_\(UUID().uuidString.prefix(8))",
+            traceId: UUID().uuidString.lowercased(),
             projectId: project.id,
             workspacePath: project.rootPath,
             title: "New task",
             status: .idle,
-            mode: .yolo,
-            modelId: "anthropic/claude-opus-4-7",
+            mode: inheritedMode,
+            modelId: isUITestSeededMode ? "anthropic/claude-opus-4-7" : (inheritedModel?.modelId ?? ""),
             effort: .high,
             pinned: false,
             archived: false,
@@ -612,7 +606,9 @@ public final class AppStore {
             pendingQuestion: nil,
             pendingPlan: nil,
             queuedPrompts: [],
-            checkpoints: []
+            checkpoints: [],
+            modelProviderId: inheritedModel?.providerId,
+            reasoningLevel: inheritedModel?.reasoningLevel
         )
         sessions.insert(newSession, at: 0)
         activeSessionId = newId
@@ -644,10 +640,12 @@ public final class AppStore {
             let wsKey = ZCodeRPCClient.resolveWorkspaceKey(workspacePath: wsPath, workspaceIdentity: wsIdentity)
             Task { @MainActor in
                 if conn.transport == .cloudRelayV2 {
-                    _ = try? await self.rpcClient.openWorkspaceBridge(workspaceKey: wsKey, taskId: sid, timeoutSec: 4.0)
+                    _ = try? await self.rpcClient.openWorkspaceBridge(workspaceKey: wsKey, taskId: sid, timeoutSec: 6.0)
                     await self.rpcClient.sendMobileViewStateUpdate(workspaceKey: wsKey, taskId: sid)
                 }
-                await self.hydrateTaskSnapshot(sessionId: sid, workspacePath: wsPath, workspaceIdentity: wsIdentity)
+                if let current = self.sessions.first(where: { $0.id == sid }) {
+                    await self.subscribeActiveTask(current)
+                }
                 await self.hydrateWorkspaceFilesAndGit(workspacePath: wsPath, projectId: session.projectId)
             }
         }
@@ -804,103 +802,96 @@ public final class AppStore {
         let mode = session.mode
         let modelLabel = currentModelDisplayName(for: session.modelId)
 
-        // Production Mode: Dispatch strictly over live ZCode Remote RPC (Zero fake demo output)
+        // Production: zcode-task facade (createTask v4 + sendPrompt replayable); progress arrives via onDynamicTaskEvent.
         if !isUITestSeededMode {
+            let userMessageId = userMsg.id
+            let promptText = trimmed.isEmpty ? "Inspect attached files" : trimmed
             activeStreamTask?.cancel()
             activeStreamTask = Task { @MainActor in
-                let assistantId = UUID().uuidString
-                appendAssistantPlaceholder(sessionId: sessionId, messageId: assistantId, modelLabel: modelLabel)
-
                 guard let conn = activeConnection, conn.state == .connected else {
-                    updateAssistantTurn(sessionId: sessionId, messageId: assistantId) { msg in
-                        msg.thought = nil
-                        msg.content = "Remote workstation is disconnected. Tap the host header or reconnect to send prompts to your ZCode computer."
-                    }
                     if let idx = sessions.firstIndex(where: { $0.id == sessionId }) {
                         sessions[idx].status = .error
+                        sessions[idx].statusNoticeText = "Remote workstation is disconnected. Reconnect to send prompts to your ZCode computer."
                     }
                     return
                 }
 
+                var targetSessionId = sessionId
                 do {
-                    var targetSessionId = sessionId
                     let wsPath = session.workspacePath
                     let wsIdentity = workspaceIdentityByPath[wsPath]
                     let wsKey = ZCodeRPCClient.resolveWorkspaceKey(workspacePath: wsPath, workspaceIdentity: wsIdentity)
+                    let isDraft = targetSessionId.hasPrefix("task-")
 
                     if conn.transport == .cloudRelayV2 {
-                        _ = try await rpcClient.openWorkspaceBridge(workspaceKey: wsKey, taskId: targetSessionId.hasPrefix("task-") ? nil : targetSessionId, timeoutSec: 5.0)
+                        _ = try await rpcClient.openWorkspaceBridge(workspaceKey: wsKey, taskId: isDraft ? nil : targetSessionId, timeoutSec: 6.0)
                     }
 
-                    // If this is a newly drafted mobile session, create the real task on ZCode Desktop first
-                    if targetSessionId.hasPrefix("task-") {
+                    let selection = (sessions.first(where: { $0.id == sessionId })).flatMap { modelSelection(for: $0) }
+
+                    if isDraft {
                         var createReq: [String: Any] = [
                             "workspacePath": wsPath,
-                            "mode": mode.rawValue,
+                            "mode": mode.wireValue,
                             "v4Create": true
                         ]
-                        if let wsIdentity, !wsIdentity.isEmpty {
-                            createReq["workspaceIdentity"] = wsIdentity
-                        }
+                        if let wsIdentity, !wsIdentity.isEmpty { createReq["workspaceIdentity"] = wsIdentity }
+                        if let selection { createReq["modelSelection"] = selection.jsonObject }
                         let created = try await rpcClient.call(
                             channel: "zcode-task",
                             method: "createTask",
                             args: [.fromJSONObject(createReq)],
-                            timeoutSec: 8.0
+                            timeoutSec: 20.0
                         )
-                        if let createdDict = created.decodeJSONDictionary(),
-                           let realTaskId = (createdDict["taskId"] as? String) ?? (createdDict["id"] as? String),
-                           !realTaskId.isEmpty {
-                            if let sIdx = sessions.firstIndex(where: { $0.id == targetSessionId }) {
-                                sessions[sIdx].id = realTaskId
-                            }
-                            if activeSessionId == targetSessionId {
-                                activeSessionId = realTaskId
-                            }
-                            targetSessionId = realTaskId
+                        let createdDict = created.decodeJSONDictionary() ?? [:]
+                        let meta = (createdDict["meta"] as? [String: Any]) ?? createdDict
+                        guard let realTaskId = (meta["taskId"] as? String) ?? (createdDict["taskId"] as? String), !realTaskId.isEmpty else {
+                            throw NSError(domain: "ZCodeRPC", code: -2, userInfo: [NSLocalizedDescriptionKey: "Host did not return a task id."])
                         }
+                        if let sIdx = sessions.firstIndex(where: { $0.id == targetSessionId }) {
+                            sessions[sIdx].id = realTaskId
+                            if let traceId = meta["traceId"] as? String, !traceId.isEmpty { sessions[sIdx].traceId = traceId }
+                            if let selection {
+                                sessions[sIdx].modelProviderId = selection.providerId
+                                sessions[sIdx].modelId = selection.modelId
+                                sessions[sIdx].reasoningLevel = selection.reasoningLevel
+                            }
+                        }
+                        if activeSessionId == targetSessionId { activeSessionId = realTaskId }
+                        targetSessionId = realTaskId
+                    }
+
+                    if let current = sessions.first(where: { $0.id == targetSessionId }) {
+                        await subscribeActiveTask(current)
                     }
 
                     var promptReq: [String: Any] = [
                         "taskId": targetSessionId,
-                        "traceId": traceId,
-                        "content": trimmed.isEmpty ? "Inspect attached files" : trimmed,
-                        "mode": mode.rawValue,
+                        "traceId": sessions.first(where: { $0.id == targetSessionId })?.traceId ?? UUID().uuidString.lowercased(),
+                        "queryId": UUID().uuidString.lowercased(),
+                        "messageId": userMessageId,
+                        "content": promptText,
+                        "attachments": [Any](),
+                        "clientId": Self.remoteClientId,
                         "clientMode": "web-remote-replayable"
                     ]
-                    if let wsIdentity, !wsIdentity.isEmpty {
-                        promptReq["workspaceIdentity"] = wsIdentity
+                    if let selection { promptReq["modelSelection"] = selection.jsonObject }
+                    if let bridge = await rpcClient.currentBridge(), bridge.kind == "remote",
+                       let remoteSessionId = bridge.remoteSessionId, !remoteSessionId.isEmpty {
+                        promptReq["remoteSessionId"] = remoteSessionId
                     }
 
                     _ = try await rpcClient.call(
                         channel: "zcode-task",
                         method: "sendPrompt",
                         args: [.fromJSONObject(promptReq)],
-                        timeoutSec: 12.0
+                        timeoutSec: 30.0
                     )
-
-                    // Stream live snapshot updates until Desktop agent finishes the turn
-                    for _ in 0..<90 {
-                        guard !Task.isCancelled else { break }
-                        let stillRunning = await hydrateTaskSnapshot(
-                            sessionId: targetSessionId,
-                            workspacePath: wsPath,
-                            workspaceIdentity: wsIdentity
-                        )
-                        if !stillRunning {
-                            break
-                        }
-                        try? await Task.sleep(nanoseconds: 550_000_000)
-                    }
-
-                    await hydrateWorkspaceFilesAndGit(workspacePath: wsPath, projectId: session.projectId)
+                    scheduleSnapshotRefetch(taskId: targetSessionId, delay: 0.6)
                 } catch {
-                    updateAssistantTurn(sessionId: activeSessionId, messageId: assistantId) { msg in
-                        msg.thought = nil
-                        msg.content = "Remote RPC error on `\(conn.name)`: \(error.localizedDescription)"
-                    }
-                    if let idx = sessions.firstIndex(where: { $0.id == activeSessionId || $0.id == sessionId }) {
+                    if let idx = sessions.firstIndex(where: { $0.id == targetSessionId || $0.id == sessionId }) {
                         sessions[idx].status = .error
+                        sessions[idx].statusNoticeText = "Couldn't send to \(conn.name): \(error.localizedDescription)"
                     }
                 }
             }
@@ -1184,6 +1175,12 @@ public final class AppStore {
     // MARK: - Interactive Permission / Question / Plan Handlers
 
     public func respondToPermission(allow: Bool, rememberForSession: Bool = false) {
+        if !isUITestSeededMode {
+            if !respondToPermissionLive(allow: allow, rememberForSession: rememberForSession) {
+                showToast("Not connected to the host")
+            }
+            return
+        }
         playNotificationHaptic(allow ? .success : .warning)
         guard var session = activeSession, let perm = session.pendingPermission else { return }
         session.pendingPermission = nil
@@ -1231,6 +1228,12 @@ public final class AppStore {
     }
 
     public func respondToQuestion(selectedLabel: String) {
+        if !isUITestSeededMode {
+            if !respondToQuestionLive(selectedLabel: selectedLabel) {
+                showToast("Not connected to the host")
+            }
+            return
+        }
         guard var session = activeSession else { return }
         session.pendingQuestion = nil
         session.status = .completed
@@ -1254,6 +1257,12 @@ public final class AppStore {
     }
 
     public func respondToPlan(approved: Bool) {
+        if !isUITestSeededMode {
+            if !respondToPlanLive(approved: approved) {
+                showToast("Not connected to the host")
+            }
+            return
+        }
         guard var session = activeSession, let plan = session.pendingPlan else { return }
         session.pendingPlan = nil
         if approved {
@@ -1544,7 +1553,7 @@ public final class AppStore {
         showToast("Saved connection \(connections[idx].name)")
     }
 
-    public func connectToWorkstation(_ connectionId: String) async {
+    public func connectToWorkstation(_ connectionId: String, silent: Bool = false) async {
         guard let idx = connections.firstIndex(where: { $0.id == connectionId }) else { return }
         for i in connections.indices where connections[i].id != connectionId && connections[i].transport != .enterpriseSandbox {
             connections[i].state = .disconnected
@@ -1618,6 +1627,7 @@ public final class AppStore {
                     self?.applyPushedWorkspaceListUpdate(summaries, activeWorkspaceKey: activeKey)
                 }
             }
+            await installLiveConnectionHandlers()
 
             pairingPhase = .pairedSyncing
             await syncRemoteWorkspacesFromServer(for: target)
@@ -1630,9 +1640,12 @@ public final class AppStore {
             }
             pairingPhase = .connected
             showConnectionHub = false
-            mobilePage = .home
-            playNotificationHaptic(.success)
-            showToast("Connected to \(target.name) (\(ms)ms)")
+            liveSync.reconnectAttempts = 0
+            if !silent {
+                mobilePage = .home
+                playNotificationHaptic(.success)
+                showToast("Connected to \(target.name) (\(ms)ms)")
+            }
         } catch is CancellationError {
             pairingPhase = .idle
         } catch {
@@ -1640,7 +1653,7 @@ public final class AppStore {
                 connections[cIdx].state = .error
             }
             pairingPhase = .failed(error.localizedDescription)
-            playNotificationHaptic(.error)
+            if !silent { playNotificationHaptic(.error) }
         }
     }
 
@@ -1649,6 +1662,9 @@ public final class AppStore {
 
         activeHydrationTask?.cancel()
         workspaceIdentityByPath.removeAll()
+        liveSync.reset()
+        liveSync.suppressBridgeResubscribe = true
+        defer { liveSync.suppressBridgeResubscribe = false }
 
         var nextProjects: [WorkspaceProject] = []
         var nextSessions: [AgentTaskSession] = []
@@ -1709,104 +1725,44 @@ public final class AppStore {
         self.terminalTabs = []
         self.activeTerminalTabId = ""
 
-        // Hydrate tasks immediately (capped to sub-second / 1.5s fast path) and run deeper file/git/snapshot hydration concurrently in background
-        let primaryProject = self.projects.first(where: { $0.id == self.activeProjectId }) ?? self.projects.first
-        if let primaryProject {
-            let wsPath = primaryProject.rootPath
-            let wsIdentity = workspaceIdentityByPath[wsPath]
-            let fetchedTasks = await fetchTasksForWorkspace(
-                workspacePath: wsPath,
-                workspaceIdentity: wsIdentity,
-                projectId: primaryProject.id,
-                timeoutSec: 1.8
-            )
-            if !fetchedTasks.isEmpty {
-                self.sessions = fetchedTasks
-                if let prefTask = preferredActiveTaskId,
-                   fetchedTasks.contains(where: { $0.id == prefTask }) {
-                    self.activeSessionId = prefTask
-                } else {
-                    self.activeSessionId = fetchedTasks.first?.id ?? ""
-                }
-            }
+        if connection.transport == .directServer, self.projects.isEmpty,
+           let resolved = try? await self.rpcClient.call(channel: "file", method: "resolvePath", args: [.fromJSONObject(["path": "."])], timeoutSec: 3.0),
+           case .string(let cwdPath) = resolved,
+           !cwdPath.isEmpty {
+            let projId = Self.stableProjectId(for: cwdPath)
+            let folder = URL(fileURLWithPath: cwdPath).lastPathComponent
+            self.isBulkSyncingWorkspaces = true
+            self.projects = [
+                WorkspaceProject(
+                    id: projId,
+                    name: folder.isEmpty ? connection.name : folder,
+                    rootPath: cwdPath,
+                    gitBranch: "main",
+                    ahead: 0,
+                    behind: 0,
+                    isDirty: false,
+                    isRemote: true,
+                    pinned: false
+                )
+            ]
+            self.activeProjectId = projId
+            self.expandedProjectIds = [projId]
+            self.isBulkSyncingWorkspaces = false
         }
 
-        let targetSessionId = self.activeSessionId
-        let allProjectsSnapshot = self.projects
-        activeHydrationTask = Task { @MainActor in
-            if let primaryProject {
-                let wsPath = primaryProject.rootPath
-                let wsIdentity = self.workspaceIdentityByPath[wsPath]
-                if self.sessions.isEmpty {
-                    let retryTasks = await self.fetchTasksForWorkspace(
-                        workspacePath: wsPath,
-                        workspaceIdentity: wsIdentity,
-                        projectId: primaryProject.id,
-                        timeoutSec: 4.5
-                    )
-                    if !retryTasks.isEmpty {
-                        self.sessions = retryTasks
-                        if self.activeSessionId.isEmpty {
-                            self.activeSessionId = retryTasks.first?.id ?? ""
-                        }
-                    }
-                }
-                await self.hydrateWorkspaceFilesAndGit(workspacePath: wsPath, projectId: primaryProject.id)
-                let sidToLoad = !targetSessionId.isEmpty ? targetSessionId : self.activeSessionId
-                if !sidToLoad.isEmpty, !sidToLoad.hasPrefix("task-") {
-                    _ = await self.hydrateTaskSnapshot(
-                        sessionId: sidToLoad,
-                        workspacePath: wsPath,
-                        workspaceIdentity: wsIdentity
-                    )
-                }
-            } else if connection.transport == .directServer {
-                // Direct server fallback when workspace path was not pre-announced
-                if let resolved = try? await self.rpcClient.call(channel: "file", method: "resolvePath", args: [.fromJSONObject(["path": "."])], timeoutSec: 3.0),
-                   case .string(let cwdPath) = resolved,
-                   !cwdPath.isEmpty {
-                    let projId = Self.stableProjectId(for: cwdPath)
-                    let folder = URL(fileURLWithPath: cwdPath).lastPathComponent
-                    let proj = WorkspaceProject(
-                        id: projId,
-                        name: folder.isEmpty ? connection.name : folder,
-                        rootPath: cwdPath,
-                        gitBranch: "main",
-                        ahead: 0,
-                        behind: 0,
-                        isDirty: false,
-                        isRemote: true,
-                        pinned: false
-                    )
-                    self.projects = [proj]
-                    self.activeProjectId = projId
-                    self.expandedProjectIds = [projId]
-                    let tasks = await self.fetchTasksForWorkspace(workspacePath: cwdPath, workspaceIdentity: nil, projectId: projId, timeoutSec: 4.0)
-                    self.sessions = tasks
-                    self.activeSessionId = tasks.first?.id ?? ""
-                    await self.hydrateWorkspaceFilesAndGit(workspacePath: cwdPath, projectId: projId)
-                }
-            }
+        // Official renderer parity: every opened workspace gets its full task scope, not just the active one.
+        await loadAllWorkspaceTasks(preferredActiveTaskId: preferredActiveTaskId)
 
-            // Also fetch tasks for any secondary opened Desktop workspaces sequentially without stealing primary bridge unless needed
-            if allProjectsSnapshot.count > 1, connection.transport == .directServer {
-                for extra in allProjectsSnapshot.dropFirst() {
-                    guard !Task.isCancelled else { break }
-                    let extraTasks = await self.fetchTasksForWorkspace(
-                        workspacePath: extra.rootPath,
-                        workspaceIdentity: self.workspaceIdentityByPath[extra.rootPath],
-                        projectId: extra.id,
-                        timeoutSec: 3.0
-                    )
-                    for t in extraTasks where !self.sessions.contains(where: { $0.id == t.id }) {
-                        self.sessions.append(t)
-                    }
-                }
+        let primaryProject = self.activeProject
+        activeHydrationTask = Task { @MainActor in
+            await self.resubscribeAll(handlersCleared: false)
+            if let primaryProject {
+                await self.hydrateWorkspaceFilesAndGit(workspacePath: primaryProject.rootPath, projectId: primaryProject.id)
             }
         }
     }
 
-    private static func stableProjectId(for workspaceKey: String) -> String {
+    static func stableProjectId(for workspaceKey: String) -> String {
         var hash: UInt64 = 1469598103934665603
         for b in workspaceKey.utf8 {
             hash ^= UInt64(b)
@@ -1815,23 +1771,23 @@ public final class AppStore {
         return String(format: "proj-%010llx", hash & 0xffffffffff)
     }
 
-    private static func makeAgentSession(from t: RemoteTaskSummary, projectId: String) -> AgentTaskSession {
-        let mappedStatus = TaskSessionStatus(rawValue: t.status) ?? .idle
+    static func makeAgentSession(from t: RemoteTaskSummary, projectId: String) -> AgentTaskSession {
+        let selection = LiveModelSelection(pickerValue: t.model)
         return AgentTaskSession(
             id: t.id,
-            traceId: "trc_\(t.id.prefix(8))",
+            traceId: UUID().uuidString.lowercased(),
             projectId: projectId,
             workspacePath: t.workspacePath,
             title: t.title,
-            status: mappedStatus,
-            mode: .ask,
-            modelId: "anthropic/claude-opus-4-7",
+            status: sessionStatus(t.status, pendingKind: t.pendingInteractionKind),
+            mode: AgentExecutionMode(wire: t.mode),
+            modelId: selection?.modelId ?? "",
             effort: .high,
             pinned: t.pinned,
             archived: t.archived,
             unread: t.unread,
             offPeakEnabled: false,
-            createdAt: t.updatedAt,
+            createdAt: t.createdAt ?? t.updatedAt,
             updatedAt: t.updatedAt,
             contextUsedPercent: 0,
             totalTokensIn: 0,
@@ -1844,7 +1800,9 @@ public final class AppStore {
             pendingQuestion: nil,
             pendingPlan: nil,
             queuedPrompts: [],
-            checkpoints: []
+            checkpoints: [],
+            modelProviderId: selection?.providerId,
+            reasoningLevel: t.thoughtLevel ?? selection?.reasoningLevel
         )
     }
 
@@ -1885,6 +1843,12 @@ public final class AppStore {
             }
         } else if activeProjectId.isEmpty {
             activeProjectId = updatedProjects.first?.id ?? ""
+        }
+        let knownProjectIds = Set(sessions.map(\.projectId))
+        for project in updatedProjects where !knownProjectIds.contains(project.id) {
+            let identity = workspaceIdentityByPath[project.rootPath]
+            scheduleWorkspaceRefresh(projectId: project.id, workspacePath: project.rootPath, workspaceIdentity: identity)
+            Task { @MainActor in await self.subscribeWorkspaceEvents(project) }
         }
     }
 
@@ -1939,7 +1903,7 @@ public final class AppStore {
     }
 
     @discardableResult
-    private func hydrateTaskSnapshot(
+    func hydrateTaskSnapshot(
         sessionId: String,
         workspacePath: String,
         workspaceIdentity: String?
@@ -1947,7 +1911,7 @@ public final class AppStore {
         var req: [String: Any] = [
             "taskId": sessionId,
             "workspacePath": workspacePath,
-            "messageLimit": 60,
+            "messageLimit": 200,
             "clientMode": "web-remote-replayable"
         ]
         if let workspaceIdentity, !workspaceIdentity.isEmpty {
@@ -1958,117 +1922,17 @@ public final class AppStore {
             channel: "zcode-task",
             method: "getTaskSnapshot",
             args: [.fromJSONObject(req)],
-            timeoutSec: 5.0
+            timeoutSec: 10.0
         ),
-              let dict = val.decodeJSONDictionary() else {
+              let dict = val.decodeJSONDictionary(),
+              let sIdx = sessions.firstIndex(where: { $0.id == sessionId }) else {
             return false
         }
-
-        guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }) else {
-            return false
-        }
-
-        if let meta = dict["meta"] as? [String: Any] {
-            if let title = (meta["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
-                sessions[sIdx].title = title
-            }
-            if let statusRaw = meta["status"] as? String,
-               let mapped = TaskSessionStatus(rawValue: statusRaw) {
-                sessions[sIdx].status = mapped
-            }
-        }
-
-        if let rawMessages = dict["messages"] as? [[String: Any]] {
-            var parsedTurns: [ChatTurnMessage] = []
-            parsedTurns.reserveCapacity(rawMessages.count)
-
-            for m in rawMessages {
-                if m["syntheticTimeline"] != nil { continue }
-                let mid = (m["id"] as? String) ?? UUID().uuidString
-                let role = (m["role"] as? String) ?? "assistant"
-                let content = (m["content"] as? String) ?? ""
-                let thought = m["thought"] as? String
-                let rawTs = (m["timestamp"] as? Double)
-                    ?? (m["timestamp"] as? Int).map(Double.init)
-                    ?? (Date().timeIntervalSince1970 * 1000)
-                let tsDate = Date(timeIntervalSince1970: rawTs > 9_999_999_999 ? rawTs / 1000.0 : rawTs)
-
-                var parsedTools: [ToolCallItem] = []
-                if let rawTools = m["tools"] as? [[String: Any]] {
-                    for t in rawTools {
-                        let tid = (t["id"] as? String) ?? UUID().uuidString
-                        let rawName = ((t["name"] as? String) ?? (t["toolName"] as? String) ?? "Tool")
-                        let lower = rawName.lowercased()
-                        let kind: ToolCallKind = {
-                            if lower.contains("bash") || lower.contains("exec") || lower.contains("terminal") { return .bash }
-                            if lower.contains("edit") || lower.contains("patch") { return .editFile }
-                            if lower.contains("write") { return .writeFile }
-                            if lower.contains("search") || lower.contains("grep") || lower.contains("glob") { return .search }
-                            if lower.contains("agent") || lower.contains("task") { return .subagent }
-                            if lower.contains("mcp") || lower.contains("__") { return .mcp }
-                            return .readFile
-                        }()
-                        let rawStatus = ((t["status"] as? String) ?? "completed").lowercased()
-                        let status: ToolCallStatus = rawStatus.contains("run") ? .running : (rawStatus.contains("err") || rawStatus.contains("fail") ? .failed : .completed)
-                        let inputDict = t["input"] as? [String: Any]
-                        let filePath = (t["filePath"] as? String) ?? (inputDict?["file_path"] as? String) ?? (inputDict?["path"] as? String)
-                        let command = (t["command"] as? String) ?? (inputDict?["command"] as? String)
-                        let outputStr = (t["output"] as? String) ?? (t["result"] as? String)
-                        let subtitle = filePath ?? command ?? status.rawValue.capitalized
-
-                        parsedTools.append(
-                            ToolCallItem(
-                                id: tid,
-                                kind: kind,
-                                title: rawName,
-                                subtitle: String(subtitle.prefix(96)),
-                                status: status,
-                                filePath: filePath,
-                                lineRange: nil,
-                                diffPatch: t["diff"] as? String,
-                                command: command,
-                                output: outputStr,
-                                durationMs: (t["durationMs"] as? Int) ?? 0,
-                                addedLines: (t["addedLines"] as? Int) ?? 0,
-                                removedLines: (t["removedLines"] as? Int) ?? 0,
-                                subagentSteps: []
-                            )
-                        )
-                    }
-                }
-
-                if content.isEmpty && (thought ?? "").isEmpty && parsedTools.isEmpty {
-                    continue
-                }
-
-                parsedTurns.append(
-                    ChatTurnMessage(
-                        id: mid,
-                        role: role,
-                        content: content,
-                        thought: thought,
-                        thoughtDurationMs: 0,
-                        tools: parsedTools,
-                        attachments: [],
-                        timestamp: tsDate,
-                        modelLabel: role == "assistant" ? currentModelDisplayName(for: sessions[sIdx].modelId) : nil,
-                        tokensIn: 0,
-                        tokensOut: 0,
-                        durationMs: 0,
-                        feedback: 0
-                    )
-                )
-            }
-
-            if !parsedTurns.isEmpty {
-                sessions[sIdx].messages = parsedTurns
-            }
-        }
-
+        applyTaskSnapshot(dict, sessionIndex: sIdx)
         return sessions[sIdx].status == .running
     }
 
-    private func hydrateWorkspaceFilesAndGit(workspacePath: String, projectId: String) async {
+    func hydrateWorkspaceFilesAndGit(workspacePath: String, projectId: String) async {
         guard !workspacePath.isEmpty, workspacePath != "~" else { return }
 
         async let dirCall = try? rpcClient.call(
@@ -2255,7 +2119,7 @@ public final class AppStore {
         allModels.first(where: { $0.id == modelId })?.name ?? modelId
     }
 
-    private func appendAssistantPlaceholder(sessionId: String, messageId: String, modelLabel: String) {
+    func appendAssistantPlaceholder(sessionId: String, messageId: String, modelLabel: String) {
         guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         sessions[idx].messages.append(
             ChatTurnMessage(
@@ -2276,7 +2140,7 @@ public final class AppStore {
         )
     }
 
-    private func updateAssistantTurn(sessionId: String, messageId: String, mutate: (inout ChatTurnMessage) -> Void) {
+    func updateAssistantTurn(sessionId: String, messageId: String, mutate: (inout ChatTurnMessage) -> Void) {
         guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
               let mIdx = sessions[sIdx].messages.firstIndex(where: { $0.id == messageId }) else { return }
         mutate(&sessions[sIdx].messages[mIdx])
