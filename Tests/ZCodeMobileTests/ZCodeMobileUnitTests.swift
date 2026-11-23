@@ -142,4 +142,119 @@ final class ZCodeMobileUnitTests: XCTestCase {
             XCTAssertEqual(store.composerText, "Follow-up queued check")
         }
     }
+
+    func testRelayV4StrictRPCFrameAndAckSchemasMatchDesktopV3163() throws {
+        let bridge = RelayBridgeIdentity(
+            bridgeSessionId: "bridge-sess-01",
+            bridgeGeneration: 3,
+            recoveryId: "rec-99",
+            workspaceKey: "ws-ident-alpha",
+            workspacePath: "/Users/macos/project",
+            workspaceIdentity: "ws-ident-alpha"
+        )
+
+        // Raw VQL payload (Relay V4 uses ChannelClient directly without 13-byte SocketProtocol header)
+        let longPrompt = String(repeating: "Verify strict Relay V4 rpc-frame schema. ", count: 65)
+        let rawVQL = ZCodeVQLCodec.buildRawRPCRequestPayload(
+            id: 1,
+            channel: "zcode-task",
+            method: "sendPrompt",
+            args: [.fromJSONObject([
+                "workspacePath": "/Users/macos/project",
+                "workspaceIdentity": "ws-ident-alpha",
+                "content": longPrompt
+            ])]
+        )
+        XCTAssertNotEqual(rawVQL[0], 1, "Raw Relay V4 VQL payload must start with VQL array tag (0x04), not SocketProtocol Regular=1")
+        XCTAssertEqual(rawVQL[0], 4)
+
+        let built = ZCodeRPCClient.buildRPCFramePayloads(
+            vqlPayload: rawVQL,
+            identity: bridge,
+            firstPhysicalSeq: 1,
+            messageSeq: 1,
+            maxFragmentBytes: 1024
+        )
+        let frames = built.payloads
+        XCTAssertGreaterThan(frames.count, 1, "Multi-KB payload with 1024-byte chunk limit must fragment cleanly")
+        XCTAssertEqual(built.nextPhysicalSeq, frames.count + 1)
+
+        let expectedCRC = ZCodeVQLCodec.crc32Hex(rawVQL)
+        var reassembled = Data()
+        let allowedFrameKeys: Set<String> = [
+            "zcode_type", "bridgeSessionId", "bridgeGeneration", "recoveryId",
+            "seq", "messageSeq", "fragmentIndex", "fragmentCount", "messageBytes",
+            "checksum", "dataBase64"
+        ]
+
+        for (index, frame) in frames.enumerated() {
+            XCTAssertTrue(Set(frame.keys).isSubset(of: allowedFrameKeys), "Strict Zod schema rejects unknown keys")
+            XCTAssertEqual(frame["zcode_type"] as? String, "rpc-frame")
+            XCTAssertEqual(frame["bridgeSessionId"] as? String, "bridge-sess-01")
+            XCTAssertEqual(frame["bridgeGeneration"] as? Int, 3)
+            XCTAssertEqual(frame["recoveryId"] as? String, "rec-99")
+            XCTAssertEqual(frame["seq"] as? Int, index + 1)
+            XCTAssertEqual(frame["messageSeq"] as? Int, 1)
+            XCTAssertEqual(frame["fragmentIndex"] as? Int, index)
+            XCTAssertEqual(frame["fragmentCount"] as? Int, frames.count)
+            XCTAssertEqual(frame["messageBytes"] as? Int, rawVQL.count)
+            let checksum = try XCTUnwrap(frame["checksum"] as? [String: Any])
+            XCTAssertEqual(checksum["algorithm"] as? String, "crc32")
+            XCTAssertEqual(checksum["value"] as? String, expectedCRC)
+            XCTAssertTrue(bridge.matchesTransportPayload(frame))
+
+            let b64 = try XCTUnwrap(frame["dataBase64"] as? String)
+            XCTAssertGreaterThanOrEqual(b64.count, 4)
+            XCTAssertEqual(b64.count % 4, 0)
+            let chunk = try XCTUnwrap(Data(base64Encoded: b64))
+            reassembled.append(chunk)
+        }
+
+        XCTAssertEqual(reassembled, rawVQL)
+        XCTAssertEqual(ZCodeVQLCodec.crc32Hex(reassembled), expectedCRC)
+
+        // Strict rpc-frame-ack check
+        let ack = ZCodeRPCClient.buildRPCFrameAckPayload(identity: bridge, ackMessageSeq: 7)
+        let allowedAckKeys: Set<String> = [
+            "zcode_type", "bridgeSessionId", "bridgeGeneration", "recoveryId", "ackMessageSeq"
+        ]
+        XCTAssertEqual(Set(ack.keys), allowedAckKeys)
+        XCTAssertEqual(ack["zcode_type"] as? String, "rpc-frame-ack")
+        XCTAssertEqual(ack["ackMessageSeq"] as? Int, 7)
+        XCTAssertTrue(bridge.matchesTransportPayload(ack))
+
+        var mismatched = ack
+        mismatched["bridgeGeneration"] = 4
+        XCTAssertFalse(bridge.matchesTransportPayload(mismatched))
+    }
+
+    func testParseWorkspaceSummariesMatchesDesktopBootstrapShape() {
+        let rawList: [[String: Any]] = [
+            [
+                "workspacePath": "/Users/macos/.zcode/workspace/zcode-ios",
+                "workspaceIdentity": "ws-id-zcode-ios",
+                "label": "zcode-ios",
+                "kind": "local",
+                "connectionState": "ready"
+            ],
+            [
+                "workspacePath": "/remote/offline-box",
+                "workspaceIdentity": "ws-remote-1",
+                "remoteSessionId": "ssh-sess-1",
+                "label": "offline-ssh",
+                "kind": "remote",
+                "connectionState": "disconnected"
+            ]
+        ]
+
+        let summaries = ZCodeRPCClient.parseWorkspaceSummaries(from: rawList)
+        XCTAssertEqual(summaries.count, 2)
+        XCTAssertEqual(summaries[0].name, "zcode-ios")
+        XCTAssertEqual(summaries[0].workspaceKey, "ws-id-zcode-ios")
+        XCTAssertTrue(summaries[0].canBridge)
+
+        XCTAssertEqual(summaries[1].name, "offline-ssh")
+        XCTAssertEqual(summaries[1].workspaceKey, "ws-remote-1")
+        XCTAssertFalse(summaries[1].canBridge)
+    }
 }

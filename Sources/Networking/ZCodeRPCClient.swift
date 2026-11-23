@@ -1,47 +1,123 @@
 import Foundation
 
-public struct ServerInfoResponse: Codable {
+public struct ServerInfoResponse: Codable, Sendable {
     public let serverId: String?
     public let version: String
     public let protocolVersion: Int?
     public let authRequired: Bool?
 }
 
-public struct RemoteWorkspaceSummary: Equatable {
+public struct RemoteWorkspaceSummary: Equatable, Sendable {
     public let workspaceKey: String
     public let workspacePath: String
+    public let workspaceIdentity: String?
+    public let remoteSessionId: String?
     public let name: String
+    public let kind: String
+    public let connectionState: String
     public let branchName: String
     public let isDirty: Bool
     public let tasks: [RemoteTaskSummary]
+
+    public var canBridge: Bool {
+        if kind == "remote" {
+            let hasIdentity = !(workspaceIdentity ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let hasSession = !(remoteSessionId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return hasIdentity && hasSession && connectionState != "disconnected"
+        }
+        return true
+    }
 }
 
-public struct RemoteTaskSummary: Equatable {
+public struct RemoteTaskSummary: Equatable, Sendable {
     public let id: String
     public let title: String
     public let workspacePath: String
+    public let workspaceIdentity: String?
     public let status: String
     public let pinned: Bool
+    public let archived: Bool
+    public let unread: Bool
     public let updatedAt: Date
 }
 
+public struct RelayBridgeIdentity: Equatable, Sendable {
+    public let bridgeSessionId: String
+    public let bridgeGeneration: Int?
+    public let recoveryId: String?
+    public let workspaceKey: String
+    public let workspacePath: String
+    public let workspaceIdentity: String?
+    public let remoteSessionId: String?
+    public let kind: String
+    public let initialTaskId: String?
+
+    public init(
+        bridgeSessionId: String,
+        bridgeGeneration: Int?,
+        recoveryId: String? = nil,
+        workspaceKey: String,
+        workspacePath: String,
+        workspaceIdentity: String? = nil,
+        remoteSessionId: String? = nil,
+        kind: String = "local",
+        initialTaskId: String? = nil
+    ) {
+        self.bridgeSessionId = bridgeSessionId
+        self.bridgeGeneration = bridgeGeneration
+        self.recoveryId = recoveryId
+        self.workspaceKey = workspaceKey
+        self.workspacePath = workspacePath
+        self.workspaceIdentity = workspaceIdentity
+        self.remoteSessionId = remoteSessionId
+        self.kind = kind
+        self.initialTaskId = initialTaskId
+    }
+
+    /// Exact identity check matching `pns` / `g0t` in ZCode v3.16.3 (`bridgeSessionId`, `bridgeGeneration`, `recoveryId`).
+    public func matchesTransportPayload(_ payload: [String: Any]) -> Bool {
+        guard (payload["bridgeSessionId"] as? String) == bridgeSessionId else { return false }
+        let incomingGen = (payload["bridgeGeneration"] as? Int)
+            ?? (payload["bridgeGeneration"] as? NSNumber)?.intValue
+        guard incomingGen == bridgeGeneration else { return false }
+        let incomingRecovery = payload["recoveryId"] as? String
+        return incomingRecovery == recoveryId
+    }
+}
+
+public struct RelayBootstrapSnapshot: Equatable, Sendable {
+    public let desktopAppVersion: String?
+    public let workspaces: [RemoteWorkspaceSummary]
+    public let activeWorkspaceKey: String?
+    public let activeTaskId: String?
+    public let openedBridge: RelayBridgeIdentity?
+}
+
 /// Native URLSessionWebSocketTask client implementing both:
-/// 1. Direct ZCode Server binary RPC (`SocketProtocol` + `VQL` over `/ws`)
-/// 2. Official Z.AI Remote Relay V2/V4 (`wss://zcode.z.ai/api/v1/remote/ws2` with `role: "terminal"`,
-///    `auth_challenge` HMAC-SHA256 proof, `pair_status`, `bootstrap-request`, `workspace-bridge-open`, and CRC32 `rpc-frame`)
+/// 1. Direct ZCode Server binary RPC (`SocketProtocol` 13-byte header + `VQL` over `/ws`)
+/// 2. Official Z.AI Remote Relay V4 (`wss://zcode.z.ai/api/v1/remote/ws2` with `role: "terminal"`,
+///    `auth_challenge` HMAC-SHA256 proof, `pair_status`, `bootstrap-request`, `workspace-bridge-open`,
+///    strict `She`/`vtt` `rpc-frame` + `rpc-frame-ack` envelopes, and raw `ChannelClient` VQL payloads)
 public actor ZCodeRPCClient {
     private var webSocketTask: URLSessionWebSocketTask?
     private let session: URLSession
+    private let terminalClientSessionId: String = "ios-\(UUID().uuidString.lowercased())"
+
     private var nextRequestId: Int32 = 1
-    private var nextOutboundSeq: Int = 1
+    private var nextBridgeGeneration: Int = 0
+    private var nextPhysicalSeq: Int = 1
+    private var nextMessageSeq: Int = 1
     private var isInitialized = false
     private var isRelayMode = false
-    private var activeBridgeSessionId: String?
+    private var pairingAlreadyMatched = false
+    private var activeBridgeIdentity: RelayBridgeIdentity?
 
+    private var initWaiters: [CheckedContinuation<Void, Never>] = []
     private var pendingReplies: [Int32: CheckedContinuation<VQLValue, Error>] = [:]
     private var pendingAppRequests: [String: CheckedContinuation<[String: Any], Error>] = [:]
     private var pairingContinuation: CheckedContinuation<Void, Error>?
     private var phaseCallback: (@Sendable (RelayPairingPhase) -> Void)?
+    private var workspaceListUpdateHandler: (@Sendable ([RemoteWorkspaceSummary], String?, String?) -> Void)?
     private var eventHandlers: [Int32: @Sendable (VQLValue) -> Void] = [:]
     private var fragmentBuffers: [Int: [Int: Data]] = [:]
     private var receiveTask: Task<Void, Never>?
@@ -52,9 +128,177 @@ public actor ZCodeRPCClient {
 
     public init() {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 14
+        config.timeoutIntervalForRequest = 12
         self.session = URLSession(configuration: config)
     }
+
+    public func setWorkspaceListUpdateHandler(
+        _ handler: (@Sendable ([RemoteWorkspaceSummary], String?, String?) -> Void)?
+    ) {
+        self.workspaceListUpdateHandler = handler
+    }
+
+    public func currentBridge() -> RelayBridgeIdentity? {
+        activeBridgeIdentity
+    }
+
+    // MARK: - Pure Wire Builders (1:1 with ZCode v3.16.3 `She` & `vtt` strict Zod schemas)
+
+    public static func resolveWorkspaceKey(workspacePath: String, workspaceIdentity: String?) -> String {
+        if let trimmed = workspaceIdentity?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
+            return trimmed
+        }
+        return workspacePath
+    }
+
+    public static func buildRPCFramePayloads(
+        vqlPayload: Data,
+        identity: RelayBridgeIdentity,
+        firstPhysicalSeq: Int,
+        messageSeq: Int,
+        maxFragmentBytes: Int = 32_768
+    ) -> (payloads: [[String: Any]], nextPhysicalSeq: Int) {
+        let safeMax = max(1024, maxFragmentBytes)
+        let totalBytes = vqlPayload.count
+        let fragmentCount = max(1, Int(ceil(Double(totalBytes) / Double(safeMax))))
+        let crc = ZCodeVQLCodec.crc32Hex(vqlPayload)
+
+        var out: [[String: Any]] = []
+        out.reserveCapacity(fragmentCount)
+
+        for index in 0..<fragmentCount {
+            let start = index * safeMax
+            let end = min(totalBytes, start + safeMax)
+            let slice = vqlPayload.subdata(in: start..<end)
+            var frame: [String: Any] = [
+                "zcode_type": "rpc-frame",
+                "bridgeSessionId": identity.bridgeSessionId,
+                "seq": firstPhysicalSeq + index,
+                "messageSeq": messageSeq,
+                "fragmentIndex": index,
+                "fragmentCount": fragmentCount,
+                "messageBytes": totalBytes,
+                "checksum": [
+                    "algorithm": "crc32",
+                    "value": crc
+                ],
+                "dataBase64": slice.base64EncodedString()
+            ]
+            if let gen = identity.bridgeGeneration {
+                frame["bridgeGeneration"] = gen
+            }
+            if let rec = identity.recoveryId, !rec.isEmpty {
+                frame["recoveryId"] = rec
+            }
+            out.append(frame)
+        }
+
+        return (out, firstPhysicalSeq + fragmentCount)
+    }
+
+    public static func buildRPCFrameAckPayload(
+        identity: RelayBridgeIdentity,
+        ackMessageSeq: Int
+    ) -> [String: Any] {
+        var ack: [String: Any] = [
+            "zcode_type": "rpc-frame-ack",
+            "bridgeSessionId": identity.bridgeSessionId,
+            "ackMessageSeq": ackMessageSeq
+        ]
+        if let gen = identity.bridgeGeneration {
+            ack["bridgeGeneration"] = gen
+        }
+        if let rec = identity.recoveryId, !rec.isEmpty {
+            ack["recoveryId"] = rec
+        }
+        return ack
+    }
+
+    public static func parseWorkspaceSummaries(from rawWorkspaces: [[String: Any]]) -> [RemoteWorkspaceSummary] {
+        var summaries: [RemoteWorkspaceSummary] = []
+        for ws in rawWorkspaces {
+            let path = ((ws["workspacePath"] as? String) ?? (ws["path"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { continue }
+            let rawIdentity = (ws["workspaceIdentity"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let identity = (rawIdentity?.isEmpty == false) ? rawIdentity : nil
+            let rawRemoteSession = (ws["remoteSessionId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let remoteSessionId = (rawRemoteSession?.isEmpty == false) ? rawRemoteSession : nil
+            let key = resolveWorkspaceKey(workspacePath: path, workspaceIdentity: identity)
+
+            let label = ((ws["label"] as? String) ?? (ws["name"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallbackName = URL(fileURLWithPath: path).lastPathComponent
+            let displayName = !label.isEmpty ? label : (fallbackName.isEmpty ? path : fallbackName)
+            let kind = (ws["kind"] as? String) ?? ((identity != nil || remoteSessionId != nil) ? "remote" : "local")
+            let connState = (ws["connectionState"] as? String) ?? "connected"
+            let branch = (ws["branchName"] as? String) ?? "main"
+            let dirty = (ws["isDirty"] as? Bool) ?? false
+
+            var parsedTasks: [RemoteTaskSummary] = []
+            if let rawTasks = ws["tasks"] as? [[String: Any]] {
+                parsedTasks = rawTasks.compactMap { parseTaskSummary($0, fallbackWorkspacePath: path, fallbackWorkspaceIdentity: identity) }
+            }
+
+            summaries.append(
+                RemoteWorkspaceSummary(
+                    workspaceKey: key,
+                    workspacePath: path,
+                    workspaceIdentity: identity,
+                    remoteSessionId: remoteSessionId,
+                    name: displayName,
+                    kind: kind,
+                    connectionState: connState,
+                    branchName: branch,
+                    isDirty: dirty,
+                    tasks: parsedTasks
+                )
+            )
+        }
+        return summaries
+    }
+
+    public static func parseTaskSummary(
+        _ dict: [String: Any],
+        fallbackWorkspacePath: String,
+        fallbackWorkspaceIdentity: String? = nil
+    ) -> RemoteTaskSummary? {
+        guard let tid = ((dict["taskId"] as? String) ?? (dict["id"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !tid.isEmpty else {
+            return nil
+        }
+        let path = ((dict["workspacePath"] as? String) ?? fallbackWorkspacePath)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawIdentity = ((dict["workspaceIdentity"] as? String) ?? fallbackWorkspaceIdentity)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let identity = (rawIdentity?.isEmpty == false) ? rawIdentity : nil
+        let rawTitle = ((dict["title"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = rawTitle.isEmpty ? "Untitled task" : rawTitle
+        let status = (dict["status"] as? String) ?? "idle"
+        let pinned = (dict["pinned"] as? Bool) ?? false
+        let archived = (dict["archived"] as? Bool) ?? false
+        let unread = (dict["unread"] as? Bool) ?? ((dict["unreadAt"] as? Double) != nil)
+        let rawTs = (dict["updatedAt"] as? Double)
+            ?? (dict["updatedAt"] as? Int).map(Double.init)
+            ?? (dict["createdAt"] as? Double)
+            ?? (Date().timeIntervalSince1970 * 1000)
+        let updatedDate = Date(timeIntervalSince1970: rawTs > 9_999_999_999 ? rawTs / 1000.0 : rawTs)
+
+        return RemoteTaskSummary(
+            id: tid,
+            title: title,
+            workspacePath: path,
+            workspaceIdentity: identity,
+            status: status,
+            pinned: pinned,
+            archived: archived,
+            unread: unread,
+            updatedAt: updatedDate
+        )
+    }
+
+    // MARK: - Direct Server Probe & Connect
 
     public func probeServerInfo(host: String, port: Int, useTLS: Bool, token: String?) async throws -> ServerInfoResponse {
         let scheme = useTLS ? "https" : "http"
@@ -62,7 +306,7 @@ public actor ZCodeRPCClient {
             throw URLError(.badURL)
         }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 6
+        request.timeoutInterval = 5
         if let token, !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -101,15 +345,17 @@ public actor ZCodeRPCClient {
         }
 
         self.isRelayMode = false
+        self.isInitialized = false
         let task = session.webSocketTask(with: request)
         self.webSocketTask = task
         task.resume()
 
-        // Verify live WebSocket connectivity with a native ping before declaring connected
         try await sendWebSocketPing(task: task)
         startReceiveLoop(task: task, isRelayV2: false)
         onPhase?(.connected)
     }
+
+    // MARK: - Cloud Relay V2/V4 Pairing
 
     public func connectCloudRelayV2(
         host: String = "zcode.z.ai",
@@ -125,6 +371,7 @@ public actor ZCodeRPCClient {
         self.currentDeviceSid = sid
         self.currentPassHash = passHash
         self.isRelayMode = true
+        self.isInitialized = false
 
         onPhase?(.connecting)
 
@@ -155,12 +402,9 @@ public actor ZCodeRPCClient {
         self.webSocketTask = task
         task.resume()
 
-        try await sendWebSocketPing(task: task)
+        startReceiveLoop(task: task, isRelayV2: true)
         onPhase?(.authenticating)
 
-        startReceiveLoop(task: task, isRelayV2: true)
-
-        // Exact `auth_init` handshake from `remote-v4.js` (`X2t`)
         let authInit: [String: Any] = [
             "type": "auth_init",
             "role": "terminal",
@@ -168,23 +412,22 @@ public actor ZCodeRPCClient {
             "meta": [
                 "platform": "web",
                 "version": "3.16.3",
-                "name": deviceName
+                "name": deviceName.isEmpty ? "iPhone" : String(deviceName.prefix(64))
             ],
             "client_ts": Int(Date().timeIntervalSince1970 * 1000)
         ]
         try await sendJSONEnvelope(authInit, on: task)
 
-        // Await `pair_status == "matched"` (or explicit relay error / 20s timeout)
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 try await self.awaitRelayPaired()
             }
             group.addTask {
-                try await Task.sleep(nanoseconds: 20_000_000_000)
+                try await Task.sleep(nanoseconds: 18_000_000_000)
                 throw NSError(
                     domain: "ZCodeRelay",
                     code: 408,
-                    userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for ZCode Desktop pairing confirmation. Ensure ZCode is online on your computer and the Remote URL is active."]
+                    userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for ZCode Desktop pairing confirmation. Ensure ZCode is open on your computer and Remote Control is enabled."]
                 )
             }
             _ = try await group.next()
@@ -193,7 +436,14 @@ public actor ZCodeRPCClient {
     }
 
     private func awaitRelayPaired() async throws {
+        if pairingAlreadyMatched {
+            return
+        }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            if self.pairingAlreadyMatched {
+                cont.resume(returning: ())
+                return
+            }
             if let old = self.pairingContinuation {
                 old.resume(throwing: URLError(.cancelled))
             }
@@ -201,93 +451,221 @@ public actor ZCodeRPCClient {
         }
     }
 
-    // MARK: - Relay V4 Workspace Bootstrap & Bridge Open
+    // MARK: - Relay V4 Bootstrap & Workspace Bridge Open
 
-    public func bootstrapRelayWorkspaces() async -> [RemoteWorkspaceSummary] {
-        guard isRelayMode else { return [] }
+    public func bootstrapRelayWorkspaces(
+        preferredWorkspaceKey: String? = nil,
+        preferredTaskId: String? = nil
+    ) async -> RelayBootstrapSnapshot {
+        guard isRelayMode else {
+            return RelayBootstrapSnapshot(
+                desktopAppVersion: nil,
+                workspaces: [],
+                activeWorkspaceKey: nil,
+                activeTaskId: nil,
+                openedBridge: nil
+            )
+        }
 
         let reqId = "bootstrap-\(UUID().uuidString.lowercased())"
         let payload: [String: Any] = [
             "zcode_type": "bootstrap-request",
+            "terminalClientSessionId": terminalClientSessionId,
             "requestId": reqId
         ]
 
-        guard let resp = try? await sendAppRequest(payload: payload, requestId: reqId, expectedType: "bootstrap-response", timeoutSec: 8),
-              let result = resp["result"] as? [String: Any],
-              let rawWorkspaces = result["workspaces"] as? [[String: Any]] else {
-            return []
-        }
-
-        var summaries: [RemoteWorkspaceSummary] = []
-        for ws in rawWorkspaces {
-            let path = (ws["workspacePath"] as? String) ?? (ws["path"] as? String) ?? ""
-            guard !path.isEmpty else { continue }
-            let identity = (ws["workspaceIdentity"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let key = (identity?.isEmpty == false) ? identity! : path
-            let folderName = (ws["name"] as? String) ?? URL(fileURLWithPath: path).lastPathComponent
-            let branch = (ws["branchName"] as? String) ?? "main"
-            let dirty = (ws["isDirty"] as? Bool) ?? false
-
-            var parsedTasks: [RemoteTaskSummary] = []
-            if let rawTasks = ws["tasks"] as? [[String: Any]] {
-                for t in rawTasks {
-                    guard let tid = (t["taskId"] as? String) ?? (t["id"] as? String) else { continue }
-                    let title = (t["title"] as? String) ?? "Untitled task"
-                    let status = (t["status"] as? String) ?? "idle"
-                    let pinned = (t["pinned"] as? Bool) ?? false
-                    let updatedMs = (t["updatedAt"] as? Double) ?? (Date().timeIntervalSince1970 * 1000)
-                    parsedTasks.append(
-                        RemoteTaskSummary(
-                            id: tid,
-                            title: title,
-                            workspacePath: path,
-                            status: status,
-                            pinned: pinned,
-                            updatedAt: Date(timeIntervalSince1970: updatedMs > 9_999_999_999 ? updatedMs / 1000.0 : updatedMs)
-                        )
-                    )
-                }
-            }
-
-            summaries.append(
-                RemoteWorkspaceSummary(
-                    workspaceKey: key,
-                    workspacePath: path,
-                    name: folderName.isEmpty ? path : folderName,
-                    branchName: branch,
-                    isDirty: dirty,
-                    tasks: parsedTasks
-                )
+        guard let resp = try? await sendAppRequest(
+            payload: payload,
+            requestId: reqId,
+            expectedType: "bootstrap-response",
+            timeoutSec: 3.5
+        ),
+              let result = resp["result"] as? [String: Any] else {
+            return RelayBootstrapSnapshot(
+                desktopAppVersion: nil,
+                workspaces: [],
+                activeWorkspaceKey: nil,
+                activeTaskId: nil,
+                openedBridge: nil
             )
         }
 
-        // Open bridge on the primary workspace if available
-        if let first = summaries.first {
-            let bridgeId = "bridge-\(UUID().uuidString.lowercased())"
-            let openReqId = "workspace-bridge-\(UUID().uuidString.lowercased())"
-            let openPayload: [String: Any] = [
-                "zcode_type": "workspace-bridge-open",
-                "requestId": openReqId,
-                "bridgeSessionId": bridgeId,
-                "bridgeGeneration": 1,
-                "workspaceKey": first.workspaceKey
-            ]
-            if let bridgeResp = try? await sendAppRequest(payload: openPayload, requestId: bridgeId, expectedType: "workspace-bridge-ready", matchField: "bridgeSessionId", timeoutSec: 8),
-               let bridgeObj = bridgeResp["bridge"] as? [String: Any],
-               let readyId = bridgeObj["bridgeSessionId"] as? String {
-                self.activeBridgeSessionId = readyId
+        let desktopVersion = result["desktopAppVersion"] as? String
+        let rawWorkspaces = (result["workspaces"] as? [[String: Any]]) ?? []
+        let summaries = Self.parseWorkspaceSummaries(from: rawWorkspaces)
+
+        let mobileView = result["mobileViewState"] as? [String: Any]
+        let initialView = result["initialViewState"] as? [String: Any]
+        let resolvedWorkspaceKey = preferredWorkspaceKey
+            ?? (mobileView?["activeWorkspaceKey"] as? String)
+            ?? (initialView?["activeWorkspaceKey"] as? String)
+        let resolvedTaskId = preferredTaskId
+            ?? (mobileView?["activeTaskId"] as? String)
+            ?? (initialView?["activeTaskId"] as? String)
+
+        let targetWorkspace: RemoteWorkspaceSummary? = {
+            if let key = resolvedWorkspaceKey,
+               let exact = summaries.first(where: { $0.workspaceKey == key && $0.canBridge }) {
+                return exact
             }
+            if let firstBridgeable = summaries.first(where: \.canBridge) {
+                return firstBridgeable
+            }
+            return summaries.first
+        }()
+
+        var openedBridge: RelayBridgeIdentity?
+        if let targetWorkspace, targetWorkspace.canBridge {
+            let taskForTarget = (targetWorkspace.workspaceKey == resolvedWorkspaceKey) ? resolvedTaskId : nil
+            openedBridge = try? await openWorkspaceBridge(
+                workspaceKey: targetWorkspace.workspaceKey,
+                taskId: taskForTarget,
+                timeoutSec: 3.5
+            )
         }
 
-        return summaries
+        return RelayBootstrapSnapshot(
+            desktopAppVersion: desktopVersion,
+            workspaces: summaries,
+            activeWorkspaceKey: openedBridge?.workspaceKey ?? targetWorkspace?.workspaceKey ?? resolvedWorkspaceKey,
+            activeTaskId: openedBridge?.initialTaskId ?? resolvedTaskId,
+            openedBridge: openedBridge
+        )
+    }
+
+    @discardableResult
+    public func openWorkspaceBridge(
+        workspaceKey: String,
+        taskId: String? = nil,
+        timeoutSec: Double = 4.0
+    ) async throws -> RelayBridgeIdentity {
+        if let current = activeBridgeIdentity, current.workspaceKey == workspaceKey {
+            return current
+        }
+
+        nextBridgeGeneration += 1
+        let generation = nextBridgeGeneration
+        let bridgeSessionId = "bridge-\(UUID().uuidString.lowercased())"
+        let requestId = "workspace-bridge-\(UUID().uuidString.lowercased())"
+
+        resetChannelStateForNewBridge()
+
+        var openPayload: [String: Any] = [
+            "zcode_type": "workspace-bridge-open",
+            "terminalClientSessionId": terminalClientSessionId,
+            "requestId": requestId,
+            "bridgeSessionId": bridgeSessionId,
+            "bridgeGeneration": generation,
+            "workspaceKey": workspaceKey
+        ]
+        if let taskId, !taskId.isEmpty {
+            openPayload["taskId"] = taskId
+        }
+
+        let resp = try await sendAppRequest(
+            payload: openPayload,
+            requestId: bridgeSessionId,
+            expectedType: "workspace-bridge-ready",
+            timeoutSec: timeoutSec
+        )
+
+        let identity = Self.parseBridgeIdentity(
+            from: resp,
+            fallbackBridgeId: bridgeSessionId,
+            fallbackGeneration: generation,
+            fallbackWorkspaceKey: workspaceKey
+        )
+        self.activeBridgeIdentity = identity
+
+        await sendMobileViewStateUpdate(workspaceKey: identity.workspaceKey, taskId: identity.initialTaskId ?? taskId)
+        return identity
+    }
+
+    public func sendMobileViewStateUpdate(workspaceKey: String, taskId: String? = nil) async {
+        guard isRelayMode, let task = webSocketTask else { return }
+        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+        var viewState: [String: Any] = [
+            "activeWorkspaceKey": workspaceKey,
+            "updatedAt": nowMs
+        ]
+        if let taskId, !taskId.isEmpty {
+            viewState["activeTaskId"] = taskId
+        }
+        let payload: [String: Any] = [
+            "zcode_type": "mobile-view-state-update",
+            "viewState": viewState,
+            "deviceInfo": [
+                "platform": "ios",
+                "version": "3.16.3",
+                "name": "ZCode iOS",
+                "browserPlatform": "iOS Native SwiftUI",
+                "online": true,
+                "updatedAt": nowMs
+            ]
+        ]
+        try? await sendJSONEnvelope([
+            "type": "data",
+            "payload": payload,
+            "client_ts": nowMs
+        ], on: task)
+    }
+
+    private static func parseBridgeIdentity(
+        from payload: [String: Any],
+        fallbackBridgeId: String,
+        fallbackGeneration: Int?,
+        fallbackWorkspaceKey: String
+    ) -> RelayBridgeIdentity {
+        let bridgeDict = (payload["bridge"] as? [String: Any]) ?? [:]
+        let bridgeId = (bridgeDict["bridgeSessionId"] as? String)
+            ?? (payload["bridgeSessionId"] as? String)
+            ?? fallbackBridgeId
+        let gen: Int?
+        if let g = (bridgeDict["bridgeGeneration"] as? Int) ?? (bridgeDict["bridgeGeneration"] as? NSNumber)?.intValue {
+            gen = g
+        } else if let g = (payload["bridgeGeneration"] as? Int) ?? (payload["bridgeGeneration"] as? NSNumber)?.intValue {
+            gen = g
+        } else {
+            gen = fallbackGeneration
+        }
+        let recoveryId = (bridgeDict["recoveryId"] as? String) ?? (payload["recoveryId"] as? String)
+        let wsKey = (bridgeDict["workspaceKey"] as? String) ?? fallbackWorkspaceKey
+        let wsPath = (bridgeDict["workspacePath"] as? String) ?? wsKey
+        let wsIdentity = bridgeDict["workspaceIdentity"] as? String
+        let remoteSessionId = bridgeDict["remoteSessionId"] as? String
+        let kind = (bridgeDict["kind"] as? String) ?? "local"
+        let initialTaskId = bridgeDict["initialTaskId"] as? String
+
+        return RelayBridgeIdentity(
+            bridgeSessionId: bridgeId,
+            bridgeGeneration: gen,
+            recoveryId: recoveryId,
+            workspaceKey: wsKey,
+            workspacePath: wsPath,
+            workspaceIdentity: wsIdentity,
+            remoteSessionId: remoteSessionId,
+            kind: kind,
+            initialTaskId: initialTaskId
+        )
+    }
+
+    private func resetChannelStateForNewBridge() {
+        isInitialized = false
+        nextPhysicalSeq = 1
+        nextMessageSeq = 1
+        fragmentBuffers.removeAll()
+        let oldReplies = pendingReplies
+        pendingReplies.removeAll()
+        for (_, cont) in oldReplies {
+            cont.resume(throwing: URLError(.cancelled))
+        }
     }
 
     private func sendAppRequest(
         payload: [String: Any],
         requestId: String,
         expectedType: String,
-        matchField: String = "requestId",
-        timeoutSec: Double = 8
+        timeoutSec: Double = 5.0
     ) async throws -> [String: Any] {
         guard let task = webSocketTask else {
             throw URLError(.notConnectedToInternet)
@@ -337,66 +715,162 @@ public actor ZCodeRPCClient {
         }
     }
 
-    // MARK: - Binary RPC Calls & Subscriptions
+    // MARK: - VQL Channel RPC Calls & Subscriptions
 
-    public func call(channel: String, method: String, args: [VQLValue] = []) async throws -> VQLValue {
+    public func call(
+        channel: String,
+        method: String,
+        args: [VQLValue] = [],
+        timeoutSec: Double = 6.0
+    ) async throws -> VQLValue {
+        guard webSocketTask != nil else {
+            throw URLError(.notConnectedToInternet)
+        }
+        if isRelayMode, activeBridgeIdentity == nil {
+            throw NSError(
+                domain: "ZCodeRPC",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "No active ZCode Desktop workspace bridge is open."]
+            )
+        }
+
+        if !isInitialized {
+            await waitUntilInitialized(maxWaitSec: min(0.6, timeoutSec * 0.3))
+        }
+
         guard let task = webSocketTask else {
             throw URLError(.notConnectedToInternet)
         }
+
         let reqId = nextRequestId
         nextRequestId += 1
-        let frame = ZCodeVQLCodec.buildRPCRequestFrame(id: reqId, channel: channel, method: method, args: args)
+        let rawPayload = ZCodeVQLCodec.buildRawRPCRequestPayload(
+            id: reqId,
+            channel: channel,
+            method: method,
+            args: args
+        )
 
-        return try await withCheckedThrowingContinuation { continuation in
-            pendingReplies[reqId] = continuation
-            Task {
-                do {
-                    try await self.sendBinaryRPCFrame(frame, on: task)
-                } catch {
-                    self.failRequest(id: reqId, error: error)
+        return try await withThrowingTaskGroup(of: VQLValue.self) { group in
+            group.addTask {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<VQLValue, Error>) in
+                    Task {
+                        await self.registerReplyContinuation(id: reqId, continuation: continuation)
+                        do {
+                            try await self.sendChannelPayload(rawPayload, on: task)
+                        } catch {
+                            await self.failRequest(id: reqId, error: error)
+                        }
+                    }
                 }
             }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeoutSec * 1_000_000_000))
+                await self.timeoutRequest(id: reqId)
+                throw URLError(.timedOut)
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
         }
     }
 
-    public func listen(channel: String, event: String, arg: VQLValue = .undefined, onEvent: @escaping @Sendable (VQLValue) -> Void) async throws -> Int32 {
+    public func listen(
+        channel: String,
+        event: String,
+        arg: VQLValue = .undefined,
+        onEvent: @escaping @Sendable (VQLValue) -> Void
+    ) async throws -> Int32 {
         guard let task = webSocketTask else {
             throw URLError(.notConnectedToInternet)
+        }
+        if isRelayMode, activeBridgeIdentity == nil {
+            throw URLError(.notConnectedToInternet)
+        }
+        if !isInitialized {
+            await waitUntilInitialized(maxWaitSec: 0.6)
         }
         let subId = nextRequestId
         nextRequestId += 1
         eventHandlers[subId] = onEvent
-        let frame = ZCodeVQLCodec.buildRPCEventListenFrame(id: subId, channel: channel, event: event, arg: arg)
-        try await sendBinaryRPCFrame(frame, on: task)
+        let rawPayload = ZCodeVQLCodec.buildRawRPCEventListenPayload(
+            id: subId,
+            channel: channel,
+            event: event,
+            arg: arg
+        )
+        try await sendChannelPayload(rawPayload, on: task)
         return subId
     }
 
-    private func sendBinaryRPCFrame(_ frame: Data, on task: URLSessionWebSocketTask) async throws {
-        if isRelayMode {
-            let seq = nextOutboundSeq
-            nextOutboundSeq += 1
-            var payload: [String: Any] = [
-                "zcode_type": "rpc-frame",
-                "messageSeq": seq,
-                "fragmentIndex": 0,
-                "fragmentCount": 1,
-                "dataBase64": frame.base64EncodedString(),
-                "checksum": [
-                    "algorithm": "crc32",
-                    "value": ZCodeVQLCodec.crc32Hex(frame)
-                ]
-            ]
-            if let bridgeId = activeBridgeSessionId {
-                payload["bridgeSessionId"] = bridgeId
+    private func waitUntilInitialized(maxWaitSec: Double) async {
+        if isInitialized { return }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                await self.awaitInitializeSignal()
             }
-            let envelope: [String: Any] = [
-                "type": "data",
-                "payload": payload,
-                "client_ts": Int(Date().timeIntervalSince1970 * 1000)
-            ]
-            try await sendJSONEnvelope(envelope, on: task)
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(maxWaitSec * 1_000_000_000))
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
+
+    private func awaitInitializeSignal() async {
+        if isInitialized { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            if self.isInitialized {
+                cont.resume()
+            } else {
+                self.initWaiters.append(cont)
+            }
+        }
+    }
+
+    private func markChannelInitialized() {
+        isInitialized = true
+        let waiters = initWaiters
+        initWaiters.removeAll()
+        for w in waiters {
+            w.resume()
+        }
+    }
+
+    private func registerReplyContinuation(id: Int32, continuation: CheckedContinuation<VQLValue, Error>) {
+        pendingReplies[id] = continuation
+    }
+
+    private func timeoutRequest(id: Int32) {
+        pendingReplies.removeValue(forKey: id)
+    }
+
+    private func sendChannelPayload(_ rawVQL: Data, on task: URLSessionWebSocketTask) async throws {
+        if isRelayMode {
+            guard let identity = activeBridgeIdentity else {
+                throw URLError(.notConnectedToInternet)
+            }
+            let msgSeq = nextMessageSeq
+            nextMessageSeq += 1
+            let built = Self.buildRPCFramePayloads(
+                vqlPayload: rawVQL,
+                identity: identity,
+                firstPhysicalSeq: nextPhysicalSeq,
+                messageSeq: msgSeq
+            )
+            nextPhysicalSeq = built.nextPhysicalSeq
+
+            for framePayload in built.payloads {
+                let envelope: [String: Any] = [
+                    "type": "data",
+                    "payload": framePayload,
+                    "client_ts": Int(Date().timeIntervalSince1970 * 1000)
+                ]
+                try await sendJSONEnvelope(envelope, on: task)
+            }
         } else {
-            try await task.send(.data(frame))
+            let socketFrame = ZCodeVQLCodec.wrapSocketFrame(payload: rawVQL)
+            try await task.send(.data(socketFrame))
         }
     }
 
@@ -408,7 +882,14 @@ public actor ZCodeRPCClient {
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         isInitialized = false
-        activeBridgeSessionId = nil
+        pairingAlreadyMatched = false
+        activeBridgeIdentity = nil
+
+        let waiters = initWaiters
+        initWaiters.removeAll()
+        for w in waiters {
+            w.resume()
+        }
 
         if let pairCont = pairingContinuation {
             pairingContinuation = nil
@@ -458,7 +939,7 @@ public actor ZCodeRPCClient {
         heartbeatTask?.cancel()
         heartbeatTask = Task {
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
                 guard !Task.isCancelled else { break }
                 let query: [String: Any] = [
                     "type": "pair_status_query",
@@ -480,7 +961,7 @@ public actor ZCodeRPCClient {
                         if isRelayV2, let text = String(data: raw, encoding: .utf8), text.first == "{" {
                             await handleRelayTextEnvelope(text, task: task)
                         } else {
-                            handleBinarySocketFrame(raw)
+                            handleDirectSocketData(raw)
                         }
                     case .string(let text):
                         if isRelayV2 {
@@ -500,26 +981,43 @@ public actor ZCodeRPCClient {
         }
     }
 
-    private func handleBinarySocketFrame(_ raw: Data) {
-        guard let unwrapped = try? ZCodeVQLCodec.unwrapSocketFrame(raw) else { return }
+    private func handleDirectSocketData(_ raw: Data) {
+        var cursor = 0
+        while cursor + 13 <= raw.count {
+            let slice = raw.subdata(in: cursor..<raw.count)
+            guard let unwrapped = try? ZCodeVQLCodec.unwrapSocketFrame(slice) else { break }
+            cursor += 13 + unwrapped.payload.count
+            if unwrapped.type == 1 && !unwrapped.payload.isEmpty {
+                handleRawVQLChannelMessage(unwrapped.payload)
+            }
+        }
+    }
+
+    public func handleIncomingVQLMessageForTesting(_ rawPayload: Data) {
+        handleRawVQLChannelMessage(rawPayload)
+    }
+
+    private func handleRawVQLChannelMessage(_ rawPayload: Data) {
         var offset = 0
-        guard let header = try? ZCodeVQLCodec.decode(from: unwrapped.payload, offset: &offset),
+        guard let header = try? ZCodeVQLCodec.decode(from: rawPayload, offset: &offset),
               case .array(let headerItems) = header,
               let first = headerItems.first,
               case .int32(let responseType) = first else {
             return
         }
-        let body = (try? ZCodeVQLCodec.decode(from: unwrapped.payload, offset: &offset)) ?? .undefined
+        let body = (offset < rawPayload.count)
+            ? ((try? ZCodeVQLCodec.decode(from: rawPayload, offset: &offset)) ?? .undefined)
+            : .undefined
 
         switch responseType {
         case 200: // Initialize
-            isInitialized = true
+            markChannelInitialized()
         case 201: // PromiseSuccess
             if headerItems.count >= 2, case .int32(let reqId) = headerItems[1],
                let cont = pendingReplies.removeValue(forKey: reqId) {
                 cont.resume(returning: body)
             }
-        case 202, 203, 205: // PromiseError
+        case 202, 203, 205: // PromiseError / PromiseErrorObj
             if headerItems.count >= 2, case .int32(let reqId) = headerItems[1],
                let cont = pendingReplies.removeValue(forKey: reqId) {
                 let errMsg = body.decodeJSONDictionary()?["message"] as? String ?? "RPC Error"
@@ -566,6 +1064,7 @@ public actor ZCodeRPCClient {
                 phaseCallback?(.waitingPairing)
                 startRelayHeartbeat(task: task)
             } else if pairStatus == "matched" {
+                pairingAlreadyMatched = true
                 phaseCallback?(.pairedSyncing)
                 startRelayHeartbeat(task: task)
                 if let cont = pairingContinuation {
@@ -602,12 +1101,22 @@ public actor ZCodeRPCClient {
                 return
             }
 
-            if zcodeType == "rpc-frame",
-               let messageSeq = payload["messageSeq"] as? Int,
-               let fragmentIndex = payload["fragmentIndex"] as? Int,
-               let fragmentCount = payload["fragmentCount"] as? Int,
-               let b64 = payload["dataBase64"] as? String,
-               let chunk = Data(base64Encoded: b64) {
+            if zcodeType == "rpc-frame-ack" {
+                return
+            }
+
+            if zcodeType == "rpc-frame" {
+                guard let identity = activeBridgeIdentity,
+                      identity.matchesTransportPayload(payload) else {
+                    return
+                }
+                guard let messageSeq = (payload["messageSeq"] as? Int) ?? (payload["messageSeq"] as? NSNumber)?.intValue,
+                      let fragmentIndex = (payload["fragmentIndex"] as? Int) ?? (payload["fragmentIndex"] as? NSNumber)?.intValue,
+                      let fragmentCount = (payload["fragmentCount"] as? Int) ?? (payload["fragmentCount"] as? NSNumber)?.intValue,
+                      let b64 = payload["dataBase64"] as? String,
+                      let chunk = Data(base64Encoded: b64) else {
+                    return
+                }
 
                 var map = fragmentBuffers[messageSeq, default: [:]]
                 map[fragmentIndex] = chunk
@@ -619,37 +1128,78 @@ public actor ZCodeRPCClient {
                     for idx in 0..<fragmentCount {
                         if let part = map[idx] { assembled.append(part) }
                     }
+                    if let expectedBytes = (payload["messageBytes"] as? Int) ?? (payload["messageBytes"] as? NSNumber)?.intValue,
+                       assembled.count != expectedBytes {
+                        return
+                    }
                     if let checksum = payload["checksum"] as? [String: Any],
                        let expected = checksum["value"] as? String {
                         guard ZCodeVQLCodec.crc32Hex(assembled) == expected.lowercased() else { return }
                     }
-                    // Send `rpc-frame-ack` back over relay
-                    var ackPayload: [String: Any] = [
-                        "zcode_type": "rpc-frame-ack",
-                        "ackMessageSeq": messageSeq
-                    ]
-                    if let bridgeId = activeBridgeSessionId {
-                        ackPayload["bridgeSessionId"] = bridgeId
-                    }
+
+                    let ackPayload = Self.buildRPCFrameAckPayload(
+                        identity: identity,
+                        ackMessageSeq: messageSeq
+                    )
                     try? await sendJSONEnvelope([
                         "type": "data",
                         "payload": ackPayload,
                         "client_ts": Int(Date().timeIntervalSince1970 * 1000)
                     ], on: task)
 
-                    handleBinarySocketFrame(assembled)
+                    handleRawVQLChannelMessage(assembled)
                 }
                 return
             }
 
-            // Match app-level responses (`bootstrap-response`, `workspace-list-response`, `workspace-bridge-ready`)
-            if let reqId = payload["requestId"] as? String,
-               let cont = pendingAppRequests.removeValue(forKey: "\(zcodeType):\(reqId)") {
-                cont.resume(returning: payload)
+            if zcodeType == "workspace-list-updated",
+               let result = payload["result"] as? [String: Any] {
+                let rawWs = (result["workspaces"] as? [[String: Any]]) ?? []
+                let list = Self.parseWorkspaceSummaries(from: rawWs)
+                let activeKey = result["activeWorkspaceKey"] as? String
+                let activeTask = result["activeTaskId"] as? String
+                workspaceListUpdateHandler?(list, activeKey, activeTask)
                 return
             }
-            if let bridgeId = payload["bridgeSessionId"] as? String,
-               let cont = pendingAppRequests.removeValue(forKey: "\(zcodeType):\(bridgeId)") {
+
+            if zcodeType == "app-error" || zcodeType == "workspace-bridge-error" {
+                let errMsg = (payload["error"] as? String) ?? (payload["reason"] as? String) ?? "Remote bridge error"
+                let err = NSError(domain: "ZCodeRelay", code: 422, userInfo: [NSLocalizedDescriptionKey: errMsg])
+                if let reqId = payload["requestId"] as? String {
+                    for (key, cont) in pendingAppRequests where key.hasSuffix(":\(reqId)") {
+                        pendingAppRequests.removeValue(forKey: key)
+                        cont.resume(throwing: err)
+                        return
+                    }
+                }
+                if let bridgeId = payload["bridgeSessionId"] as? String {
+                    for (key, cont) in pendingAppRequests where key.hasSuffix(":\(bridgeId)") {
+                        pendingAppRequests.removeValue(forKey: key)
+                        cont.resume(throwing: err)
+                        return
+                    }
+                }
+                return
+            }
+
+            // Set bridge identity synchronously BEFORE resuming continuation so back-to-back `[200]` Initialize frames are accepted immediately.
+            if zcodeType == "workspace-bridge-ready",
+               let bridgeId = payload["bridgeSessionId"] as? String {
+                let parsedIdentity = Self.parseBridgeIdentity(
+                    from: payload,
+                    fallbackBridgeId: bridgeId,
+                    fallbackGeneration: nextBridgeGeneration,
+                    fallbackWorkspaceKey: ""
+                )
+                self.activeBridgeIdentity = parsedIdentity
+                if let cont = pendingAppRequests.removeValue(forKey: "\(zcodeType):\(bridgeId)") {
+                    cont.resume(returning: payload)
+                    return
+                }
+            }
+
+            if let reqId = payload["requestId"] as? String,
+               let cont = pendingAppRequests.removeValue(forKey: "\(zcodeType):\(reqId)") {
                 cont.resume(returning: payload)
                 return
             }

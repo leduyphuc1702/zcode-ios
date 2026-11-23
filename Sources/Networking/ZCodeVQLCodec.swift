@@ -26,6 +26,24 @@ public enum VQLValue: Equatable {
         }
         return obj
     }
+
+    public func decodeJSONValue() -> Any? {
+        switch self {
+        case .undefined:
+            return nil
+        case .string(let s):
+            return s
+        case .int32(let i):
+            return Int(i)
+        case .buffer(let b), .vsBuffer(let b):
+            return b
+        case .array(let items):
+            return items.map { $0.decodeJSONValue() ?? NSNull() }
+        case .objectJSON(let json):
+            guard let data = json.data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data)
+        }
+    }
 }
 
 /// Exact byte-level implementation of ZCode v3.16.3 `SocketProtocol` (13-byte BE) + `VQL` codec + IEEE CRC32.
@@ -180,7 +198,7 @@ public enum ZCodeVQLCodec {
         return (type, id, ack, payload)
     }
 
-    public static func buildRPCRequestFrame(id: Int32, channel: String, method: String, args: [VQLValue]) -> Data {
+    public static func buildRawRPCRequestPayload(id: Int32, channel: String, method: String, args: [VQLValue]) -> Data {
         var rpcPayload = Data()
         let header: VQLValue = .array([
             .int32(100),
@@ -190,10 +208,10 @@ public enum ZCodeVQLCodec {
         ])
         encode(header, into: &rpcPayload)
         encode(.array(args), into: &rpcPayload)
-        return wrapSocketFrame(payload: rpcPayload)
+        return rpcPayload
     }
 
-    public static func buildRPCEventListenFrame(id: Int32, channel: String, event: String, arg: VQLValue = .undefined) -> Data {
+    public static func buildRawRPCEventListenPayload(id: Int32, channel: String, event: String, arg: VQLValue = .undefined) -> Data {
         var rpcPayload = Data()
         let header: VQLValue = .array([
             .int32(102),
@@ -203,7 +221,15 @@ public enum ZCodeVQLCodec {
         ])
         encode(header, into: &rpcPayload)
         encode(arg, into: &rpcPayload)
-        return wrapSocketFrame(payload: rpcPayload)
+        return rpcPayload
+    }
+
+    public static func buildRPCRequestFrame(id: Int32, channel: String, method: String, args: [VQLValue]) -> Data {
+        wrapSocketFrame(payload: buildRawRPCRequestPayload(id: id, channel: channel, method: method, args: args))
+    }
+
+    public static func buildRPCEventListenFrame(id: Int32, channel: String, event: String, arg: VQLValue = .undefined) -> Data {
+        wrapSocketFrame(payload: buildRawRPCEventListenPayload(id: id, channel: channel, event: event, arg: arg))
     }
 
     // MARK: - IEEE 802.3 CRC32 (for Cloud Relay V2 `rpc-frame` checksum)
