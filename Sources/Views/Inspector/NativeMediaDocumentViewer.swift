@@ -1,7 +1,9 @@
 import SwiftUI
 import PDFKit
 
-/// 100% Native File, Image, PDF (PDFKit), Markdown, CSV, and Syntax Code Viewer — ZERO WebKit!
+/// 100% native file preview pane — images, PDFs (PDFKit), Markdown, CSV, and code
+/// with a desktop-style tab strip. ZERO WebKit. Content comes from the host
+/// `file.*` RPCs, so absolute paths outside the workspace tree preview too.
 public struct NativeMediaDocumentViewer: View {
     @Bindable var store: AppStore
     @Bindable var liveState: InspectorLiveState
@@ -17,146 +19,156 @@ public struct NativeMediaDocumentViewer: View {
         self.liveState = liveState ?? InspectorLiveState()
     }
 
-    private var switcherFiles: [WorkspaceFileNode] {
-        if store.isUITestSeededMode {
-            let raw = store.flattenedFiles.filter { [.image, .pdf, .markdown, .csv].contains($0.kind) }
-            let priorityOrder = ["file-arch-png", "file-spec-pdf", "file-benchmarks-csv", "file-readme", "file-telemetry-png"]
-            return raw.sorted { a, b in
-                let ia = priorityOrder.firstIndex(of: a.id) ?? 99
-                let ib = priorityOrder.firstIndex(of: b.id) ?? 99
-                return ia < ib
-            }
-        }
-
-        // In live mode, surface open files + currently selected file + discovered rich assets
-        var ordered: [WorkspaceFileNode] = []
-        var seen = Set<String>()
-        if !store.selectedFileId.isEmpty, let sel = store.findFileNode(id: store.selectedFileId), !sel.isDirectory {
-            ordered.append(sel)
-            seen.insert(sel.id)
-        }
-        for id in store.openFileIds {
-            if !seen.contains(id), let node = store.findFileNode(id: id), !node.isDirectory {
-                ordered.append(node)
-                seen.insert(node.id)
-            }
-        }
-        for node in store.flattenedFiles where !seen.contains(node.id) {
-            let kind = liveState.effectiveMediaKind(for: node)
-            if kind == .image || kind == .pdf || node.kind == .markdown || node.kind == .csv {
-                ordered.append(node)
-                seen.insert(node.id)
-            }
-        }
-        return ordered
-    }
-
-    private var activePreviewFile: WorkspaceFileNode? {
-        if store.isUITestSeededMode {
-            if let selected = store.selectedFile, [.image, .pdf, .markdown, .csv].contains(selected.kind) {
-                return selected
-            }
-            return switcherFiles.first
-        }
-        if !store.selectedFileId.isEmpty, let sel = store.findFileNode(id: store.selectedFileId), !sel.isDirectory {
-            return sel
-        }
-        return switcherFiles.first
-    }
+    private var tabs: [InspectorPreviewTab] { store.previewTabs.tabs }
+    private var activeTab: InspectorPreviewTab? { store.previewTabs.activeTab }
+    private var activeTabId: String { store.previewTabs.activeTabId }
 
     public var body: some View {
         VStack(spacing: 0) {
-            // File / Asset Switcher Strip
-            if !switcherFiles.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(switcherFiles) { item in
-                            let isCurrent = item.id == activePreviewFile?.id
-                            Button {
-                                store.selectedFileId = item.id
-                                if !store.openFileIds.contains(item.id) {
-                                    store.openFileIds.append(item.id)
-                                }
-                                zoomScale = 1.0
-                                panOffset = .zero
-                                showRawTextSource = false
-                                if store.isLiveHostConnected {
-                                    Task { @MainActor in
-                                        await store.loadInspectorFile(node: item, state: liveState)
-                                    }
-                                }
-                            } label: {
-                                HStack(spacing: 5) {
-                                    Image(systemName: icon(for: item))
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(isCurrent ? palette.accentBlue : palette.foregroundSubtle)
-                                    Text(compactAssetName(item.name))
-                                        .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
-                                        .foregroundStyle(isCurrent ? palette.foreground : palette.foregroundSubtle)
-                                        .fixedSize(horizontal: true, vertical: false)
-                                }
-                                .padding(.horizontal, 9)
-                                .frame(height: 30)
-                                .background(isCurrent ? palette.card : palette.surfaceHover, in: RoundedRectangle(cornerRadius: 7))
-                                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(isCurrent ? palette.borderStrong : Color.clear, lineWidth: 1))
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("previewAssetChip_\(item.id)")
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                }
-                .frame(height: 42)
-                .background(palette.panel)
+            if !tabs.isEmpty {
+                tabStrip
 
-                Rectangle().fill(palette.border).frame(height: 1)
+                Rectangle()
+                    .fill(palette.border)
+                    .frame(height: 1)
             }
 
-            if let file = activePreviewFile {
-                viewerContent(for: file)
-                    .task(id: "\(file.id)-\(store.isLiveHostConnected)") {
-                        guard store.isLiveHostConnected else { return }
-                        await store.loadInspectorFile(node: file, state: liveState)
+            if let tab = activeTab {
+                viewerContent(for: tab)
+                    .task(id: "\(tab.id)|\(store.isLiveHostConnected)") {
+                        await store.loadPreviewTabContentIfNeeded(id: tab.id)
                     }
             } else {
-                VStack(spacing: 10) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.system(size: 32))
-                        .foregroundStyle(palette.foregroundMuted)
-                    Text("No file selected")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(palette.foreground)
-                    Text("Choose a file from the Files tab to inspect its contents, image, or PDF.")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(palette.foregroundSubtle)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
-                    Button {
-                        store.activeInspectorTab = .files
-                    } label: {
-                        Text("Browse Files")
-                            .font(.system(size: 12.5, weight: .semibold))
-                            .foregroundStyle(palette.accentBlue)
-                            .padding(.horizontal, 14)
-                            .frame(height: 34)
-                            .background(palette.accentBlue.opacity(0.14), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                emptyState
             }
+        }
+        .onChange(of: activeTabId) { _, _ in
+            resetViewport()
         }
     }
 
-    @ViewBuilder
-    private func viewerContent(for file: WorkspaceFileNode) -> some View {
-        let outcome = liveState.fileStates[file.id]
-        let mediaKind = liveState.effectiveMediaKind(for: file)
-        let isRichTextFormat = mediaKind == .text && (file.kind == .markdown || file.kind == .csv)
+    // MARK: - Tab Strip
 
-        // Toolbar with Path, Size, Controls, Attach
+    private var tabStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 5) {
+                ForEach(tabs) { tab in
+                    tabChip(tab)
+                }
+            }
+            .padding(.horizontal, 8)
+        }
+        .frame(height: 42)
+        .background(palette.panel)
+    }
+
+    private func tabChip(_ tab: InspectorPreviewTab) -> some View {
+        let isCurrent = tab.id == activeTabId
+        return HStack(spacing: 2) {
+            Button {
+                store.activatePreviewTab(id: tab.id)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: icon(for: tab))
+                        .font(.system(size: 11))
+                        .foregroundStyle(isCurrent ? palette.accentBlue : palette.foregroundSubtle)
+                    Text(tabLabel(tab))
+                        .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
+                        .foregroundStyle(isCurrent ? palette.foreground : palette.foregroundSubtle)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                .padding(.leading, 9)
+                .padding(.trailing, 3)
+                .frame(height: 30)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(tab.name)
+            .accessibilityIdentifier(tabAccessibilityIdentifier(tab))
+
+            Button {
+                store.closePreviewTab(id: tab.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(isCurrent ? palette.foreground : palette.foregroundMuted)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close \(tab.name)")
+            .accessibilityIdentifier("closePreviewTab_\(tab.id)")
+        }
+        .padding(.trailing, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(isCurrent ? palette.card : palette.surfaceHover)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(isCurrent ? palette.borderStrong : Color.clear, lineWidth: 1)
+        )
+    }
+
+    /// Test-fixture chip labels stay short so the seeded preview chips remain
+    /// reachable on compact simulator widths (production always shows real names).
+    private func tabLabel(_ tab: InspectorPreviewTab) -> String {
+        guard store.isUITestSeededMode else { return tab.name }
+        switch tab.name {
+        case "architecture-overview.png": return "architecture.png"
+        case "ZCode-Enterprise-Spec.pdf": return "Spec.pdf"
+        case "rpc-benchmarks.csv": return "benchmarks.csv"
+        case "telemetry-latency-chart.png": return "telemetry.png"
+        default: return tab.name
+        }
+    }
+
+    private func tabAccessibilityIdentifier(_ tab: InspectorPreviewTab) -> String {
+        if store.isUITestSeededMode, let nodeId = tab.workspaceNodeId {
+            return "previewAssetChip_\(nodeId)"
+        }
+        return "previewTab_\(tab.id)"
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 32))
+                .foregroundStyle(palette.foregroundMuted)
+            Text("No file open")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(palette.foreground)
+            Text("Tap a file or image in the chat to preview it here.")
+                .font(.system(size: 12.5))
+                .foregroundStyle(palette.foregroundSubtle)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            Button {
+                store.activeInspectorTab = .files
+            } label: {
+                Text("Browse Files")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(palette.accentBlue)
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(palette.accentBlue.opacity(0.14), in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Active Document
+
+    @ViewBuilder
+    private func viewerContent(for tab: InspectorPreviewTab) -> some View {
+        let mediaKind = tab.effectiveKind
+        let isRichTextFormat = mediaKind == .markdown || mediaKind == .csv
+
+        // Toolbar: path, size, zoom/source controls, attach
         HStack(spacing: 8) {
-            Text(file.path)
+            Text(tab.displayPath)
                 .font(.system(size: 11.5, design: .monospaced))
                 .foregroundStyle(palette.foregroundSubtle)
                 .lineLimit(1)
@@ -164,14 +176,14 @@ public struct NativeMediaDocumentViewer: View {
 
             Spacer(minLength: 4)
 
-            if let bytes = liveState.knownSizeBytes(for: file) {
-                Text(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
+            if tab.sizeBytes > 0 {
+                Text(ByteCountFormatter.string(fromByteCount: Int64(tab.sizeBytes), countStyle: .file))
                     .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                     .foregroundStyle(palette.foregroundMuted)
                     .fixedSize(horizontal: true, vertical: false)
             }
 
-            if mediaKind == .image && file.binaryData != nil {
+            if mediaKind == .image && tab.binaryData != nil {
                 Button {
                     showPixelGrid.toggle()
                 } label: {
@@ -181,6 +193,7 @@ public struct NativeMediaDocumentViewer: View {
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(showPixelGrid ? "Hide pixel grid" : "Show pixel grid")
 
                 Button {
                     withAnimation(.spring(response: 0.25)) {
@@ -192,6 +205,7 @@ public struct NativeMediaDocumentViewer: View {
                         .foregroundStyle(palette.foregroundSubtle)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Zoom out")
 
                 Text("\(Int(zoomScale * 100))%")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -207,7 +221,8 @@ public struct NativeMediaDocumentViewer: View {
                         .foregroundStyle(palette.foregroundSubtle)
                 }
                 .buttonStyle(.plain)
-            } else if isRichTextFormat && file.textContent != nil {
+                .accessibilityLabel("Zoom in")
+            } else if isRichTextFormat && tab.textContent != nil {
                 Button {
                     showRawTextSource.toggle()
                 } label: {
@@ -220,22 +235,22 @@ public struct NativeMediaDocumentViewer: View {
                         .overlay(Capsule().strokeBorder(palette.border, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(showRawTextSource ? "Show rendered view" : "Show source")
             }
 
             Button {
-                let realBytes = liveState.knownSizeBytes(for: file) ?? file.sizeBytes
                 store.composerAttachments.append(
                     ComposerAttachment(
                         id: UUID().uuidString,
-                        name: "@\(file.name)",
+                        name: "@\(tab.name)",
                         kind: mediaKind == .image ? "image" : "file",
-                        sizeBytes: realBytes,
-                        filePath: file.path,
+                        sizeBytes: tab.sizeBytes,
+                        filePath: tab.isDataBacked ? tab.displayPath : tab.path,
                         lineNote: nil,
-                        previewPNGData: mediaKind == .image ? file.binaryData : nil
+                        previewPNGData: mediaKind == .image ? tab.binaryData : nil
                     )
                 )
-                store.showToast("Attached \(file.name) to chat composer")
+                store.showToast("Attached \(tab.name) to chat composer")
             } label: {
                 Text("Attach")
                     .font(.system(size: 11.5, weight: .semibold))
@@ -253,95 +268,100 @@ public struct NativeMediaDocumentViewer: View {
 
         Rectangle().fill(palette.border).frame(height: 1)
 
-        if outcome?.isLoading == true {
+        if tab.isLoading {
             VStack(spacing: 12) {
                 ProgressView()
-                Text("Loading \(file.name)…")
+                Text("Loading \(tab.name)…")
                     .font(.system(size: 13))
                     .foregroundStyle(palette.foregroundSubtle)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let err = outcome?.errorMessage {
-            VStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 30))
-                    .foregroundStyle(palette.warning)
-                Text(file.name)
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(palette.foreground)
-                Text(err)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(palette.foregroundSubtle)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
-                if store.isLiveHostConnected {
-                    Button {
-                        Task { @MainActor in
-                            await store.loadInspectorFile(node: file, state: liveState, force: true)
-                        }
-                    } label: {
-                        Text("Retry")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(palette.brandForeground)
-                            .padding(.horizontal, 16)
-                            .frame(height: 34)
-                            .background(palette.brand, in: RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let error = tab.errorMessage {
+            previewErrorView(tab: tab, message: error)
         } else {
             switch mediaKind {
             case .image:
-                nativeImageCanvas(file)
+                nativeImageCanvas(tab)
             case .pdf:
-                if let pdfData = file.binaryData, !pdfData.isEmpty {
+                if let pdfData = tab.binaryData, !pdfData.isEmpty {
                     NativePDFKitView(data: pdfData)
                         .accessibilityIdentifier("nativePDFKitViewer")
                 } else if store.isLiveHostConnected {
-                    VStack(spacing: 10) {
-                        ProgressView()
-                        Text("Loading PDF…")
-                            .font(.system(size: 13))
-                            .foregroundStyle(palette.foregroundSubtle)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    loadingPlaceholder("Loading PDF…")
                 } else {
-                    unavailablePreviewView(file: file, subtitle: "PDF data not loaded.")
+                    unavailablePreviewView(tab: tab, subtitle: "Connect to a ZCode host to load this PDF.")
                 }
-            case .binary, .directory:
-                unavailablePreviewView(file: file, subtitle: "Preview not available")
-            case .text:
-                if let text = file.textContent {
+            case .binary:
+                unavailablePreviewView(tab: tab, subtitle: "Preview is not available for binary files.")
+            case .markdown, .csv, .code, .text:
+                if let text = tab.textContent {
                     VStack(spacing: 0) {
-                        if outcome?.isTruncated == true {
+                        if tab.isTruncated {
                             truncationBanner(
-                                loadedBytes: outcome?.loadedBytes ?? text.utf8.count,
-                                totalBytes: outcome?.totalBytes ?? file.sizeBytes
+                                loadedBytes: text.utf8.count,
+                                totalBytes: tab.totalBytes ?? tab.sizeBytes
                             )
                         }
-                        if !showRawTextSource && file.kind == .csv {
+                        if !showRawTextSource && mediaKind == .csv {
                             nativeCSVTable(text)
-                        } else if !showRawTextSource && file.kind == .markdown {
+                        } else if !showRawTextSource && mediaKind == .markdown {
                             nativeMarkdownPreview(text)
                         } else {
-                            nativeTextWithLineNumbers(file: file, text: text)
+                            nativeTextWithLineNumbers(tab: tab, text: text)
                         }
                     }
                 } else if store.isLiveHostConnected {
-                    VStack(spacing: 10) {
-                        ProgressView()
-                        Text("Loading \(file.name)…")
-                            .font(.system(size: 13))
-                            .foregroundStyle(palette.foregroundSubtle)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    loadingPlaceholder("Loading \(tab.name)…")
                 } else {
-                    unavailablePreviewView(file: file, subtitle: "Preview not available")
+                    unavailablePreviewView(tab: tab, subtitle: "Connect to a ZCode host to load this file.")
                 }
             }
         }
+    }
+
+    private func previewErrorView(tab: InspectorPreviewTab, message: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 30))
+                .foregroundStyle(palette.warning)
+            Text(tab.name)
+                .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                .foregroundStyle(palette.foreground)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+            Text(message)
+                .font(.system(size: 12.5))
+                .foregroundStyle(palette.foregroundSubtle)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            if store.isLiveHostConnected && !store.isUITestSeededMode {
+                Button {
+                    Task { @MainActor in
+                        await store.reloadPreviewTab(id: tab.id)
+                    }
+                } label: {
+                    Text("Retry")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(palette.brandForeground)
+                        .padding(.horizontal, 16)
+                        .frame(height: 34)
+                        .background(palette.brand, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("retryPreviewButton")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func loadingPlaceholder(_ label: String) -> some View {
+        VStack(spacing: 10) {
+            ProgressView()
+            Text(label)
+                .font(.system(size: 13))
+                .foregroundStyle(palette.foregroundSubtle)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func truncationBanner(loadedBytes: Int, totalBytes: Int) -> some View {
@@ -364,10 +384,10 @@ public struct NativeMediaDocumentViewer: View {
         }
     }
 
-    private func unavailablePreviewView(file: WorkspaceFileNode, subtitle: String) -> some View {
+    private func unavailablePreviewView(tab: InspectorPreviewTab, subtitle: String) -> some View {
         let sizeText: String = {
-            if let bytes = liveState.knownSizeBytes(for: file) {
-                return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+            if tab.sizeBytes > 0 {
+                return ByteCountFormatter.string(fromByteCount: Int64(tab.sizeBytes), countStyle: .file)
             }
             return "Binary file"
         }()
@@ -376,7 +396,7 @@ public struct NativeMediaDocumentViewer: View {
             Image(systemName: "doc.zipper")
                 .font(.system(size: 36))
                 .foregroundStyle(palette.foregroundMuted)
-            Text(file.name)
+            Text(tab.name)
                 .font(.system(size: 14, weight: .semibold, design: .monospaced))
                 .foregroundStyle(palette.foreground)
                 .multilineTextAlignment(.center)
@@ -387,16 +407,35 @@ public struct NativeMediaDocumentViewer: View {
             Text(subtitle)
                 .font(.system(size: 13))
                 .foregroundStyle(palette.foregroundMuted)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func resetViewport() {
+        zoomScale = 1.0
+        panOffset = .zero
+        showRawTextSource = false
+    }
+
+    private func swipeToAdjacentImageTab(forward: Bool) {
+        let imageTabs = tabs.filter { $0.effectiveKind == .image }
+        guard imageTabs.count > 1,
+              let currentIndex = imageTabs.firstIndex(where: { $0.id == activeTabId }) else { return }
+        let targetIndex = forward ? currentIndex + 1 : currentIndex - 1
+        guard imageTabs.indices.contains(targetIndex) else { return }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            store.activatePreviewTab(id: imageTabs[targetIndex].id)
+        }
+    }
+
     // MARK: - Native Syntax Text Viewer with Line Numbers
 
-    private func nativeTextWithLineNumbers(file: WorkspaceFileNode, text: String) -> some View {
+    private func nativeTextWithLineNumbers(tab: InspectorPreviewTab, text: String) -> some View {
         let syntaxColors = SyntaxColors.palette(for: store.syntaxTheme)
         let lines = text.components(separatedBy: "\n")
-        let lang = SyntaxHighlighter.detectLanguage(for: file.path)
+        let lang = SyntaxHighlighter.detectLanguage(for: tab.path)
 
         return ScrollView([.vertical, store.wrapCodeLines ? [] : .horizontal]) {
             LazyVStack(alignment: .leading, spacing: 0) {
@@ -430,24 +469,14 @@ public struct NativeMediaDocumentViewer: View {
         .background(syntaxColors.background)
     }
 
-    private func compactAssetName(_ name: String) -> String {
-        switch name {
-        case "architecture-overview.png": return "architecture.png"
-        case "ZCode-Enterprise-Spec.pdf": return "Spec.pdf"
-        case "rpc-benchmarks.csv": return "benchmarks.csv"
-        case "telemetry-latency-chart.png": return "telemetry.png"
-        default: return name
-        }
-    }
-
     // MARK: - Native Pinch-Zoom Image Inspector
 
-    private func nativeImageCanvas(_ file: WorkspaceFileNode) -> some View {
+    private func nativeImageCanvas(_ tab: InspectorPreviewTab) -> some View {
         GeometryReader { geo in
             ZStack {
                 Color(hex: 0x101114)
 
-                if let data = file.binaryData, let uiImage = UIImage(data: data) {
+                if let data = tab.binaryData, let uiImage = UIImage(data: data) {
                     Image(uiImage: uiImage)
                         .resizable()
                         .scaledToFit()
@@ -483,6 +512,15 @@ public struct NativeMediaDocumentViewer: View {
                                         panOffset = value.translation
                                     }
                                 }
+                                .onEnded { value in
+                                    // Horizontal swipe on an unzoomed image moves to the
+                                    // neighboring image tab (desktop-style gallery browsing).
+                                    guard zoomScale <= 1.05 else { return }
+                                    let width = value.translation.width
+                                    let height = value.translation.height
+                                    guard abs(width) > 60, abs(width) > abs(height) else { return }
+                                    swipeToAdjacentImageTab(forward: width < 0)
+                                }
                         )
                         .onTapGesture(count: 2) {
                             withAnimation(.spring(response: 0.25)) {
@@ -495,7 +533,7 @@ public struct NativeMediaDocumentViewer: View {
                             }
                         }
 
-                    // Crisp Single-Line Image Metadata HUD
+                    // Single-line image metadata HUD
                     VStack {
                         Spacer()
                         HStack(spacing: 8) {
@@ -513,12 +551,12 @@ public struct NativeMediaDocumentViewer: View {
                         .background(.black.opacity(0.68), in: Capsule())
                         .padding(.bottom, 14)
                     }
-                } else if file.binaryData != nil {
+                } else if tab.binaryData != nil {
                     VStack(spacing: 8) {
                         Image(systemName: "photo.badge.exclamationmark")
                             .font(.system(size: 32))
                             .foregroundStyle(.white.opacity(0.6))
-                        Text("Unable to decode \(file.name)")
+                        Text("Unable to decode \(tab.name)")
                             .font(.system(size: 13))
                             .foregroundStyle(.white.opacity(0.75))
                     }
@@ -616,20 +654,15 @@ public struct NativeMediaDocumentViewer: View {
         }
     }
 
-    private func icon(for node: WorkspaceFileNode) -> String {
-        let mediaKind = liveState.effectiveMediaKind(for: node)
-        switch mediaKind {
+    private func icon(for tab: InspectorPreviewTab) -> String {
+        switch tab.effectiveKind {
         case .image: return "photo"
         case .pdf: return "doc.viewfinder"
         case .binary: return "doc.zipper"
-        case .directory: return "folder"
-        case .text:
-            switch node.kind {
-            case .csv: return "tablecells"
-            case .markdown: return "doc.richtext"
-            case .json: return "curlybraces"
-            default: return "chevron.left.forwardslash.chevron.right"
-            }
+        case .csv: return "tablecells"
+        case .markdown: return "doc.richtext"
+        case .code: return "chevron.left.forwardslash.chevron.right"
+        case .text: return "doc.text"
         }
     }
 }

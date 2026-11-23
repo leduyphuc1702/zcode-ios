@@ -379,3 +379,33 @@ final class TurnFooterTests: XCTestCase {
         XCTAssertEqual(Set(AppStore.turnActionBars(messages, fromHost: false, running: false).keys), ["a2", "a3"])
     }
 }
+
+@MainActor
+final class EditAttachmentRefsTests: XCTestCase {
+    private let refs: [[String: Any]] = [
+        ["ref": "a", "fileName": "one.png", "mime": "image/png"],
+        ["ref": "b", "fileName": "two.png", "mime": "image/png"],
+        ["ref": "c", "fileName": "notes.txt", "mime": "text/plain"]
+    ]
+
+    func testNilIndicesKeepEveryAttachment() {
+        XCTAssertEqual(AppStore.keptAttachmentRefs(refs, indices: nil).compactMap { $0["ref"] as? String }, ["a", "b", "c"])
+    }
+
+    func testRemovedAttachmentsAreDroppedAndOrderKept() {
+        XCTAssertEqual(AppStore.keptAttachmentRefs(refs, indices: [0, 2, 7]).compactMap { $0["ref"] as? String }, ["a", "c"])
+        XCTAssertTrue(AppStore.keptAttachmentRefs(refs, indices: []).isEmpty)
+    }
+
+    func testEditPayloadCarriesKeptAttachments() {
+        let payload = AppStore.editUserQueryPayload(
+            target: ["rowId": 4, "entityId": "e4"],
+            newText: "fixed",
+            workspaceMode: "preserve",
+            quotes: [],
+            attachmentRefs: AppStore.keptAttachmentRefs(refs, indices: [1]),
+            selection: nil
+        )
+        XCTAssertEqual((payload["attachments"] as? [[String: Any]])?.compactMap { $0["ref"] as? String }, ["b"])
+    }
+}

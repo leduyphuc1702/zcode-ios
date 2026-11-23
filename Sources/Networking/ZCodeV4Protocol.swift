@@ -251,7 +251,7 @@ public struct V4ConversationState {
                 rows.append(row)
                 totalCount += 1
             }
-            if firstRowId == nil { firstRowId = ZCodeV4.int(row["rowId"]) }
+            if firstRowId == nil, rows.count == 1 { firstRowId = ZCodeV4.int(row["rowId"]) }
         case "row.upserted":
             guard let row = delta["row"] as? [String: Any], let id = ZCodeV4.int(row["rowId"]),
                   let idx = rowIndex(id) else { return }

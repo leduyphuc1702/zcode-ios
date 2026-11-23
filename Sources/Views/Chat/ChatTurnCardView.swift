@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 
 public struct ChatTurnCardView: View {
@@ -66,6 +67,27 @@ public struct ChatTurnCardView: View {
         showEditMessageSheet = true
     }
 
+    /// Local files open by path; host attachments are read through `conversationAttachmentReadV4` into a preview tab.
+    private func openAttachment(_ attachment: ComposerAttachment, index: Int) {
+        if let path = attachment.filePath {
+            store.openFileInInspector(pathOrId: path, preferPreview: attachment.kind == "image" || attachment.kind == "pdf")
+            return
+        }
+        let tabId = "attachment-\(message.id)-\(index)"
+        if let data = attachment.previewPNGData {
+            store.openDataPreviewTab(id: tabId, fileName: attachment.name, mimeType: attachment.kind == "image" ? "image/png" : "application/octet-stream", data: data)
+            return
+        }
+        Task { @MainActor in
+            do {
+                let loaded = try await store.v4ReadUserAttachment(messageId: message.id, index: index)
+                store.openDataPreviewTab(id: tabId, fileName: attachment.name, mimeType: loaded.mimeType, data: loaded.data)
+            } catch {
+                store.showToast("Couldn't open \(attachment.name)")
+            }
+        }
+    }
+
     private func quoteText(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -87,17 +109,35 @@ public struct ChatTurnCardView: View {
         return HStack {
             Spacer(minLength: 40)
             VStack(alignment: .trailing, spacing: 8) {
-                if !message.attachments.isEmpty {
+                let indexed = Array(message.attachments.enumerated())
+                let media = indexed.filter { $0.element.kind == "image" }
+                let files = indexed.filter { $0.element.kind != "image" }
+                if !media.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(media, id: \.offset) { index, att in
+                                Button {
+                                    openAttachment(att, index: index)
+                                } label: {
+                                    UserAttachmentThumbnail(store: store, messageId: message.id, index: index, attachment: att, side: 72)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Open \(att.name)")
+                                .accessibilityIdentifier("userAttachmentThumb_\(message.id)_\(index)")
+                            }
+                        }
+                    }
+                    .defaultScrollAnchor(.trailing)
+                }
+                if !files.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 6) {
-                            ForEach(message.attachments) { att in
+                            ForEach(files, id: \.offset) { index, att in
                                 Button {
-                                    if let path = att.filePath {
-                                        store.openFileInInspector(pathOrId: path, preferPreview: att.kind == "image" || att.kind == "pdf")
-                                    }
+                                    openAttachment(att, index: index)
                                 } label: {
                                     HStack(spacing: 5) {
-                                        Image(systemName: att.kind == "comment" ? "text.bubble" : "paperclip")
+                                        Image(systemName: att.kind == "comment" ? "text.bubble" : (att.kind == "pdf" ? "doc.richtext" : "paperclip"))
                                             .font(.system(size: 11))
                                             .foregroundStyle(palette.foregroundSubtle)
                                         Text(att.name)
@@ -110,9 +150,11 @@ public struct ChatTurnCardView: View {
                                     .overlay(Capsule().strokeBorder(palette.borderStrong, lineWidth: 1))
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityIdentifier("userAttachmentPill_\(message.id)_\(index)")
                             }
                         }
                     }
+                    .defaultScrollAnchor(.trailing)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -489,6 +531,10 @@ private struct EditUserMessageSheet: View {
     @State private var errorText: String?
     @State private var blockedConflict: BlockedEdit?
     @State private var didFocusEditor: Bool = false
+    /// Indices into `message.attachments` still attached; the desktop editor lets each one be removed.
+    @State private var keptAttachmentIndices: [Int]
+    @State private var addedAttachments: [ComposerAttachment] = []
+    @State private var pickedPhotos: [PhotosPickerItem] = []
     @FocusState private var isEditorFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.zcodePalette) private var palette
@@ -502,7 +548,10 @@ private struct EditUserMessageSheet: View {
         self.store = store
         self.message = message
         _draft = State(initialValue: initialText)
+        _keptAttachmentIndices = State(initialValue: Array(message.attachments.indices))
     }
+
+    private var hasAttachments: Bool { !keptAttachmentIndices.isEmpty || !addedAttachments.isEmpty }
 
     private var rewindAvailability: String { message.editRewindAvailability ?? "unavailable" }
 
@@ -525,34 +574,118 @@ private struct EditUserMessageSheet: View {
 
     private var canSend: Bool {
         guard !isSubmitting else { return false }
-        return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !message.attachments.isEmpty
+        return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments
+    }
+
+    private func removeButton(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 18))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, Color.black.opacity(0.7))
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .offset(x: 9, y: -9)
+    }
+
+    private func filePill(_ attachment: ComposerAttachment) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: attachment.kind == "pdf" ? "doc.richtext" : "paperclip")
+                .font(.system(size: 11))
+                .foregroundStyle(palette.foregroundSubtle)
+            Text(attachment.name)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(palette.foreground)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 30)
+        .background(palette.panel, in: Capsule())
+        .overlay(Capsule().strokeBorder(palette.borderStrong, lineWidth: 1))
+    }
+
+    private var attachmentsEditor: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .center, spacing: 12) {
+                ForEach(keptAttachmentIndices, id: \.self) { index in
+                    let attachment = message.attachments[index]
+                    Group {
+                        if attachment.kind == "image" {
+                            UserAttachmentThumbnail(store: store, messageId: message.id, index: index, attachment: attachment, side: 64)
+                        } else {
+                            filePill(attachment)
+                        }
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        removeButton { keptAttachmentIndices.removeAll { $0 == index } }
+                            .accessibilityLabel("Remove \(attachment.name)")
+                            .accessibilityIdentifier("editRemoveAttachment_\(index)")
+                    }
+                }
+                ForEach(addedAttachments) { attachment in
+                    Group {
+                        if let data = attachment.previewPNGData, let image = UIImage(data: data) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 64, height: 64)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+                        } else {
+                            filePill(attachment)
+                        }
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        removeButton { addedAttachments.removeAll { $0.id == attachment.id } }
+                            .accessibilityLabel("Remove \(attachment.name)")
+                    }
+                }
+                PhotosPicker(selection: $pickedPhotos, maxSelectionCount: 10, matching: .images) {
+                    Image(systemName: "photo.badge.plus")
+                        .font(.system(size: 18))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(width: 64, height: 64)
+                        .background(palette.panel, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(palette.borderStrong, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                        )
+                }
+                .accessibilityLabel("Add images")
+                .accessibilityIdentifier("editAddImagesButton")
+            }
+            .padding(.top, 10)
+            .padding(.trailing, 10)
+        }
+        .onChange(of: pickedPhotos) { _, items in
+            guard !items.isEmpty else { return }
+            pickedPhotos = []
+            Task { @MainActor in
+                for item in items {
+                    guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+                    let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "png"
+                    let suffix = String(UUID().uuidString.prefix(4)).lowercased()
+                    addedAttachments.append(ComposerAttachment(
+                        id: UUID().uuidString,
+                        name: "image-\(addedAttachments.count + 1)-\(suffix).\(ext)",
+                        kind: "image",
+                        sizeBytes: data.count,
+                        filePath: nil,
+                        lineNote: nil,
+                        previewPNGData: data
+                    ))
+                }
+            }
+        }
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    if !message.attachments.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 6) {
-                                ForEach(message.attachments) { attachment in
-                                    HStack(spacing: 5) {
-                                        Image(systemName: attachment.kind == "comment" ? "text.bubble" : "paperclip")
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(palette.foregroundSubtle)
-                                        Text(attachment.name)
-                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                            .foregroundStyle(palette.foreground)
-                                            .lineLimit(1)
-                                    }
-                                    .padding(.horizontal, 9)
-                                    .padding(.vertical, 5)
-                                    .background(palette.panel, in: Capsule())
-                                    .overlay(Capsule().strokeBorder(palette.borderStrong, lineWidth: 1))
-                                }
-                            }
-                        }
-                    }
+                    attachmentsEditor
 
                     TextEditor(text: $draft)
                         .font(.system(size: 15))
@@ -663,7 +796,7 @@ private struct EditUserMessageSheet: View {
     private func submit(text: String, workspaceMode: String) {
         guard !isSubmitting else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || !message.attachments.isEmpty else { return }
+        guard !trimmed.isEmpty || hasAttachments else { return }
         isSubmitting = true
         errorText = nil
         isEditorFocused = false
@@ -673,7 +806,9 @@ private struct EditUserMessageSheet: View {
                     messageId: message.id,
                     newText: text,
                     workspaceMode: workspaceMode,
-                    quotes: message.quotes ?? []
+                    quotes: message.quotes ?? [],
+                    keptAttachmentIndices: keptAttachmentIndices,
+                    newAttachments: addedAttachments
                 )
                 isSubmitting = false
                 if result.isBlocked {
@@ -689,6 +824,58 @@ private struct EditUserMessageSheet: View {
                 isSubmitting = false
                 errorText = "Couldn't edit message: \(error.localizedDescription)"
             }
+        }
+    }
+}
+
+/// Square media thumbnail for a user-row attachment; host attachments are read once and cached by the store.
+struct UserAttachmentThumbnail: View {
+    let store: AppStore
+    let messageId: String
+    let index: Int
+    let attachment: ComposerAttachment
+    var side: CGFloat = 72
+    @Environment(\.zcodePalette) private var palette
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        ZStack {
+            palette.panel
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if failed {
+                Image(systemName: "photo")
+                    .font(.system(size: 18))
+                    .foregroundStyle(palette.foregroundMuted)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .frame(width: side, height: side)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+        .task(id: "\(messageId)#\(index)") { await load() }
+    }
+
+    private func load() async {
+        guard image == nil else { return }
+        var data = attachment.previewPNGData
+        if data == nil, let path = attachment.filePath {
+            data = try? Data(contentsOf: URL(fileURLWithPath: path))
+        }
+        if data == nil {
+            data = try? await store.v4ReadUserAttachment(messageId: messageId, index: index).data
+        }
+        if let data, let decoded = UIImage(data: data) {
+            let shortest = max(1, min(decoded.size.width, decoded.size.height))
+            let scale = min(1, side * 3 / shortest)
+            let target = CGSize(width: decoded.size.width * scale, height: decoded.size.height * scale)
+            image = await decoded.byPreparingThumbnail(ofSize: target) ?? decoded
+        } else {
+            failed = true
         }
     }
 }

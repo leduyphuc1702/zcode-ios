@@ -581,68 +581,28 @@ extension AppStore {
 
         case .text:
             do {
-                var accumulated = ""
-                var offset = 0
-                var totalBytes = knownSize ?? 0
-                var hostTruncated = false
-                var detectedBinary = false
-
-                while offset < Self.inspectorMaxTextBytes {
-                    let remaining = Self.inspectorMaxTextBytes - offset
-                    let chunkLen = min(Self.inspectorTextChunkBytes, remaining)
-                    let val = try await rpcClient.call(
-                        channel: "file",
-                        method: "readTextFile",
-                        args: [.fromJSONObject([
-                            "path": node.path,
-                            "offset": offset,
-                            "length": chunkLen
-                        ])],
-                        timeoutSec: 8.0
-                    )
-                    guard let dict = val.decodeJSONDictionary() else {
-                        throw NSError(domain: "ZCodeInspector", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unexpected response from host file reader."])
-                    }
-                    if let tb = Self.jsonInt(dict["totalBytes"]) {
-                        totalBytes = tb
-                    }
-                    if (dict["isBinary"] as? Bool) == true {
-                        detectedBinary = true
-                        break
-                    }
-                    let chunk = (dict["content"] as? String) ?? ""
-                    let bytesRead = Self.jsonInt(dict["bytesRead"]) ?? chunk.utf8.count
-                    let truncated = (dict["truncated"] as? Bool) ?? false
-
-                    accumulated += chunk
-                    offset += bytesRead
-                    hostTruncated = truncated
-
-                    if !truncated || bytesRead <= 0 || offset >= totalBytes {
-                        break
-                    }
-                }
+                let read = try await readHostTextFile(path: node.path)
 
                 outcome.isLoading = false
                 outcome.didAttemptLoad = true
-                outcome.totalBytes = totalBytes
-                outcome.loadedBytes = offset
+                outcome.totalBytes = read.totalBytes
+                outcome.loadedBytes = read.bytesRead
 
-                if detectedBinary {
+                if read.isBinary {
                     outcome.isBinary = true
                     outcome.isTruncated = false
                     state.fileStates[node.id] = outcome
                     _ = updateFileNode(id: node.id) { n in
                         n.textContent = nil
-                        n.sizeBytes = totalBytes
+                        n.sizeBytes = read.totalBytes
                     }
                 } else {
                     outcome.isBinary = false
-                    outcome.isTruncated = hostTruncated || (offset < totalBytes)
+                    outcome.isTruncated = read.isTruncated
                     state.fileStates[node.id] = outcome
                     _ = updateFileNode(id: node.id) { n in
-                        n.textContent = accumulated
-                        n.sizeBytes = totalBytes
+                        n.textContent = read.text
+                        n.sizeBytes = read.totalBytes
                     }
                 }
             } catch {
@@ -654,7 +614,81 @@ extension AppStore {
         }
     }
 
-    private func loadHostImageBytes(path: String, expectedSize: Int) async throws -> (Data, String?) {
+    /// Chunked `file.readTextFile` read shared by the Files explorer and the
+    /// preview tabs (works for any absolute host path, inside or outside the tree).
+    public struct HostTextFileRead: Equatable {
+        public var text: String
+        public var bytesRead: Int
+        public var totalBytes: Int
+        public var isBinary: Bool
+        public var isTruncated: Bool
+
+        public init(text: String, bytesRead: Int, totalBytes: Int, isBinary: Bool, isTruncated: Bool) {
+            self.text = text
+            self.bytesRead = bytesRead
+            self.totalBytes = totalBytes
+            self.isBinary = isBinary
+            self.isTruncated = isTruncated
+        }
+    }
+
+    func readHostTextFile(
+        path: String,
+        maxBytes: Int = AppStore.inspectorMaxTextBytes,
+        chunkBytes: Int = AppStore.inspectorTextChunkBytes
+    ) async throws -> HostTextFileRead {
+        var accumulated = ""
+        var offset = 0
+        var totalBytes = 0
+        var hostTruncated = false
+        var detectedBinary = false
+
+        while offset < maxBytes {
+            let remaining = maxBytes - offset
+            let chunkLen = min(chunkBytes, remaining)
+            let val = try await rpcClient.call(
+                channel: "file",
+                method: "readTextFile",
+                args: [.fromJSONObject([
+                    "path": path,
+                    "offset": offset,
+                    "length": chunkLen
+                ])],
+                timeoutSec: 8.0
+            )
+            guard let dict = val.decodeJSONDictionary() else {
+                throw NSError(domain: "ZCodeInspector", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unexpected response from host file reader."])
+            }
+            if let tb = Self.jsonInt(dict["totalBytes"]) {
+                totalBytes = tb
+            }
+            if (dict["isBinary"] as? Bool) == true {
+                detectedBinary = true
+                break
+            }
+            let chunk = (dict["content"] as? String) ?? ""
+            let bytesRead = Self.jsonInt(dict["bytesRead"]) ?? chunk.utf8.count
+            let truncated = (dict["truncated"] as? Bool) ?? false
+
+            accumulated += chunk
+            offset += bytesRead
+            hostTruncated = truncated
+
+            if !truncated || bytesRead <= 0 || offset >= totalBytes {
+                break
+            }
+        }
+
+        return HostTextFileRead(
+            text: accumulated,
+            bytesRead: offset,
+            totalBytes: totalBytes,
+            isBinary: detectedBinary,
+            isTruncated: detectedBinary ? false : (hostTruncated || offset < totalBytes)
+        )
+    }
+
+    func loadHostImageBytes(path: String, expectedSize: Int) async throws -> (Data, String?) {
         if expectedSize > 0 && expectedSize <= Self.inspectorInlineMediaPreviewLimit {
             if let val = try? await rpcClient.call(
                 channel: "file",
@@ -677,7 +711,7 @@ extension AppStore {
         return (raw, nil)
     }
 
-    private func loadHostPDFBytes(path: String, expectedSize: Int) async throws -> Data {
+    func loadHostPDFBytes(path: String, expectedSize: Int) async throws -> Data {
         do {
             let raw = try await readFileBytesInRanges(
                 path: path,
@@ -703,7 +737,7 @@ extension AppStore {
         return data
     }
 
-    private func readFileBytesInRanges(path: String, expectedSize: Int, maxBytes: Int) async throws -> Data {
+    func readFileBytesInRanges(path: String, expectedSize: Int, maxBytes: Int) async throws -> Data {
         let targetLimit = expectedSize > 0 ? min(expectedSize, maxBytes) : maxBytes
         var result = Data()
         if expectedSize > 0 && expectedSize <= maxBytes {

@@ -14,6 +14,7 @@ public struct AgentChatCanvasView: View {
     /// false once the reader deliberately scrolls up into history.
     @State private var isPinnedToTranscriptBottom: Bool = true
     /// Geometry used to tell "content grew" (keep following) from "reader scrolled up" (stop following).
+    @State private var transcriptViewportTopY: CGFloat = 0
     @State private var transcriptViewportBottomY: CGFloat = 0
     @State private var transcriptContentBottomY: CGFloat = 0
     @State private var transcriptContentHeight: CGFloat = 0
@@ -55,6 +56,23 @@ public struct AgentChatCanvasView: View {
                                         if session.messages.isEmpty {
                                             emptySessionHero
                                         } else {
+                                            if store.canLoadOlderMessages {
+                                                Button {
+                                                    store.loadOlderMessages(userInitiated: true)
+                                                } label: {
+                                                    HStack(spacing: 8) {
+                                                        ProgressView()
+                                                            .controlSize(.small)
+                                                        Text("Load earlier messages")
+                                                            .font(.system(size: 13))
+                                                            .foregroundStyle(palette.foregroundSubtle)
+                                                    }
+                                                    .frame(maxWidth: .infinity, minHeight: 36)
+                                                    .contentShape(Rectangle())
+                                                }
+                                                .buttonStyle(.plain)
+                                                .accessibilityIdentifier("chatLoadOlderIndicator")
+                                            }
                                             let bars = AppStore.turnActionBars(session.messages, fromHost: store.v4Owns(session.id), running: session.status == .running)
                                             ForEach(session.messages) { message in
                                                 ChatTurnCardView(store: store, message: message, actionBar: bars[message.id])
@@ -134,20 +152,23 @@ public struct AgentChatCanvasView: View {
                                 .scrollDismissesKeyboard(.interactively)
                                 .background(
                                     GeometryReader { proxy in
-                                        Color.clear.preference(
-                                            key: ChatTranscriptViewportBottomKey.self,
-                                            value: proxy.frame(in: .global).maxY
-                                        )
+                                        Color.clear
+                                            .preference(key: ChatTranscriptViewportBottomKey.self, value: proxy.frame(in: .global).maxY)
+                                            .preference(key: ChatTranscriptViewportTopKey.self, value: proxy.frame(in: .global).minY)
                                     }
                                 )
                                 .onPreferenceChange(ChatTranscriptViewportBottomKey.self) { value in
                                     transcriptViewportBottomY = value
                                     refreshTranscriptPinState()
                                 }
+                                .onPreferenceChange(ChatTranscriptViewportTopKey.self) { value in
+                                    transcriptViewportTopY = value
+                                }
                                 .onPreferenceChange(ChatTranscriptContentMetricsKey.self) { metrics in
                                     transcriptContentBottomY = metrics.contentBottomY
                                     transcriptContentHeight = metrics.contentHeight
                                     refreshTranscriptPinState()
+                                    loadOlderHistoryIfNearTop()
                                     // Images / code blocks / syntax highlighting can grow the transcript without a
                                     // message delta. While parked at the bottom, keep the newest row visible.
                                     if isPinnedToTranscriptBottom, transcriptContentBottomY + chatBottomContentInset(session) - transcriptViewportBottomY > Self.transcriptPinEnterDistance {
@@ -699,9 +720,21 @@ public struct AgentChatCanvasView: View {
     private static let transcriptPinEnterDistance: CGFloat = 12
     /// Distance after which a deliberate scroll-up unpins streaming auto-follow (hysteresis avoids flapping).
     private static let transcriptPinExitDistance: CGFloat = 48
+    /// How far above the viewport top the oldest loaded row may sit before the previous page is requested.
+    private static let olderHistoryPrefetchDistance: CGFloat = 600
 
     private func chatBottomContentInset(_ session: AgentTaskSession) -> CGFloat {
         (store.showTodoTracker && session.todos.contains(where: { $0.status != "completed" })) ? 46 : 12
+    }
+
+    /// Desktop pages history in as the reader nears the top (`conversationRowsRangeV4`); a short window that
+    /// doesn't fill the viewport keeps paging until it does or the history is exhausted.
+    private func loadOlderHistoryIfNearTop() {
+        guard transcriptContentHeight > 0, transcriptViewportBottomY > 0, store.canLoadOlderMessages else { return }
+        let contentTopY = transcriptContentBottomY - transcriptContentHeight
+        if contentTopY >= transcriptViewportTopY - Self.olderHistoryPrefetchDistance {
+            store.loadOlderMessages()
+        }
     }
 
     private func resetTranscriptScrollTracking(for sessionId: String) {
@@ -1003,6 +1036,12 @@ public struct AgentChatCanvasView: View {
 
 /// Bottom edge of the transcript viewport in global coordinates.
 private struct ChatTranscriptViewportBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// Top edge of the transcript viewport in global coordinates.
+private struct ChatTranscriptViewportTopKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }

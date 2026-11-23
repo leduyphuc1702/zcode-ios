@@ -275,7 +275,7 @@ public struct FileExplorerAndCodeViewer: View {
 
             if isPreviewableRich {
                 Button {
-                    store.activeInspectorTab = .preview
+                    store.openFileInInspector(pathOrId: file.path, preferPreview: true)
                 } label: {
                     Label("Preview", systemImage: "eye.fill")
                         .font(.system(size: 11.5, weight: .semibold))
@@ -493,7 +493,7 @@ public struct FileExplorerAndCodeViewer: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 20)
             Button {
-                store.activeInspectorTab = .preview
+                store.openFileInInspector(pathOrId: file.path, preferPreview: true)
             } label: {
                 Text("Open in Viewer")
                     .font(.system(size: 13, weight: .semibold))
@@ -683,6 +683,7 @@ public struct FileExplorerAndCodeViewer: View {
         }
         let mediaKind = liveState.effectiveMediaKind(for: node)
         if switchToPreviewForMedia && (mediaKind == .image || mediaKind == .pdf) {
+            _ = store.openPreviewTab(path: node.path, workspaceNode: node)
             store.activeInspectorTab = .preview
         }
         if store.isLiveHostConnected {

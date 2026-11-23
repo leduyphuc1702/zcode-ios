@@ -165,6 +165,9 @@ public final class AppStore {
     public var fileTree: [WorkspaceFileNode]
     public var selectedFileId: String = ""
     public var openFileIds: [String] = []
+    /// Desktop-style side-pane preview tabs: every opened file/image/PDF keeps its
+    /// own tab, including absolute host paths outside the workspace tree.
+    public var previewTabs = InspectorPreviewTabs()
     public var inlineComments: [InlineCodeComment] = []
 
     public var gitChanges: [GitChangedFile]
@@ -268,9 +271,11 @@ public final class AppStore {
             self.expandedProjectIds = ["proj-zcode-core", "proj-gateway-rs"]
             self.sessions = SeedWorkspaceFactory.defaultSessions()
             self.activeSessionId = "task-rpc-refactor"
-            self.fileTree = SeedWorkspaceFactory.defaultFileTree()
+            let seededTree = SeedWorkspaceFactory.defaultFileTree()
+            self.fileTree = seededTree
             self.selectedFileId = "file-socket-protocol"
             self.openFileIds = ["file-socket-protocol", "file-arch-png", "file-spec-pdf"]
+            self.previewTabs = InspectorPreviewTabs.fixtureTabs(from: seededTree, selecting: "file-socket-protocol")
             self.gitChanges = SeedWorkspaceFactory.defaultGitChanges()
             self.gitCommits = SeedWorkspaceFactory.defaultGitCommits()
             self.gitBranches = ["feat/native-rpc-v4", "main", "release/3.16.3", "fix/relay-crc32"]
@@ -299,6 +304,7 @@ public final class AppStore {
             self.fileTree = []
             self.selectedFileId = ""
             self.openFileIds = []
+            self.previewTabs = InspectorPreviewTabs()
             self.gitChanges = []
             self.gitCommits = []
             self.gitBranches = ["main"]
@@ -1627,29 +1633,16 @@ public final class AppStore {
     // MARK: - Inspector Actions (Files, Inline Code Comments, Git, Terminal)
 
     public func openFileInInspector(pathOrId: String, preferPreview: Bool = false) {
-        let all = flattenedFiles
-        if let match = all.first(where: { $0.id == pathOrId || $0.path == pathOrId || $0.path.hasSuffix(pathOrId) }) {
-            selectedFileId = match.id
-            if !openFileIds.contains(match.id) {
-                openFileIds.append(match.id)
-            }
-            if preferPreview || match.kind == .image || match.kind == .pdf || match.kind == .csv {
-                activeInspectorTab = .preview
-            } else {
-                activeInspectorTab = .files
-            }
-            if !isUITestSeededMode, !match.isDirectory, match.textContent == nil, match.binaryData == nil {
-                let targetId = match.id
-                let targetPath = match.path
-                Task { @MainActor in
-                    await self.loadRemoteFileContentIfNeeded(fileId: targetId, filePath: targetPath)
-                }
-            }
-        } else {
-            activeInspectorTab = .files
-        }
+        let tab = openPreviewTab(path: pathOrId)
+        activeInspectorTab = .preview
         mobilePage = .chat
         showInspectorSheet = true
+
+        guard !isUITestSeededMode else { return }
+        let tabId = tab.id
+        Task { @MainActor in
+            await self.loadPreviewTabContentIfNeeded(id: tabId)
+        }
     }
 
     public func addInlineCodeComment(filePath: String, startLine: Int, endLine: Int, comment: String, snippet: String) {
@@ -2110,6 +2103,7 @@ public final class AppStore {
             self.fileTree = []
             self.openFileIds = []
             self.selectedFileId = ""
+            self.previewTabs.removeAll()
             self.gitChanges = []
             self.gitCommits = []
             self.terminalTabs = []

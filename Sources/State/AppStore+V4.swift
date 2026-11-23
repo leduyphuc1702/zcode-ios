@@ -30,6 +30,10 @@ final class V4SyncState {
     var userAttachmentRefs: [String: [[String: Any]]] = [:]
     var foregroundExecutionId: String?
     var loadingOlder = false
+    /// Bytes of user-row attachments already read from the host, keyed by attachment `ref`.
+    var attachmentData: [String: (data: Data, mimeType: String)] = [:]
+    /// Oldest row id whose older page last failed; automatic paging pauses there until the window changes.
+    var olderFailedBeforeRowId: Int?
     /// Read-only child conversation shown in the subagent pane (`subscribeConversationV4` on `childSessionId`).
     var child: V4ConversationState?
     var childAwaitingAck = false
@@ -332,10 +336,11 @@ extension AppStore {
         }
     }
 
-    /// Loads up to 200 older transcript rows before the current window.
-    public func loadOlderMessages() {
+    /// Loads up to 200 older transcript rows before the current window. `userInitiated` retries a page that failed.
+    public func loadOlderMessages(userInitiated: Bool = false) {
         guard let conv = v4Sync.conversation, conv.hasOlderRows, !v4Sync.loadingOlder,
               let oldest = conv.rows.first.flatMap({ ZCodeV4.int($0["rowId"]) }) else { return }
+        if !userInitiated, v4Sync.olderFailedBeforeRowId == oldest { return }
         v4Sync.loadingOlder = true
         var arg = v4WorkspaceArg(v4Sync.conversationWorkspacePath, v4Sync.conversationWorkspaceIdentity)
         arg["sessionId"] = conv.sessionId
@@ -343,13 +348,16 @@ extension AppStore {
         arg["limit"] = ZCodeV4.rowsRangeMaxLimit
         Task { @MainActor in
             defer { self.v4Sync.loadingOlder = false }
-            guard let value = try? await self.rpcClient.call(channel: "zcode-agent", method: "conversationRowsRangeV4", args: [.fromJSONObject(arg)], timeoutSec: 15),
-                  let dict = value.decodeJSONDictionary(),
-                  var current = self.v4Sync.conversation, current.sessionId == conv.sessionId else { return }
-            if current.prepend(olderRows: (dict["rows"] as? [[String: Any]]) ?? [], atLogEpoch: (dict["atLogEpoch"] as? String) ?? "") {
-                self.v4Sync.conversation = current
-                self.v4Publish()
+            let value = try? await self.rpcClient.call(channel: "zcode-agent", method: "conversationRowsRangeV4", args: [.fromJSONObject(arg)], timeoutSec: 15)
+            guard var current = self.v4Sync.conversation, current.sessionId == conv.sessionId else { return }
+            guard let dict = value?.decodeJSONDictionary(),
+                  current.prepend(olderRows: (dict["rows"] as? [[String: Any]]) ?? [], atLogEpoch: (dict["atLogEpoch"] as? String) ?? "") else {
+                self.v4Sync.olderFailedBeforeRowId = oldest
+                return
             }
+            self.v4Sync.olderFailedBeforeRowId = nil
+            self.v4Sync.conversation = current
+            self.v4Publish()
         }
     }
 
@@ -768,22 +776,32 @@ extension AppStore {
     ///
     /// Returns only after the host ACK; the caller must not truncate local rows itself — the host snapshot after the
     /// command is authoritative (`editUserQuery` rewinds host-side turns, so following rows disappear on next publish).
+    ///
+    /// `keptAttachmentIndices` selects which of the row's original attachments survive (all when nil, like the
+    /// desktop editor before any removal); `newAttachments` are uploaded and appended after them.
     func v4EditUserQuery(
         messageId: String,
         newText: String,
         workspaceMode: String,
-        quotes: [ConversationQuote]
+        quotes: [ConversationQuote],
+        keptAttachmentIndices: [Int]? = nil,
+        newAttachments: [ComposerAttachment] = []
     ) async throws -> V4EditUserQueryResult {
         guard let session = activeSession, v4Owns(session.id),
               let target = v4Sync.rowTargets[messageId], target["entityId"] != nil else {
             throw V4CommandError(status: "unavailable", reasonCode: nil, message: "This message can't be edited on the host right now.")
+        }
+        let original = v4Sync.userAttachmentRefs[messageId] ?? []
+        var refs = Self.keptAttachmentRefs(original, indices: keptAttachmentIndices)
+        if !newAttachments.isEmpty {
+            refs += try await v4UploadAttachments(newAttachments, sessionId: session.id, workspacePath: session.workspacePath)
         }
         let payload = Self.editUserQueryPayload(
             target: target,
             newText: newText,
             workspaceMode: workspaceMode,
             quotes: quotes,
-            attachmentRefs: v4Sync.userAttachmentRefs[messageId] ?? [],
+            attachmentRefs: refs,
             selection: modelSelection(for: session)
         )
         let ack = try await v4Command(
@@ -802,6 +820,56 @@ extension AppStore {
         }
         return outcome
     }
+
+    static func keptAttachmentRefs(_ refs: [[String: Any]], indices: [Int]?) -> [[String: Any]] {
+        guard let indices else { return refs }
+        return indices.filter { refs.indices.contains($0) }.map { refs[$0] }
+    }
+
+    /// MIME type of a user-row attachment as recorded by the host.
+    func v4UserAttachmentMimeType(messageId: String, index: Int) -> String? {
+        guard let refs = v4Sync.userAttachmentRefs[messageId], refs.indices.contains(index) else { return nil }
+        return refs[index]["mime"] as? String
+    }
+
+    /// Reads a user-row attachment from the host in 512 KB pages (`conversationAttachmentReadV4`, desktop `_Ue`).
+    func v4ReadUserAttachment(messageId: String, index: Int) async throws -> (data: Data, mimeType: String) {
+        guard let conv = v4Sync.conversation, let refs = v4Sync.userAttachmentRefs[messageId], refs.indices.contains(index),
+              let ref = refs[index]["ref"] as? String,
+              let target = v4Sync.rowTargets[messageId], let entityId = target["entityId"] as? String,
+              let rowId = ZCodeV4.int(target["rowId"]) else {
+            throw V4CommandError(status: "unavailable", reasonCode: nil, message: "This attachment isn't available from the host.")
+        }
+        if let cached = v4Sync.attachmentData[ref] { return cached }
+        var mimeType = (refs[index]["mime"] as? String) ?? "application/octet-stream"
+        var arg = v4WorkspaceArg(v4Sync.conversationWorkspacePath, v4Sync.conversationWorkspaceIdentity)
+        arg["sessionId"] = conv.sessionId
+        arg["ref"] = ref
+        arg["target"] = ["rowId": rowId, "entityId": entityId]
+        arg["attachmentIndex"] = index
+        arg["limit"] = Self.attachmentReadPageBytes
+        var data = Data()
+        var offset = 0
+        while true {
+            arg["offset"] = offset
+            let page = try await rpcClient.call(channel: "zcode-agent", method: "conversationAttachmentReadV4", args: [.fromJSONObject(arg)], timeoutSec: 30).decodeJSONDictionary() ?? [:]
+            guard let chunk = (page["dataBase64"] as? String).flatMap({ Data(base64Encoded: $0) }) else {
+                throw V4CommandError(status: "failed", reasonCode: nil, message: "The host returned an unreadable attachment page.")
+            }
+            if let type = page["mediaType"] as? String, !type.isEmpty { mimeType = type }
+            data.append(chunk)
+            guard let next = ZCodeV4.int(page["nextOffset"]), next > offset, !chunk.isEmpty,
+                  data.count < Self.attachmentReadMaxBytes else { break }
+            offset = next
+        }
+        if v4Sync.attachmentData.count >= Self.attachmentCacheLimit { v4Sync.attachmentData.removeAll() }
+        v4Sync.attachmentData[ref] = (data, mimeType)
+        return (data, mimeType)
+    }
+
+    private static let attachmentReadPageBytes = 512 * 1024
+    private static let attachmentReadMaxBytes = 32 * 1024 * 1024
+    private static let attachmentCacheLimit = 40
 
     // MARK: - Subagent child conversation (read-only pane)
 
