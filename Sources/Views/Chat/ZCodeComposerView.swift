@@ -1285,7 +1285,7 @@ public struct ZCodeComposerView: View {
                     .foregroundStyle(palette.foregroundSubtle)
                     .frame(width: 24)
 
-                Text(session.title)
+                Text(session.displayTitle)
                     .font(.system(size: 14, weight: .regular))
                     .foregroundStyle(palette.foreground)
                     .lineLimit(1)

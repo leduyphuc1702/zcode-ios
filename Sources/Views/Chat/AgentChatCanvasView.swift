@@ -211,7 +211,7 @@ public struct AgentChatCanvasView: View {
                         .accessibilityIdentifier("subagentDrawerBackdrop")
                         .onTapGesture {
                             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
-                                store.showSubagentDrawer = false
+                                store.closeSubagentSession()
                             }
                         }
                         .transition(.opacity)
@@ -233,7 +233,7 @@ public struct AgentChatCanvasView: View {
                                     if value.translation.width > 76 && abs(value.translation.height) < 64 {
                                         store.playImpactHaptic(.light)
                                         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
-                                            store.showSubagentDrawer = false
+                                            store.closeSubagentSession()
                                         }
                                     }
                                 }
@@ -348,7 +348,7 @@ public struct AgentChatCanvasView: View {
                 .foregroundStyle(palette.foregroundSubtle)
                 .padding(.leading, 4)
 
-            Text(store.activeSession?.title ?? store.activeProject?.name ?? "Workspace")
+            Text(store.activeSession?.displayTitle ?? "New task")
                 .font(.system(size: 14.5, weight: .medium))
                 .foregroundStyle(palette.foreground)
                 .lineLimit(1)
@@ -368,15 +368,10 @@ public struct AgentChatCanvasView: View {
                         Label(session.pinned ? "Unpin task" : "Pin task", systemImage: session.pinned ? "pin.slash" : "pin")
                     }
                     Button {
-                        store.forkSession(session.id)
-                    } label: {
-                        Label("Fork session", systemImage: "arrow.triangle.branch")
-                    }
-                    Button {
                         showTelemetrySheet = true
                     } label: {
                         let contextPct = session.contextUsage.map { Int(($0.fraction * 100).rounded()) } ?? session.contextUsedPercent
-                        Label("Checkpoints & Context (\(contextPct)%)", systemImage: "clock.arrow.circlepath")
+                        Label("Context (\(contextPct)%)", systemImage: "gauge.with.dots.needle.33percent")
                     }
                 }
                 Divider()
@@ -832,38 +827,9 @@ public struct AgentChatCanvasView: View {
                         }
                     }
 
-                    Section("Git Checkpoints") {
-                        if session.checkpoints.isEmpty {
-                            Text("Checkpoints are recorded automatically after file edits.")
-                                .font(.system(size: 13))
-                                .foregroundStyle(palette.foregroundSubtle)
-                        } else {
-                            ForEach(session.checkpoints) { cp in
-                                Button {
-                                    store.rewindToCheckpoint(cp)
-                                    showTelemetrySheet = false
-                                } label: {
-                                    HStack {
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(cp.label)
-                                                .font(.system(size: 13.5, weight: .medium))
-                                                .foregroundStyle(palette.foreground)
-                                            Text("\(cp.commitShortHash) • \(cp.filesChanged) files")
-                                                .font(.system(size: 11.5, design: .monospaced))
-                                                .foregroundStyle(palette.foregroundSubtle)
-                                        }
-                                        Spacer()
-                                        Text("Rewind")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(palette.accentBlue)
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
-            .navigationTitle("Context & Checkpoints")
+            .navigationTitle("Context")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

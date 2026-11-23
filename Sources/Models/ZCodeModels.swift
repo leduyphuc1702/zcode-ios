@@ -19,7 +19,7 @@ public enum TaskListViewMode: String, Codable, CaseIterable, Identifiable {
     public var title: String {
         switch self {
         case .byProject: return "By project"
-        case .grouped: return "Grouped"
+        case .grouped: return "By group"
         case .timeline: return "Recently updated"
         }
     }
@@ -278,6 +278,70 @@ public struct WorkspaceProject: Identifiable, Codable, Equatable {
     public var isDirty: Bool
     public var isRemote: Bool
     public var pinned: Bool
+}
+
+/// A ZCode project from `project.readTree` (`projects` table), distinct from an open workspace tab.
+public struct SidebarProject: Identifiable, Codable, Equatable {
+    public var id: String
+    public var hostId: String
+    public var name: String
+    public var position: Int
+    public var pinned: Bool
+    public var roots: [String]
+    public var primaryRoot: String?
+
+    public init(id: String, hostId: String = "local", name: String, position: Int = 0, pinned: Bool = false, roots: [String], primaryRoot: String? = nil) {
+        self.id = id
+        self.hostId = hostId
+        self.name = name
+        self.position = position
+        self.pinned = pinned
+        self.roots = roots
+        self.primaryRoot = primaryRoot
+    }
+
+    public var rootPath: String { primaryRoot ?? roots.first ?? "" }
+}
+
+/// `task-groups.read()` → `{groups, members, order}` (By group view).
+public struct TaskGroupsStructure: Equatable {
+    public struct Group: Equatable, Identifiable {
+        public var id: String
+        public var title: String
+        public var color: String?
+    }
+    public struct Member: Equatable {
+        public var groupId: String
+        public var workspaceKey: String
+        public var taskId: String
+        public var sortOrder: Double
+    }
+    public struct OrderEntry: Equatable {
+        public var type: String
+        public var key: String
+        public var sortOrder: Double
+    }
+    public var groups: [Group] = []
+    public var members: [Member] = []
+    public var order: [OrderEntry] = []
+
+    public init(groups: [Group] = [], members: [Member] = [], order: [OrderEntry] = []) {
+        self.groups = groups
+        self.members = members
+        self.order = order
+    }
+}
+
+public enum SidebarGroupNode: Identifiable {
+    case task(AgentTaskSession)
+    case group(TaskGroupsStructure.Group, tasks: [AgentTaskSession])
+
+    public var id: String {
+        switch self {
+        case .task(let task): return "task:\(task.id)"
+        case .group(let group, _): return "group:\(group.id)"
+        }
+    }
 }
 
 // MARK: - Execution Modes, Models & Thought Levels
@@ -830,6 +894,29 @@ public struct ToolCallItem: Identifiable, Codable, Equatable {
     public var subagentRunId: String?
     /// Raw host tool name (e.g. "Read", "Edit", "Bash", "Grep", "mcp__x__y") for 1:1 labels and grouping.
     public var toolName: String? = nil
+    /// V4 wire status (`inputStreaming|pendingApproval|running|success|error|cancelled`).
+    public var rawStatus: String? = nil
+    public var inputJSON: String? = nil
+    public var errorText: String? = nil
+    /// Whole tool row as pretty JSON, shown by the generic renderer.
+    public var rawJSON: String? = nil
+    /// New file content for Write/create calls without a structured patch.
+    public var contentPreview: String? = nil
+    public var agentName: String? = nil
+    public var agentDescription: String? = nil
+    public var mcpServer: String? = nil
+    public var mcpTool: String? = nil
+    public var mcpDescription: String? = nil
+    public var webURL: String? = nil
+    public var searchLabel: String? = nil
+    public var todoItems: [TodoChecklistItem]? = nil
+    public var questionAnswers: [ToolQuestionAnswer]? = nil
+    public var skillName: String? = nil
+    public var skillArgs: String? = nil
+    public var planMarkdown: String? = nil
+    /// Set for a `subagent` row that could not be paired with its Agent tool call.
+    public var standaloneSubagentLine: String? = nil
+    public var workId: String? = nil
 
     public init(
         id: String,
@@ -866,6 +953,11 @@ public struct ToolCallItem: Identifiable, Codable, Equatable {
         self.subagentSteps = subagentSteps
         self.subagentRunId = subagentRunId
     }
+}
+
+public struct ToolQuestionAnswer: Codable, Equatable, Hashable {
+    public var question: String
+    public var answer: String?
 }
 
 public struct ComposerAttachment: Identifiable, Codable, Equatable {
@@ -1048,6 +1140,18 @@ public struct GoalObjectiveItem: Identifiable, Codable, Equatable {
     }
 }
 
+/// Live state of the read-only subagent transcript pane.
+public struct SubagentPaneState: Equatable {
+    public var sessionId: String
+    public var title: String
+    public var messages: [ChatTurnMessage] = []
+    public var status: TaskSessionStatus = .idle
+    public var statusNotice: String?
+    public var todos: [TodoChecklistItem] = []
+    public var isLoading = true
+    public var errorText: String?
+}
+
 public struct SubagentSessionRun: Identifiable, Codable, Equatable {
     public var id: String
     public var title: String
@@ -1057,6 +1161,10 @@ public struct SubagentSessionRun: Identifiable, Codable, Equatable {
     public var transcriptMarkdown: String
     public var artifactImagePath: String?
     public var timestamp: Date
+    /// Background work id used by `cancelBackgroundWork`; nil when the host offers no stop control.
+    public var controlWorkId: String? = nil
+    public var startedAt: Date? = nil
+    public var status: String = "running"
 
     public init(
         id: String,
@@ -1118,6 +1226,30 @@ public struct AgentTaskSession: Identifiable, Codable, Equatable {
     public var reasoningLevel: String?
     /// Live context window usage from the host (`snapshot.usage`); nil until the host reports it.
     public var contextUsage: ContextUsageSnapshot? = nil
+    /// ZCode project membership from `project.readTree` (`null` = project-less "Tasks" section).
+    public var treeProjectId: String? = nil
+    /// `true` once the task came from `project.readTree`, so `treeProjectId == nil` really means project-less.
+    public var inProjectTree: Bool = false
+    public var workspaceIdentity: String? = nil
+    public var workspacePurpose: String? = nil
+    public var hostId: String = "local"
+    public var forkedFromTaskId: String? = nil
+    public var cronAutomationId: String? = nil
+    public var offPeakTaskId: String? = nil
+    /// Last host outcome was `error` (`task.status === "error"`).
+    public var lastOutcomeError: Bool = false
+    public var changeAdded: Int = 0
+    public var changeRemoved: Int = 0
+    public var changeFileCount: Int = 0
+    /// Count of pending permission / user-input interactions from the sessions index.
+    public var pendingInteractionCount: Int = 0
+    public var pendingInteractionIsUserInput: Bool = false
+
+    /// `task.title || (forkedFromTaskId ? "Forked task" : "New task")`.
+    public var displayTitle: String {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "New task" : trimmed
+    }
 
     public init(
         id: String,

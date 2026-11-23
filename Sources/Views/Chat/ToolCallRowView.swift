@@ -1,6 +1,162 @@
 import SwiftUI
 
-// MARK: - Tool Call List (With Consecutive Read-Only Explore Grouping)
+// MARK: - Tool family (`qC` classifier + canonical family table)
+
+enum ToolFamily: Equatable {
+    case fileRead
+    case fileWrite
+    case shell
+    case search
+    case webFetch
+    case todo
+    case agent
+    case subagentStandalone
+    case askUser
+    case plan
+    case skill
+    case mcp
+    case generic
+
+    static func of(_ tool: ToolCallItem) -> ToolFamily {
+        if tool.standaloneSubagentLine != nil { return .subagentStandalone }
+        let name = (tool.toolName ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch name {
+        case "read", "notebookread": return .fileRead
+        case "write", "edit", "multiedit", "applypatch", "apply_patch", "notebookedit": return .fileWrite
+        case "bash", "shell": return .shell
+        case "glob", "grep", "ls", "websearch", "web_search", "toolsearch", "localtoolsearch": return .search
+        case "webfetch", "fetch", "web_fetch": return .webFetch
+        case "todoread", "todowrite", "update_plan": return .todo
+        case "agent", "task", "subagent", "spawn_agent": return .agent
+        case "askuserquestion": return .askUser
+        case "exitplanmode", "enterplanmode": return .plan
+        case "skill": return .skill
+        default: break
+        }
+        if name.hasPrefix("mcp__") || tool.mcpServer != nil || tool.kind == .mcp { return .mcp }
+        if !name.isEmpty { return .generic }
+        switch tool.kind {
+        case .readFile: return .fileRead
+        case .editFile, .writeFile: return .fileWrite
+        case .bash: return .shell
+        case .search: return .search
+        case .mcp: return .mcp
+        case .subagent: return .agent
+        case .workflow: return .generic
+        }
+    }
+
+    /// `ksn` read-only allowlist minus `Asn` mutations, redirects (`jsn`) and loops (`Msn`).
+    static func isReadOnlyShell(_ command: String) -> Bool {
+        let cmd = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cmd.isEmpty else { return false }
+        func matches(_ pattern: String) -> Bool {
+            cmd.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+        }
+        let readOnly = #"\b(rg|grep|find|ls|cat|head|tail|wc|stat|pwd|which|readlink|tree|sed\s+-n|get-childitem|gci|dir|get-content|gc|type|select-string|sls|get-location|test-path|resolve-path)\b|^git\s+(status|log|show|diff)\b"#
+        let mutating = #"\b(sed\s+-i|perl\s+-pi|tee|mv|cp|rm|mkdir|rmdir|touch|truncate|chmod|chown|remove-item|del|erase|set-content|add-content|clear-content|out-file|new-item|move-item|copy-item|rename-item|set-item)\b|^git\s+(add|commit|rm|mv|checkout|switch|restore|reset|clean|revert|cherry-pick|merge|rebase)\b"#
+        let redirect = #"(^|[^\d<])>>?\s*\S|&>\s*\S"#
+        let loop = #"\b(for|while)\b"#
+        return matches(readOnly) && !matches(mutating) && !matches(redirect) && !matches(loop)
+    }
+}
+
+extension ToolCallItem {
+    /// Pending / streaming / running rows use the running presentation (animated kind label).
+    var isRunningLike: Bool { status == .running || status == .pendingApproval }
+    var isFailed: Bool { status == .failed }
+}
+
+// MARK: - Grouping pass (`ecn`)
+
+enum ToolCallDisplayEntry: Identifiable {
+    case single(ToolCallItem)
+    case exploreGroup(id: String, items: [ToolCallItem])
+    case terminalGroup(id: String, items: [ToolCallItem])
+    case changesGroup(id: String, items: [ToolCallItem])
+
+    var id: String {
+        switch self {
+        case .single(let item): return item.id
+        case .exploreGroup(let id, _), .terminalGroup(let id, _), .changesGroup(let id, _): return id
+        }
+    }
+
+    private enum Bucket { case explore, terminal, changes }
+
+    static func group(_ tools: [ToolCallItem], explore: Bool, terminal: Bool, changes: Bool, showTodos: Bool) -> [ToolCallDisplayEntry] {
+        var result: [ToolCallDisplayEntry] = []
+        var pending: [ToolCallItem] = []
+        var pendingBucket: Bucket?
+
+        func flush() {
+            defer { pending.removeAll(); pendingBucket = nil }
+            guard let bucket = pendingBucket, !pending.isEmpty else { return }
+            if pending.count == 1 {
+                result.append(.single(pending[0]))
+                return
+            }
+            let id = "group-\(pending[0].id)"
+            switch bucket {
+            case .explore: result.append(.exploreGroup(id: id, items: pending))
+            case .terminal: result.append(.terminalGroup(id: id, items: pending))
+            case .changes: result.append(.changesGroup(id: id, items: pending))
+            }
+        }
+
+        for tool in tools {
+            let family = ToolFamily.of(tool)
+            if family == .todo && !showTodos { continue }
+            let bucket: Bucket? = {
+                switch family {
+                case .fileRead, .search, .webFetch: return explore ? .explore : nil
+                case .shell:
+                    let cmd = tool.command ?? ""
+                    if ToolFamily.isReadOnlyShell(cmd) { return explore ? .explore : nil }
+                    return terminal && !cmd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .terminal : nil
+                case .fileWrite: return changes ? .changes : nil
+                default: return nil
+                }
+            }()
+            if let bucket {
+                if bucket != pendingBucket { flush() }
+                pendingBucket = bucket
+                pending.append(tool)
+            } else {
+                flush()
+                result.append(.single(tool))
+            }
+        }
+        flush()
+        return result
+    }
+
+    /// `b7t`: "N fetches, M searches, K lists, J files".
+    static func exploreSummary(_ items: [ToolCallItem]) -> String {
+        var fetches = 0, searches = 0, lists = 0, files = 0
+        for item in items {
+            switch ToolFamily.of(item) {
+            case .webFetch: fetches += 1
+            case .search:
+                if (item.searchLabel ?? "").hasPrefix("List") { lists += 1 } else { searches += 1 }
+            case .shell:
+                let cmd = (item.command ?? "").trimmingCharacters(in: .whitespaces)
+                if cmd.hasPrefix("ls") || cmd.hasPrefix("tree") { lists += 1 }
+                else if cmd.hasPrefix("rg") || cmd.hasPrefix("grep") || cmd.hasPrefix("find") { searches += 1 }
+                else { files += 1 }
+            default: files += 1
+            }
+        }
+        var parts: [String] = []
+        if fetches > 0 { parts.append(fetches == 1 ? "1 fetch" : "\(fetches) fetches") }
+        if searches > 0 { parts.append(searches == 1 ? "1 search" : "\(searches) searches") }
+        if lists > 0 { parts.append(lists == 1 ? "1 list" : "\(lists) lists") }
+        if files > 0 { parts.append(files == 1 ? "1 file" : "\(files) files") }
+        return parts.joined(separator: ", ")
+    }
+}
+
+// MARK: - Tool call list
 
 struct ToolCallListView: View {
     @Bindable var store: AppStore
@@ -8,564 +164,912 @@ struct ToolCallListView: View {
     let workspacePath: String?
 
     @Environment(\.zcodePalette) private var palette
-    @State private var expandedToolIds: Set<String> = []
-    @State private var expandedGroupIds: Set<String> = []
+    @State private var expandedIds: Set<String> = []
 
     private var entries: [ToolCallDisplayEntry] {
-        ToolCallDisplayEntry.group(tools)
+        ToolCallDisplayEntry.group(
+            tools,
+            explore: store.toolGroupingExploreEnabled,
+            terminal: store.toolGroupingTerminalEnabled,
+            changes: store.toolGroupingChangesEnabled,
+            showTodos: store.messageStreamShowTodos
+        )
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             ForEach(entries) { entry in
                 switch entry {
                 case .single(let tool):
-                    ToolCallRowView(
-                        store: store,
-                        tool: tool,
-                        workspacePath: workspacePath,
-                        isExpanded: expandedToolIds.contains(tool.id),
-                        onToggleExpand: { toggleTool(tool.id) }
-                    )
-
-                case .exploreGroup(let id, let items, let searchCount, let fileCount):
-                    exploreGroupView(
-                        groupId: id,
-                        items: items,
-                        searchCount: searchCount,
-                        fileCount: fileCount
-                    )
+                    row(tool)
+                case .exploreGroup(let id, let items):
+                    groupView(id: id, items: items, icon: "magnifyingglass", label: "Explore", summary: exploreGroupSummary(items))
+                case .terminalGroup(let id, let items):
+                    groupView(id: id, items: items, icon: "terminal", label: "Terminal", summary: terminalGroupSummary(items))
+                case .changesGroup(let id, let items):
+                    groupView(id: id, items: items, icon: "pencil", label: "Changes", summary: changesGroupSummary(items),
+                              added: items.last?.addedLines ?? 0, removed: items.last?.removedLines ?? 0)
                 }
             }
         }
     }
 
-    private func toggleTool(_ id: String) {
+    private func row(_ tool: ToolCallItem, nested: Bool = false) -> some View {
+        ToolCallRowView(
+            store: store,
+            tool: tool,
+            workspacePath: workspacePath,
+            showIcon: !nested,
+            isExpanded: expandedIds.contains(tool.id),
+            onToggleExpand: { toggle(tool.id) }
+        )
+    }
+
+    private func toggle(_ id: String) {
         withAnimation(.easeInOut(duration: 0.15)) {
-            if expandedToolIds.contains(id) {
-                expandedToolIds.remove(id)
-            } else {
-                expandedToolIds.insert(id)
-            }
+            if expandedIds.contains(id) { expandedIds.remove(id) } else { expandedIds.insert(id) }
         }
     }
 
-    private func toggleGroup(_ id: String) {
-        withAnimation(.easeInOut(duration: 0.16)) {
-            if expandedGroupIds.contains(id) {
-                expandedGroupIds.remove(id)
-            } else {
-                expandedGroupIds.insert(id)
-            }
+    private func exploreGroupSummary(_ items: [ToolCallItem]) -> String {
+        if let running = items.last(where: \.isRunningLike) {
+            return ToolRowPresentation.make(for: running, workspacePath: workspacePath).actionSummary
         }
+        return ToolCallDisplayEntry.exploreSummary(items)
     }
 
-    private func exploreGroupView(
-        groupId: String,
-        items: [ToolCallItem],
-        searchCount: Int,
-        fileCount: Int
-    ) -> some View {
-        let isExpanded = expandedGroupIds.contains(groupId)
-        let isRunning = items.contains { $0.status == .running }
-        let hasFailure = !isRunning && items.contains { $0.status == .failed }
-        let summary = ToolCallDisplayEntry.exploreSummary(searchCount: searchCount, fileCount: fileCount)
+    private func terminalGroupSummary(_ items: [ToolCallItem]) -> String {
+        if let running = items.last(where: \.isRunningLike) {
+            return "Running · \(ToolRowPresentation.singleLine(running.command ?? ""))"
+        }
+        var text = items.count == 1 ? "1 command" : "\(items.count) commands"
+        let failed = items.filter(\.isFailed).count
+        let stopped = items.filter { $0.rawStatus == "cancelled" }.count
+        if failed > 0 { text += " · \(failed) failed" }
+        if stopped > 0 { text += " · \(stopped) stopped" }
+        return text
+    }
 
-        return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                toggleGroup(groupId)
-            } label: {
+    private func changesGroupSummary(_ items: [ToolCallItem]) -> String {
+        let files = Set(items.compactMap(\.filePath))
+        var text = files.isEmpty ? "\(items.count) tools" : (files.count == 1 ? "1 file" : "\(files.count) files")
+        if let last = items.last {
+            let verb = ToolRowPresentation.writeOperation(last).running
+            let name = last.filePath.map { ($0 as NSString).lastPathComponent } ?? ""
+            text += " · \(verb) \(name)"
+        }
+        return text
+    }
+
+    private func groupView(id: String, items: [ToolCallItem], icon: String, label: String, summary: String,
+                           added: Int = 0, removed: Int = 0) -> some View {
+        let isExpanded = expandedIds.contains(id)
+        let isRunning = items.contains(where: \.isRunningLike)
+        return VStack(alignment: .leading, spacing: 8) {
+            Button { toggle(id) } label: {
                 HStack(spacing: 8) {
-                    if isRunning {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .tint(palette.foregroundSubtle)
-                            .frame(width: 16, height: 16)
-                    } else {
-                        Image(systemName: "magnifyingglass")
-                            .font(.system(size: 13.5, weight: .light))
-                            .foregroundStyle(hasFailure ? palette.destructive : palette.foregroundMuted)
-                            .frame(width: 16, height: 16)
-                    }
-
-                    Text("Explore")
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundStyle(hasFailure ? palette.destructive : palette.foregroundSubtle)
-                        .fixedSize(horizontal: true, vertical: false)
-
-                    Text("·")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(palette.foregroundMuted)
-                        .fixedSize(horizontal: true, vertical: false)
-
+                    ToolLeadingIcon(symbol: icon, isRunning: isRunning)
+                    ToolKindLabel(text: label, isRunning: isRunning)
                     Text(summary)
-                        .font(.system(size: 13.5, weight: .regular))
-                        .foregroundStyle(palette.foregroundMuted)
+                        .font(.system(size: 14))
+                        .foregroundStyle(palette.foregroundSubtle)
                         .lineLimit(1)
                         .truncationMode(.tail)
-
-                    if isExpanded {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(palette.foregroundMuted)
+                    if !isExpanded {
+                        ToolDiffCount(added: added, removed: removed)
                     }
-
+                    ToolChevron(isExpanded: isExpanded)
                     Spacer(minLength: 0)
                 }
                 .padding(.vertical, 2)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityIdentifier("exploreToolGroup_\(groupId)")
+            .accessibilityIdentifier("toolGroup_\(id)")
 
             if isExpanded {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 8) {
                     ForEach(items) { tool in
-                        ToolCallRowView(
-                            store: store,
-                            tool: tool,
-                            workspacePath: workspacePath,
-                            isExpanded: expandedToolIds.contains(tool.id),
-                            onToggleExpand: { toggleTool(tool.id) }
-                        )
+                        row(tool, nested: true)
                     }
                 }
                 .padding(.leading, 14)
                 .overlay(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(palette.border)
-                        .frame(width: 1.5)
-                        .padding(.leading, 7)
-                        .padding(.vertical, 2)
+                    Rectangle().fill(palette.border).frame(width: 1).padding(.leading, 8)
                 }
             }
         }
     }
 }
 
-// MARK: - Single Official Compact Tool Call Row
+// MARK: - Shared row pieces (`ToolLayout`)
+
+struct ToolLeadingIcon: View {
+    let symbol: String
+    let isRunning: Bool
+    var tint: Color?
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        Group {
+            if isRunning {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(palette.foregroundSubtle)
+            } else {
+                Image(systemName: symbol)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(tint ?? palette.foregroundSubtle)
+            }
+        }
+        .frame(width: 16, height: 16)
+    }
+}
+
+/// Kind label: medium weight, subtlest colour; pulses while running.
+struct ToolKindLabel: View {
+    let text: String
+    let isRunning: Bool
+    @Environment(\.zcodePalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pulse = false
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(palette.foregroundMuted)
+            .opacity(isRunning && !reduceMotion && pulse ? 0.45 : 1)
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(4)
+            .onAppear { updatePulse() }
+            .onChange(of: isRunning) { _, _ in updatePulse() }
+    }
+
+    private func updatePulse() {
+        guard isRunning, !reduceMotion else { pulse = false; return }
+        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { pulse = true }
+    }
+}
+
+struct ToolDiffCount: View {
+    let added: Int
+    let removed: Int
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        if added > 0 || removed > 0 {
+            HStack(spacing: 4) {
+                if added > 0 { Text("+\(added)").foregroundStyle(palette.success) }
+                if removed > 0 { Text("-\(removed)").foregroundStyle(palette.destructive) }
+            }
+            .font(.system(size: 13, weight: .regular, design: .monospaced))
+            .fixedSize()
+            .layoutPriority(3)
+        }
+    }
+}
+
+struct ToolChevron: View {
+    let isExpanded: Bool
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(palette.foregroundMuted)
+            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+    }
+}
+
+// MARK: - Single tool row
 
 struct ToolCallRowView: View {
     @Bindable var store: AppStore
     let tool: ToolCallItem
     let workspacePath: String?
+    var showIcon: Bool = true
     let isExpanded: Bool
     let onToggleExpand: () -> Void
 
     @Environment(\.zcodePalette) private var palette
 
-    private var presentation: ToolRowPresentation {
-        ToolRowPresentation.make(for: tool, workspacePath: workspacePath)
-    }
-
-    private var hasExpandableDetails: Bool {
-        if let diff = tool.diffPatch, !diff.isEmpty { return true }
-        if let out = tool.output, !out.isEmpty { return true }
-        if !tool.subagentSteps.isEmpty { return true }
-        if presentation.category == .terminal, let cmd = tool.command, !cmd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return true
-        }
-        return false
-    }
-
-    private var verbColor: Color {
-        switch tool.status {
-        case .failed:
-            return palette.destructive
-        case .pendingApproval:
-            return palette.warning
-        case .running, .completed:
-            return palette.foregroundSubtle
-        }
-    }
-
-    private var leadingIconColor: Color {
-        switch tool.status {
-        case .failed:
-            return palette.destructive
-        case .pendingApproval:
-            return palette.warning
-        case .running, .completed:
-            return palette.foregroundMuted
-        }
-    }
+    private var family: ToolFamily { ToolFamily.of(tool) }
+    private var presentation: ToolRowPresentation { ToolRowPresentation.make(for: tool, workspacePath: workspacePath) }
 
     var body: some View {
-        if presentation.category == .subagent {
-            subagentRow
+        if family == .subagentStandalone {
+            Text(tool.standaloneSubagentLine ?? "")
+                .font(.system(size: 13))
+                .foregroundStyle(palette.foregroundSubtle)
+                .lineLimit(2)
+                .accessibilityIdentifier("toolRow_\(tool.id)")
         } else {
-            VStack(alignment: .leading, spacing: 6) {
-                compactRowButton
-                if isExpanded && hasExpandableDetails {
-                    expandedDetailPanel
+            VStack(alignment: .leading, spacing: 0) {
+                header
+                if isExpanded && presentation.canToggle {
+                    ToolExpandedBody(store: store, tool: tool, family: family, workspacePath: workspacePath)
+                        .padding(.top, 8)
                 }
             }
         }
     }
 
-    // MARK: - SubAgent Row
-
-    private var subagentRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                if tool.subagentRunId != nil {
-                    store.openSubagentInspector(tool.subagentRunId)
-                } else if hasExpandableDetails {
-                    onToggleExpand()
+    private var header: some View {
+        let p = presentation
+        return Button(action: activate) {
+            HStack(spacing: 7) {
+                if showIcon {
+                    ToolLeadingIcon(symbol: p.icon, isRunning: tool.isRunningLike,
+                                    tint: tool.isFailed ? palette.destructive : nil)
                 }
-            } label: {
-                HStack(spacing: 8) {
-                    if tool.status == .running {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .tint(palette.foregroundSubtle)
-                            .frame(width: 16, height: 16)
-                    } else {
-                        ZCodeRobotIconView(size: 14, color: leadingIconColor)
-                            .frame(width: 16, height: 16)
-                    }
-
-                    Text("SubAgent")
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundStyle(verbColor)
-                        .fixedSize(horizontal: true, vertical: false)
-
-                    Text(tool.title)
-                        .font(.system(size: 13.5, weight: .regular))
+                if !p.kindLabel.isEmpty {
+                    ToolKindLabel(text: p.kindLabel, isRunning: tool.isRunningLike)
+                }
+                kindDetailView(p)
+                primaryView(p)
+                if let secondary = p.secondary, !(isExpanded && p.hideSecondaryWhenOpen) {
+                    Text(secondary)
+                        .font(.system(size: 13.5, design: p.secondaryMonospaced ? .monospaced : .default))
                         .foregroundStyle(palette.foregroundMuted)
                         .lineLimit(1)
                         .truncationMode(.tail)
-
-                    Spacer(minLength: 0)
+                        .layoutPriority(1)
                 }
-                .padding(.vertical, 2)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("openSubagentTool_\(tool.id)")
-
-            if isExpanded && hasExpandableDetails {
-                expandedDetailPanel
-            }
-        }
-    }
-
-    // MARK: - Compact Single-Line Row (No Card, Official ZCode Style)
-
-    private var compactRowButton: some View {
-        Button {
-            if hasExpandableDetails {
-                onToggleExpand()
-            } else if let path = presentation.inspectableFilePath {
-                openFileInInspector(path)
-            }
-        } label: {
-            HStack(spacing: 7) {
-                leadingIconView
-
-                Text(presentation.verb)
-                    .font(.system(size: 14, weight: .regular))
-                    .foregroundStyle(verbColor)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .layoutPriority(4)
-
-                switch presentation.content {
-                case .file(let fileName, let parentPath, let icon):
-                    HStack(spacing: 5) {
-                        Image(systemName: icon.symbol)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(icon.color ?? palette.foregroundSubtle)
-                            .fixedSize()
-
-                        Text(fileName)
-                            .font(.system(size: 14, weight: .regular))
-                            .foregroundStyle(palette.foreground)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    .layoutPriority(2)
-
-                    if let parentPath, !parentPath.isEmpty {
-                        Text(parentPath)
-                            .font(.system(size: 13.5, weight: .regular))
-                            .foregroundStyle(palette.foregroundMuted)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .layoutPriority(1)
-                    }
-
-                case .command(let commandText):
-                    if !commandText.isEmpty {
-                        Text(commandText)
-                            .font(.system(size: 13.5, weight: .regular))
-                            .foregroundStyle(palette.foregroundMuted)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .layoutPriority(1)
-                    }
-
-                case .query(let primary, let secondary):
-                    if !primary.isEmpty {
-                        Text(primary)
-                            .font(.system(size: 13.5, weight: .regular))
-                            .foregroundStyle(palette.foreground)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .layoutPriority(2)
-                    }
-                    if let secondary, !secondary.isEmpty {
-                        Text(secondary)
-                            .font(.system(size: 13.5, weight: .regular))
-                            .foregroundStyle(palette.foregroundMuted)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .layoutPriority(1)
-                    }
+                ToolDiffCount(added: tool.addedLines, removed: tool.removedLines)
+                if tool.isFailed && p.showsFailedLabel {
+                    Text("Failed")
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(palette.destructive)
+                        .underline(pattern: .dot, color: palette.destructive.opacity(0.6))
+                        .fixedSize()
                 }
-
-                if tool.addedLines > 0 || tool.removedLines > 0 {
-                    HStack(spacing: 5) {
-                        if tool.addedLines > 0 {
-                            Text("+\(tool.addedLines)")
-                                .foregroundStyle(palette.success)
-                        }
-                        if tool.removedLines > 0 {
-                            Text("-\(tool.removedLines)")
-                                .foregroundStyle(palette.destructive)
-                        }
-                    }
-                    .font(.system(size: 13.5, weight: .regular, design: .monospaced))
-                    .fixedSize(horizontal: true, vertical: false)
-                    .layoutPriority(3)
+                if p.canToggle {
+                    ToolChevron(isExpanded: isExpanded)
                 }
-
                 Spacer(minLength: 0)
             }
             .padding(.vertical, 2)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier(
-            presentation.inspectableFilePath != nil ? "openToolFile_\(tool.id)" : "toolRow_\(tool.id)"
-        )
+        .disabled(!isInteractive)
+        .contextMenu { contextItems }
+        .accessibilityIdentifier(family == .agent ? "openSubagentTool_\(tool.id)" : (p.filePath != nil ? "openToolFile_\(tool.id)" : "toolRow_\(tool.id)"))
     }
 
     @ViewBuilder
-    private var leadingIconView: some View {
-        if tool.status == .running {
-            ProgressView()
-                .controlSize(.mini)
-                .tint(palette.foregroundSubtle)
-                .frame(width: 16, height: 16)
-        } else {
-            Image(systemName: presentation.leadingSymbol)
-                .font(.system(size: 13.5, weight: .light))
-                .foregroundStyle(leadingIconColor)
-                .frame(width: 16, height: 16)
+    private func kindDetailView(_ p: ToolRowPresentation) -> some View {
+        switch p.kindDetail {
+        case .agentChip(let name):
+            Text(name)
+                .font(.system(size: 13.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(ToolRowPresentation.agentColor(name))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 144, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(3)
+            if p.primary != nil {
+                Text("·").foregroundStyle(palette.foregroundMuted)
+            }
+        case .text(let text):
+            Text(text)
+                .font(.system(size: 14))
+                .foregroundStyle(palette.foregroundSubtle)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(2)
+            if p.primary != nil {
+                Text("·").foregroundStyle(palette.foregroundMuted)
+            }
+        case nil:
+            EmptyView()
         }
     }
 
-    // MARK: - Expanded Details Panel
+    @ViewBuilder
+    private func primaryView(_ p: ToolRowPresentation) -> some View {
+        switch p.primary {
+        case .file(let name, _):
+            let icon = ToolFileIconSpec.forFileName(name)
+            HStack(spacing: 5) {
+                Image(systemName: icon.symbol)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(icon.color ?? palette.foregroundSubtle)
+                Text(name)
+                    .font(.system(size: 14))
+                    .foregroundStyle(palette.foreground)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .layoutPriority(2)
+        case .text(let text, let mono):
+            Text(text)
+                .font(.system(size: 14, design: mono ? .monospaced : .default))
+                .foregroundStyle(mono ? palette.foregroundMuted : palette.foreground)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(2)
+        case nil:
+            EmptyView()
+        }
+    }
 
-    private var expandedDetailPanel: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let path = presentation.inspectableFilePath {
-                HStack(spacing: 8) {
-                    Text(path)
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .foregroundStyle(palette.foregroundMuted)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 6)
-                    Button {
-                        openFileInInspector(path)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("Open")
-                                .font(.system(size: 11.5, weight: .medium))
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 10, weight: .medium))
-                        }
+    @ViewBuilder
+    private var contextItems: some View {
+        if let error = tool.errorText, tool.isFailed {
+            Button {
+                UIPasteboard.general.string = error
+                store.showToast("Copied")
+            } label: {
+                Label("Copy error", systemImage: "doc.on.doc")
+            }
+        }
+        if let path = presentation.filePath {
+            Button {
+                openFile(path)
+            } label: {
+                Label("Open file", systemImage: "doc.text")
+            }
+        }
+        if family == .shell, let command = tool.command {
+            Button {
+                UIPasteboard.general.string = command
+                store.showToast("Copied")
+            } label: {
+                Label("Copy command", systemImage: "terminal")
+            }
+        }
+    }
+
+    private var isInteractive: Bool {
+        switch family {
+        case .agent: return tool.subagentRunId != nil
+        case .fileRead: return presentation.filePath != nil
+        default: return presentation.canToggle
+        }
+    }
+
+    private func activate() {
+        switch family {
+        case .agent:
+            guard let child = tool.subagentRunId else { return }
+            store.openSubagentSession(childSessionId: child, title: tool.agentDescription ?? tool.agentName ?? "Subagent")
+        case .fileRead:
+            if let path = presentation.filePath { openFile(path) }
+        default:
+            if presentation.canToggle { onToggleExpand() }
+        }
+    }
+
+    private func openFile(_ path: String) {
+        let lower = path.lowercased()
+        let isVisual = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".csv"].contains { lower.hasSuffix($0) }
+        store.openFileInInspector(pathOrId: path, preferPreview: isVisual)
+    }
+}
+
+// MARK: - Expanded bodies
+
+struct ToolExpandedBody: View {
+    @Bindable var store: AppStore
+    let tool: ToolCallItem
+    let family: ToolFamily
+    let workspacePath: String?
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        switch family {
+        case .fileWrite:
+            VStack(alignment: .leading, spacing: 8) {
+                if let patch = tool.diffPatch, !patch.isEmpty {
+                    ToolDiffPreview(patch: patch, showLineNumbers: store.showLineNumbers)
+                } else if let content = tool.contentPreview, !content.isEmpty {
+                    ToolCodeBox(text: content, maxHeight: 240, showLineNumbers: store.showLineNumbers)
+                } else if let input = tool.inputJSON {
+                    ToolLabeledBlock(title: "Parameters", text: input, maxHeight: 240)
+                }
+                if let error = tool.errorText {
+                    ToolLabeledBlock(title: "Error", text: error, maxHeight: 240, isError: true)
+                }
+            }
+        case .shell:
+            ToolShellPanel(command: tool.command ?? "", output: tool.output ?? tool.errorText, isRunning: tool.isRunningLike)
+        case .todo:
+            if let items = tool.todoItems {
+                ToolTodoList(items: items)
+            } else {
+                genericBody(rawFallback: false)
+            }
+        case .askUser:
+            ToolQuestionList(items: tool.questionAnswers ?? [])
+        case .plan:
+            if let plan = tool.planMarkdown {
+                Text(LocalizedStringKey(plan))
+                    .font(.system(size: 14))
+                    .foregroundStyle(palette.foregroundMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 12)
+                    .overlay(alignment: .leading) { Rectangle().fill(palette.border).frame(width: 1) }
+                    .padding(.leading, 6)
+            } else {
+                ToolLabeledBlock(title: tool.isFailed ? "Error" : "Result", text: tool.errorText ?? tool.output ?? "",
+                                 maxHeight: 240, isError: tool.isFailed)
+            }
+        case .skill:
+            ToolSkillPanel(name: tool.skillName ?? "Unknown skill", args: tool.skillArgs, output: tool.output, isRunning: tool.isRunningLike)
+        case .mcp:
+            ToolMCPBody(tool: tool)
+        default:
+            genericBody(rawFallback: true)
+        }
+    }
+
+    private func genericBody(rawFallback: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let input = tool.inputJSON {
+                ToolLabeledBlock(title: "Parameters", text: input, maxHeight: 240)
+            }
+            if let error = tool.errorText {
+                ToolLabeledBlock(title: "Error", text: error, maxHeight: 240, isError: true)
+            } else if let output = tool.output, !output.isEmpty {
+                ToolLabeledBlock(title: "Result", text: output, maxHeight: 240)
+            }
+            if rawFallback, let raw = tool.rawJSON {
+                ScrollView {
+                    Text(raw)
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(palette.foregroundSubtle)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(palette.header)
-            } else if presentation.category == .terminal,
-                      let cmd = tool.command?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !cmd.isEmpty {
-                HStack(alignment: .top, spacing: 8) {
-                    Text("$ \(cmd)")
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .foregroundStyle(palette.foreground)
+                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Button {
-                        UIPasteboard.general.string = cmd
-                        store.showToast("Copied command")
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(palette.foregroundSubtle)
-                    }
-                    .buttonStyle(.plain)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(palette.header)
+                .frame(maxHeight: 200)
+                .fixedSize(horizontal: false, vertical: true)
+                .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+    }
+}
+
+/// `EditInlineDiffContent`: unified diff, 240pt box, sequential preview line numbers, 800-line cap.
+struct ToolDiffPreview: View {
+    let patch: String
+    let showLineNumbers: Bool
+    @Environment(\.zcodePalette) private var palette
+
+    static let maxLines = 800
+
+    var body: some View {
+        let all = patch.components(separatedBy: "\n")
+        let shown = all.count > Self.maxLines ? Array(all.prefix(Self.maxLines)) : all
+        let omitted = all.count - shown.count
+        ScrollView([.vertical, .horizontal], showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(shown.enumerated()), id: \.offset) { index, line in
+                    diffRow(index: index, line: line)
+                }
+                if omitted > 0 {
+                    Text("Diff preview truncated: \(omitted) lines omitted to keep UI responsive.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(palette.foregroundMuted)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .frame(maxHeight: 240)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+    }
+
+    private func diffRow(index: Int, line: String) -> some View {
+        let marker = line.first
+        let isHunk = line.hasPrefix("@@")
+        let isAdded = !isHunk && marker == "+"
+        let isRemoved = !isHunk && marker == "-"
+        let code = isHunk ? line : (marker == "+" || marker == "-" || marker == " " ? String(line.dropFirst()) : line)
+        let tint: Color? = isAdded ? palette.success : (isRemoved ? palette.destructive : nil)
+        return HStack(spacing: 0) {
+            Rectangle()
+                .fill(tint ?? Color.clear)
+                .frame(width: 3)
+            if showLineNumbers {
+                Text("\(index + 1)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(palette.foregroundMuted)
+                    .frame(width: 40, alignment: .trailing)
+                    .padding(.trailing, 8)
+            }
+            Text(code.isEmpty ? " " : code)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(isHunk ? palette.foregroundMuted : palette.foreground)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.leading, showLineNumbers ? 0 : 8)
+                .padding(.trailing, 10)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 1)
+        .background(tint.map { $0.opacity(0.14) } ?? Color.clear)
+    }
+}
+
+struct ToolCodeBox: View {
+    let text: String
+    let maxHeight: CGFloat
+    var showLineNumbers: Bool = false
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        let lines = Array(text.components(separatedBy: "\n").prefix(ToolDiffPreview.maxLines))
+        ScrollView([.vertical, .horizontal], showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                    HStack(spacing: 8) {
+                        if showLineNumbers {
+                            Text("\(index + 1)")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(palette.foregroundMuted)
+                                .frame(width: 36, alignment: .trailing)
+                        }
+                        Text(line.isEmpty ? " " : line)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(palette.foreground)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .padding(.vertical, 1)
+                }
+            }
+            .padding(10)
+        }
+        .frame(maxHeight: maxHeight)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+    }
+}
+
+/// Generic `Parameters` / `Result` / `Error` block.
+struct ToolLabeledBlock: View {
+    let title: String
+    let text: String
+    let maxHeight: CGFloat
+    var isError: Bool = false
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isError ? palette.destructive : palette.foregroundMuted)
+            ScrollView {
+                Text(text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(isError ? palette.destructive : palette.foregroundSubtle)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+            }
+            .frame(maxHeight: maxHeight)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(isError ? palette.destructive.opacity(0.1) : palette.surfaceHover,
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+    }
+}
+
+/// Bash detail: `$ command` (3 lines, "Show full command" → 10 lines) and a 5-line auto-following output viewport.
+struct ToolShellPanel: View {
+    let command: String
+    let output: String?
+    let isRunning: Bool
+    @Environment(\.zcodePalette) private var palette
+    @State private var showFullCommand = false
+
+    private static let lineHeight: CGFloat = 20
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .top, spacing: 8) {
+                    Text("$")
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(palette.foregroundSubtle)
+                    if showFullCommand {
+                        ScrollView { commandText }
+                            .frame(maxHeight: Self.lineHeight * 10)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        commandText.lineLimit(3)
+                    }
+                }
+                if command.components(separatedBy: "\n").count > 3 || command.count > 160 {
+                    Button(showFullCommand ? "Collapse" : "Show full command") {
+                        withAnimation(.easeInOut(duration: 0.15)) { showFullCommand.toggle() }
+                    }
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(palette.accentBlue)
+                    .buttonStyle(.plain)
+                    .padding(.leading, 18)
+                }
             }
 
-            if let patch = tool.diffPatch, !patch.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(patch.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.system(size: 11.5, design: .monospaced))
-                                .foregroundStyle(diffLineColor(line))
+            if let output, !output.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(output)
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .lineSpacing(3)
+                                .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 1.5)
-                                .background(diffLineBackground(line))
+                            Color.clear.frame(height: 1).id("bash-end")
                         }
                     }
+                    .frame(maxHeight: Self.lineHeight * 5)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .onAppear { if isRunning { proxy.scrollTo("bash-end", anchor: .bottom) } }
+                    .onChange(of: output.count) { _, _ in
+                        if isRunning { proxy.scrollTo("bash-end", anchor: .bottom) }
+                    }
+                }
+                .accessibilityIdentifier("bash-result-output")
+            } else if !isRunning {
+                Text("No output.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(palette.foregroundMuted)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.panel, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+        .accessibilityIdentifier("execute-detail")
+    }
+
+    private var commandText: some View {
+        Text(command)
+            .font(.system(size: 13, design: .monospaced))
+            .foregroundStyle(palette.foreground)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct ToolTodoList: View {
+    let items: [TodoChecklistItem]
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(items) { item in
+                HStack(alignment: .top, spacing: 8) {
+                    statusIcon(item.status)
+                        .frame(width: 14, height: 18)
+                    Text(item.content)
+                        .font(.system(size: 14))
+                        .foregroundStyle(item.status == "completed" ? palette.foregroundMuted
+                                         : (item.status == "in_progress" ? palette.foreground : palette.foregroundSubtle))
+                        .strikethrough(item.status == "completed", color: palette.foregroundMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func statusIcon(_ status: String) -> some View {
+        switch status {
+        case "completed":
+            Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.success)
+        case "in_progress":
+            Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(palette.foreground)
+        default:
+            Image(systemName: "circle").font(.system(size: 10)).foregroundStyle(palette.foregroundMuted)
+        }
+    }
+}
+
+struct ToolQuestionList: View {
+    let items: [ToolQuestionAnswer]
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if items.isEmpty {
+                Text("No answer provided")
+                    .font(.system(size: 14))
+                    .foregroundStyle(palette.foregroundSubtle)
+            }
+            ForEach(items, id: \.self) { item in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.question)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(palette.foreground)
+                    Text(item.answer ?? "No answer provided")
+                        .font(.system(size: 14))
+                        .foregroundStyle(palette.foregroundSubtle)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.leading, 14)
+        .overlay(alignment: .leading) { Rectangle().fill(palette.border).frame(width: 1) }
+        .padding(.leading, 8)
+    }
+}
+
+struct ToolSkillPanel: View {
+    let name: String
+    let args: String?
+    let output: String?
+    let isRunning: Bool
+    @Environment(\.zcodePalette) private var palette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("Skill")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(palette.foregroundMuted)
+                Text(name)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(palette.foreground)
+                    .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                }
+                    .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 6))
             }
-
-            if let out = tool.output, !out.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(out)
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .foregroundStyle(tool.status == .failed ? palette.destructive : palette.foregroundSubtle)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                }
-            }
-
-            if !tool.subagentSteps.isEmpty {
+            if let args, !args.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(tool.subagentSteps, id: \.self) { step in
+                    Text("Args")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(palette.foregroundMuted)
+                    Text(args)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if let output, !output.isEmpty {
+                ScrollView {
+                    Text(output)
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 100)
+                .fixedSize(horizontal: false, vertical: true)
+            } else if !isRunning {
+                Text("No output.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(palette.foregroundMuted)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.panel, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+    }
+}
+
+/// MCP expanded content: Result first, then a "View call details" disclosure (Description, Parameters).
+struct ToolMCPBody: View {
+    let tool: ToolCallItem
+    @Environment(\.zcodePalette) private var palette
+    @State private var showDetails = false
+    @State private var wrapLines = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            result
+            if tool.mcpDescription != nil || tool.inputJSON != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) { showDetails.toggle() }
+                    } label: {
                         HStack(spacing: 6) {
-                            Circle()
-                                .fill(palette.foregroundMuted)
-                                .frame(width: 4, height: 4)
-                            Text(step)
-                                .font(.system(size: 12))
+                            ToolChevron(isExpanded: showDetails)
+                            Text("View call details")
+                                .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(palette.foregroundSubtle)
                         }
                     }
+                    .buttonStyle(.plain)
+                    if showDetails {
+                        if let description = tool.mcpDescription, !description.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Description")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(palette.foregroundMuted)
+                                Text(description)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        if let input = tool.inputJSON {
+                            ToolLabeledBlock(title: "Parameters", text: input, maxHeight: 288)
+                        }
+                    }
                 }
-                .padding(10)
             }
         }
-        .background(palette.panel, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(palette.border, lineWidth: 1)
-        )
+        .padding(.vertical, 4)
+        .accessibilityIdentifier("mcp-expanded-content")
     }
 
-    private func openFileInInspector(_ path: String) {
-        let lower = path.lowercased()
-        let isVisual = lower.hasSuffix(".png") || lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".pdf") || lower.hasSuffix(".csv")
-        store.openFileInInspector(pathOrId: path, preferPreview: isVisual)
-    }
-
-    private func diffLineColor(_ line: String) -> Color {
-        if line.hasPrefix("+") { return palette.success }
-        if line.hasPrefix("-") { return palette.destructive }
-        if line.hasPrefix("@@") { return palette.info }
-        return palette.foregroundSubtle
-    }
-
-    private func diffLineBackground(_ line: String) -> Color {
-        if line.hasPrefix("+") { return palette.success.opacity(0.10) }
-        if line.hasPrefix("-") { return palette.destructive.opacity(0.10) }
-        return Color.clear
+    @ViewBuilder
+    private var result: some View {
+        if let error = tool.errorText {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Result")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(palette.destructive)
+                Text(error)
+                    .font(.system(size: 13))
+                    .foregroundStyle(palette.destructive)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(palette.destructive.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+            }
+        } else if tool.isRunningLike {
+            Text(tool.status == .pendingApproval ? "Pending" : "Running")
+                .font(.system(size: 13))
+                .foregroundStyle(palette.foregroundMuted)
+        } else if let output = tool.output, !output.isEmpty {
+            let isJSON = (try? JSONSerialization.jsonObject(with: Data(output.utf8))) != nil
+            if isJSON {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 14) {
+                        Text("Result")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(palette.foregroundMuted)
+                        Spacer()
+                        Button { wrapLines.toggle() } label: { Image(systemName: "text.word.spacing") }
+                            .accessibilityLabel("Wrap lines")
+                        Button { UIPasteboard.general.string = output } label: { Image(systemName: "doc.on.doc") }
+                            .accessibilityLabel("Copy result")
+                    }
+                    .font(.system(size: 12))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .buttonStyle(.plain)
+                    ScrollView(wrapLines ? .vertical : [.vertical, .horizontal]) {
+                        Text(output)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .fixedSize(horizontal: !wrapLines, vertical: false)
+                            .frame(maxWidth: wrapLines ? .infinity : nil, alignment: .leading)
+                            .padding(10)
+                    }
+                    .frame(maxHeight: 288)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 10))
+                }
+            } else {
+                Text(output)
+                    .font(.system(size: 13))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .lineLimit(18)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("mcp-result-surface")
+            }
+        }
     }
 }
 
-// MARK: - Grouping & Presentation Helpers
-
-enum ToolCallDisplayEntry: Identifiable {
-    case single(ToolCallItem)
-    case exploreGroup(id: String, items: [ToolCallItem], searchCount: Int, fileCount: Int)
-
-    var id: String {
-        switch self {
-        case .single(let item):
-            return item.id
-        case .exploreGroup(let id, _, _, _):
-            return id
-        }
-    }
-
-    private enum ExploreBucket {
-        case file
-        case search
-    }
-
-    static func group(_ tools: [ToolCallItem]) -> [ToolCallDisplayEntry] {
-        var result: [ToolCallDisplayEntry] = []
-        var pending: [(ToolCallItem, ExploreBucket)] = []
-
-        func flushPending() {
-            guard !pending.isEmpty else { return }
-            if pending.count == 1 {
-                result.append(.single(pending[0].0))
-            } else {
-                let searchCount = pending.filter { $0.1 == .search }.count
-                let fileCount = pending.filter { $0.1 == .file }.count
-                let groupId = "explore-\(pending[0].0.id)"
-                result.append(
-                    .exploreGroup(
-                        id: groupId,
-                        items: pending.map(\.0),
-                        searchCount: searchCount,
-                        fileCount: fileCount
-                    )
-                )
-            }
-            pending.removeAll(keepingCapacity: true)
-        }
-
-        for tool in tools {
-            if let bucket = exploreBucket(for: tool) {
-                pending.append((tool, bucket))
-            } else {
-                flushPending()
-                result.append(.single(tool))
-            }
-        }
-        flushPending()
-        return result
-    }
-
-    static func exploreSummary(searchCount: Int, fileCount: Int) -> String {
-        var parts: [String] = []
-        if searchCount > 0 {
-            parts.append(searchCount == 1 ? "1 search" : "\(searchCount) searches")
-        }
-        if fileCount > 0 {
-            parts.append(fileCount == 1 ? "1 file" : "\(fileCount) files")
-        }
-        return parts.joined(separator: ", ")
-    }
-
-    private static func exploreBucket(for tool: ToolCallItem) -> ExploreBucket? {
-        let category = ToolRowPresentation.classify(tool)
-        switch category {
-        case .read:
-            return .file
-        case .search, .list:
-            return .search
-        case .edit, .write, .terminal, .mcp, .subagent, .workflow, .other:
-            return nil
-        }
-    }
-}
+// MARK: - File icons
 
 struct ToolFileIconSpec {
     let symbol: String
@@ -576,44 +1080,25 @@ struct ToolFileIconSpec {
         let ext = (lower as NSString).pathExtension
 
         switch ext {
-        case "swift":
-            return ToolFileIconSpec(symbol: "swift", color: Color(hex: 0xF05138))
-        case "ts", "tsx", "mts", "cts":
-            return ToolFileIconSpec(symbol: "chevron.left.forwardslash.chevron.right", color: Color(hex: 0x3178C6))
-        case "js", "jsx", "mjs", "cjs":
-            return ToolFileIconSpec(symbol: "curlybraces", color: Color(hex: 0xE8C547))
-        case "json", "jsonc":
-            return ToolFileIconSpec(symbol: "curlybraces.square", color: Color(hex: 0xD9A441))
-        case "md", "markdown", "mdx":
-            return ToolFileIconSpec(symbol: "doc.richtext", color: Color(hex: 0x58A6FF))
-        case "py", "pyi":
-            return ToolFileIconSpec(symbol: "chevron.left.forwardslash.chevron.right", color: Color(hex: 0x4B8BBE))
-        case "rs":
-            return ToolFileIconSpec(symbol: "gearshape", color: Color(hex: 0xDEA584))
-        case "go":
-            return ToolFileIconSpec(symbol: "chevron.left.forwardslash.chevron.right", color: Color(hex: 0x00ADD8))
-        case "sh", "zsh", "bash", "fish":
-            return ToolFileIconSpec(symbol: "terminal", color: Color(hex: 0x46BF72))
-        case "yml", "yaml", "toml", "plist", "xml", "xcconfig":
-            return ToolFileIconSpec(symbol: "list.bullet.indent", color: Color(hex: 0xA371F7))
-        case "html", "htm":
-            return ToolFileIconSpec(symbol: "globe", color: Color(hex: 0xE34C26))
-        case "css", "scss", "sass", "less":
-            return ToolFileIconSpec(symbol: "paintbrush", color: Color(hex: 0x38BDF8))
-        case "png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "ico":
-            return ToolFileIconSpec(symbol: "photo", color: Color(hex: 0xA855F7))
-        case "pdf":
-            return ToolFileIconSpec(symbol: "doc.text.fill", color: Color(hex: 0xEF4444))
-        case "csv", "tsv":
-            return ToolFileIconSpec(symbol: "tablecells", color: Color(hex: 0x34D399))
-        case "c", "h", "cpp", "cc", "hpp", "m", "mm":
-            return ToolFileIconSpec(symbol: "doc.text", color: Color(hex: 0x60A5FA))
-        case "rb":
-            return ToolFileIconSpec(symbol: "diamond", color: Color(hex: 0xCC342D))
-        case "java", "kt", "kts":
-            return ToolFileIconSpec(symbol: "cup.and.saucer", color: Color(hex: 0xF59E0B))
-        case "sql":
-            return ToolFileIconSpec(symbol: "cylinder", color: Color(hex: 0x60A5FA))
+        case "swift": return ToolFileIconSpec(symbol: "swift", color: Color(hex: 0xF05138))
+        case "ts", "tsx", "mts", "cts": return ToolFileIconSpec(symbol: "chevron.left.forwardslash.chevron.right", color: Color(hex: 0x3178C6))
+        case "js", "jsx", "mjs", "cjs": return ToolFileIconSpec(symbol: "curlybraces", color: Color(hex: 0xE8C547))
+        case "json", "jsonc": return ToolFileIconSpec(symbol: "curlybraces.square", color: Color(hex: 0xD9A441))
+        case "md", "markdown", "mdx": return ToolFileIconSpec(symbol: "doc.richtext", color: Color(hex: 0x58A6FF))
+        case "py", "pyi": return ToolFileIconSpec(symbol: "chevron.left.forwardslash.chevron.right", color: Color(hex: 0x4B8BBE))
+        case "rs": return ToolFileIconSpec(symbol: "gearshape", color: Color(hex: 0xDEA584))
+        case "go": return ToolFileIconSpec(symbol: "chevron.left.forwardslash.chevron.right", color: Color(hex: 0x00ADD8))
+        case "sh", "zsh", "bash", "fish": return ToolFileIconSpec(symbol: "terminal", color: Color(hex: 0x46BF72))
+        case "yml", "yaml", "toml", "plist", "xml", "xcconfig": return ToolFileIconSpec(symbol: "list.bullet.indent", color: Color(hex: 0xA371F7))
+        case "html", "htm": return ToolFileIconSpec(symbol: "globe", color: Color(hex: 0xE34C26))
+        case "css", "scss", "sass", "less": return ToolFileIconSpec(symbol: "paintbrush", color: Color(hex: 0x38BDF8))
+        case "png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "ico": return ToolFileIconSpec(symbol: "photo", color: Color(hex: 0xA855F7))
+        case "pdf": return ToolFileIconSpec(symbol: "doc.text.fill", color: Color(hex: 0xEF4444))
+        case "csv", "tsv": return ToolFileIconSpec(symbol: "tablecells", color: Color(hex: 0x34D399))
+        case "c", "h", "cpp", "cc", "hpp", "m", "mm": return ToolFileIconSpec(symbol: "doc.text", color: Color(hex: 0x60A5FA))
+        case "rb": return ToolFileIconSpec(symbol: "diamond", color: Color(hex: 0xCC342D))
+        case "java", "kt", "kts": return ToolFileIconSpec(symbol: "cup.and.saucer", color: Color(hex: 0xF59E0B))
+        case "sql": return ToolFileIconSpec(symbol: "cylinder", color: Color(hex: 0x60A5FA))
         default:
             if lower == "dockerfile" || lower.hasPrefix("dockerfile.") {
                 return ToolFileIconSpec(symbol: "shippingbox", color: Color(hex: 0x2496ED))
@@ -623,297 +1108,216 @@ struct ToolFileIconSpec {
     }
 }
 
+// MARK: - Collapsed-row presentation per family
+
 struct ToolRowPresentation {
-    enum Category {
-        case read
-        case edit
-        case write
-        case terminal
-        case search
-        case list
-        case mcp
-        case subagent
-        case workflow
-        case other
+    enum Primary {
+        case file(name: String, path: String)
+        case text(String, monospaced: Bool)
     }
 
-    enum Content {
-        case file(fileName: String, parentPath: String?, icon: ToolFileIconSpec)
-        case command(String)
-        case query(primary: String, secondary: String?)
+    enum KindDetail {
+        case agentChip(String)
+        case text(String)
     }
 
-    let category: Category
-    let leadingSymbol: String
-    let verb: String
-    let content: Content
-    let inspectableFilePath: String?
+    var icon: String
+    var kindLabel: String
+    var kindDetail: KindDetail? = nil
+    var primary: Primary? = nil
+    var secondary: String? = nil
+    var secondaryMonospaced = false
+    var hideSecondaryWhenOpen = false
+    var canToggle: Bool
+    var showsFailedLabel = true
+    var filePath: String? = nil
 
-    static func classify(_ tool: ToolCallItem) -> Category {
-        let raw = tool.toolName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let lower = raw.lowercased()
-
-        if tool.kind == .subagent || lower == "task" || lower == "agent" || lower == "subagent" {
-            return .subagent
-        }
-        if tool.kind == .workflow {
-            return .workflow
-        }
-        if lower.hasPrefix("mcp__") || lower.contains("__") || tool.kind == .mcp {
-            return .mcp
-        }
-        if tool.kind == .bash || lower == "bash" || lower == "terminal" || lower == "execute" || lower == "shell" || lower == "run_command" {
-            return .terminal
-        }
-        if lower == "write" || lower == "write_file" || lower == "writefile" || lower == "create_file" {
-            return .write
-        }
-        if lower == "edit" || lower == "multiedit" || lower == "edit_file" || lower == "notebookedit" || lower == "apply_patch" || lower == "str_replace_editor" {
-            return .edit
-        }
-        if lower == "read" || lower == "read_file" || lower == "readfile" || lower == "view" || lower == "view_file" || lower == "notebookread" {
-            return .read
-        }
-        if lower == "ls" || lower == "list" || lower == "list_dir" || lower == "list_files" {
-            return .list
-        }
-        if lower == "grep" || lower == "glob" || lower == "search" || lower == "websearch" || lower == "webfetch" || lower == "ripgrep" || lower == "find" || lower == "find_files" || lower == "search_files" || lower == "codebase_search" {
-            return .search
-        }
-
-        switch tool.kind {
-        case .readFile: return .read
-        case .editFile: return .edit
-        case .writeFile: return .write
-        case .bash: return .terminal
-        case .search: return .search
-        case .mcp: return .mcp
-        case .subagent: return .subagent
-        case .workflow: return .workflow
-        }
+    /// One-line "what is happening" text used by running groups (`T7t`→`w7t`).
+    var actionSummary: String {
+        let target: String = {
+            switch primary {
+            case .file(let name, _): return name
+            case .text(let text, _): return text
+            case nil: return secondary ?? ""
+            }
+        }()
+        return [kindLabel, target].filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     static func make(for tool: ToolCallItem, workspacePath: String?) -> ToolRowPresentation {
-        let category = classify(tool)
-
-        switch category {
-        case .read:
-            let path = resolvedFilePath(for: tool, stripPrefixes: ["Read ", "View "])
-            let (name, parent) = splitPath(path, workspacePath: workspacePath)
+        let running = tool.isRunningLike
+        switch ToolFamily.of(tool) {
+        case .fileRead:
+            let path = tool.filePath ?? ""
             return ToolRowPresentation(
-                category: .read,
-                leadingSymbol: "magnifyingglass",
-                verb: "Read",
-                content: .file(fileName: name, parentPath: parent, icon: ToolFileIconSpec.forFileName(name)),
-                inspectableFilePath: tool.filePath ?? (path.contains("/") || path.contains(".") ? path : nil)
+                icon: "doc.text",
+                kindLabel: running ? "Reading" : "Read",
+                primary: path.isEmpty ? nil : .file(name: (path as NSString).lastPathComponent, path: path),
+                secondary: path.isEmpty ? nil : relativePath(path, workspacePath: workspacePath),
+                canToggle: false,
+                filePath: path.isEmpty ? nil : path
             )
 
-        case .edit:
-            let path = resolvedFilePath(for: tool, stripPrefixes: ["Edit ", "MultiEdit ", "Patch "])
-            let (name, parent) = splitPath(path, workspacePath: workspacePath)
+        case .fileWrite:
+            let path = tool.filePath ?? ""
+            let op = writeOperation(tool)
             return ToolRowPresentation(
-                category: .edit,
-                leadingSymbol: "pencil",
-                verb: "Edit",
-                content: .file(fileName: name, parentPath: parent, icon: ToolFileIconSpec.forFileName(name)),
-                inspectableFilePath: tool.filePath ?? (path.contains("/") || path.contains(".") ? path : nil)
+                icon: "pencil",
+                kindLabel: running ? op.running : op.done,
+                primary: path.isEmpty ? nil : .file(name: (path as NSString).lastPathComponent, path: path),
+                secondary: path.isEmpty ? nil : relativePath(path, workspacePath: workspacePath),
+                canToggle: true,
+                filePath: path.isEmpty ? nil : path
             )
 
-        case .write:
-            let path = resolvedFilePath(for: tool, stripPrefixes: ["Write ", "Create "])
-            let (name, parent) = splitPath(path, workspacePath: workspacePath)
+        case .shell:
+            let command = singleLine(tool.command ?? "")
             return ToolRowPresentation(
-                category: .write,
-                leadingSymbol: "pencil",
-                verb: "Write",
-                content: .file(fileName: name, parentPath: parent, icon: ToolFileIconSpec.forFileName(name)),
-                inspectableFilePath: tool.filePath ?? (path.contains("/") || path.contains(".") ? path : nil)
-            )
-
-        case .terminal:
-            let cmd = resolvedCommandText(for: tool)
-            return ToolRowPresentation(
-                category: .terminal,
-                leadingSymbol: "terminal",
-                verb: "Terminal",
-                content: .command(cmd),
-                inspectableFilePath: nil
+                icon: "terminal",
+                kindLabel: running ? "Running" : "Terminal",
+                secondary: command.isEmpty ? nil : command,
+                hideSecondaryWhenOpen: true,
+                canToggle: true
             )
 
         case .search:
-            let queryText = resolvedSearchText(for: tool, workspacePath: workspacePath)
+            let name = (tool.toolName ?? "").lowercased()
+            let isToolSearch = name == "toolsearch" || name == "localtoolsearch"
             return ToolRowPresentation(
-                category: .search,
-                leadingSymbol: "magnifyingglass",
-                verb: "Search",
-                content: .query(primary: queryText.primary, secondary: queryText.secondary),
-                inspectableFilePath: tool.filePath
+                icon: "magnifyingglass",
+                kindLabel: isToolSearch ? "" : (running ? "Searching" : "Search"),
+                primary: .text(singleLine(tool.searchLabel ?? "Find"), monospaced: false),
+                canToggle: false
             )
 
-        case .list:
-            let path = tool.filePath ?? (tool.subtitle.isEmpty ? tool.title : tool.subtitle)
-            let formatted = formatDirectory(path, workspacePath: workspacePath)
+        case .webFetch:
+            let url = tool.webURL ?? ""
             return ToolRowPresentation(
-                category: .list,
-                leadingSymbol: "magnifyingglass",
-                verb: "List",
-                content: .query(primary: formatted, secondary: nil),
-                inspectableFilePath: nil
+                icon: "globe",
+                kindLabel: running ? "Fetching" : "Fetch",
+                primary: url.isEmpty ? nil : .text(url, monospaced: false),
+                canToggle: false
+            )
+
+        case .todo:
+            let items = tool.todoItems ?? []
+            let current = items.first(where: { $0.status == "in_progress" })
+                ?? items.first(where: { $0.status != "completed" })
+                ?? items.last
+            let done = items.filter { $0.status == "completed" }.count
+            return ToolRowPresentation(
+                icon: "checklist",
+                kindLabel: "Todo",
+                primary: .text(current?.content ?? "Current task", monospaced: false),
+                secondary: items.isEmpty ? nil : "\(done)/\(items.count)",
+                secondaryMonospaced: true,
+                canToggle: true
+            )
+
+        case .agent:
+            let description = tool.agentDescription ?? tool.agentName ?? "SubAgent"
+            return ToolRowPresentation(
+                icon: "person.2",
+                kindLabel: "SubAgent",
+                kindDetail: tool.agentName.map { .agentChip($0) },
+                primary: .text(singleLine(description), monospaced: false),
+                canToggle: false
+            )
+
+        case .askUser:
+            let count = tool.questionAnswers?.count ?? 0
+            return ToolRowPresentation(
+                icon: "questionmark.bubble",
+                kindLabel: running ? "Asking questions" : "Asked",
+                secondary: running ? nil : "\(count) questions",
+                canToggle: !running
+            )
+
+        case .plan:
+            return ToolRowPresentation(
+                icon: "list.bullet.clipboard",
+                kindLabel: "Entered plan mode",
+                canToggle: tool.planMarkdown != nil || tool.output?.isEmpty == false || tool.errorText != nil
+            )
+
+        case .skill:
+            return ToolRowPresentation(
+                icon: "sparkles",
+                kindLabel: running ? "Running skill" : "Skill",
+                primary: .text(tool.skillName ?? "Skill", monospaced: true),
+                secondary: tool.skillArgs.map(singleLine),
+                secondaryMonospaced: true,
+                canToggle: true
             )
 
         case .mcp:
-            let label = formattedMCPName(for: tool)
-            let secondary = tool.subtitle.isEmpty || tool.subtitle == label ? nil : singleLine(tool.subtitle)
+            let server = humanize(tool.mcpServer ?? "")
+            var toolLabel = humanize(tool.mcpTool ?? (tool.toolName ?? ""))
+            if !server.isEmpty, toolLabel.hasPrefix(server + " ") { toolLabel = String(toolLabel.dropFirst(server.count + 1)) }
+            let statusText: String? = tool.rawStatus == "cancelled" ? "· Stopped" : (tool.isFailed ? "· Failed" : nil)
             return ToolRowPresentation(
-                category: .mcp,
-                leadingSymbol: "puzzlepiece.extension",
-                verb: "MCP",
-                content: .query(primary: label, secondary: secondary),
-                inspectableFilePath: tool.filePath
+                icon: "puzzlepiece.extension",
+                kindLabel: "MCP",
+                kindDetail: server.isEmpty ? nil : .text(server),
+                primary: .text(toolLabel, monospaced: false),
+                secondary: statusText,
+                canToggle: !(tool.status == .pendingApproval || tool.rawStatus == "inputStreaming" || tool.rawStatus == "cancelled"),
+                showsFailedLabel: false
             )
 
-        case .subagent:
+        case .subagentStandalone, .generic:
+            let name = (tool.toolName ?? tool.title).trimmingCharacters(in: .whitespacesAndNewlines)
+            let label = name.isEmpty ? "Tool" : name.prefix(1).uppercased() + name.dropFirst()
             return ToolRowPresentation(
-                category: .subagent,
-                leadingSymbol: "person.2",
-                verb: "SubAgent",
-                content: .query(primary: tool.title, secondary: nil),
-                inspectableFilePath: nil
-            )
-
-        case .workflow:
-            return ToolRowPresentation(
-                category: .workflow,
-                leadingSymbol: "point.3.connected.trianglepath.dotted",
-                verb: "Workflow",
-                content: .query(primary: tool.title, secondary: tool.subtitle.isEmpty ? nil : singleLine(tool.subtitle)),
-                inspectableFilePath: tool.filePath
-            )
-
-        case .other:
-            let verb = tool.toolName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Tool"
-            let target = tool.subtitle.isEmpty ? (tool.title == verb ? "" : tool.title) : singleLine(tool.subtitle)
-            return ToolRowPresentation(
-                category: .other,
-                leadingSymbol: "wrench",
-                verb: verb,
-                content: .query(primary: target, secondary: nil),
-                inspectableFilePath: tool.filePath
+                icon: "wrench.and.screwdriver",
+                kindLabel: label,
+                canToggle: true,
+                filePath: tool.filePath
             )
         }
     }
 
-    private static func resolvedFilePath(for tool: ToolCallItem, stripPrefixes: [String]) -> String {
-        if let filePath = tool.filePath?.trimmingCharacters(in: .whitespacesAndNewlines), !filePath.isEmpty {
-            return filePath
+    /// `WZ`: Write → Writing/Write, Edit-like → Editing/Edit, deleting patches → Deleting/Delete.
+    static func writeOperation(_ tool: ToolCallItem) -> (running: String, done: String) {
+        let name = (tool.toolName ?? "").lowercased()
+        if name == "write" { return ("Writing", "Write") }
+        if name.contains("patch"), let input = tool.inputJSON?.lowercased(), input.contains("*** delete file") {
+            return ("Deleting", "Delete")
         }
-        var candidate = tool.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        for prefix in stripPrefixes {
-            if candidate.hasPrefix(prefix) {
-                candidate = String(candidate.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                break
-            }
-        }
-        if candidate.isEmpty, !tool.subtitle.isEmpty {
-            return tool.subtitle
-        }
-        return candidate
+        return ("Editing", "Edit")
     }
 
-    private static func resolvedCommandText(for tool: ToolCallItem) -> String {
-        if let cmd = tool.command?.trimmingCharacters(in: .whitespacesAndNewlines), !cmd.isEmpty {
-            return singleLine(cmd)
-        }
-        let sub = tool.subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !sub.isEmpty {
-            return singleLine(sub)
-        }
-        let title = tool.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = title.lowercased()
-        if lower == "bash" || lower == "terminal" || lower == "execute" || lower == "shell" || lower == "tool" {
-            return ""
-        }
-        return singleLine(title)
+    /// `X5t`: deterministic colour for the agent name chip (yellow/red/orange/green/cyan/blue/purple/pink).
+    static func agentColor(_ name: String) -> Color {
+        let colors: [Color] = [
+            Color(hex: 0xCA8A04), Color(hex: 0xDC2626), Color(hex: 0xEA580C), Color(hex: 0x16A34A),
+            Color(hex: 0x0891B2), Color(hex: 0x2563EB), Color(hex: 0x9333EA), Color(hex: 0xDB2777)
+        ]
+        var hash: UInt32 = 0
+        for scalar in name.unicodeScalars { hash = hash &* 31 &+ scalar.value }
+        return colors[Int(hash % UInt32(colors.count))]
     }
 
-    private static func resolvedSearchText(for tool: ToolCallItem, workspacePath: String?) -> (primary: String, secondary: String?) {
-        let sub = singleLine(tool.subtitle)
-        let title = singleLine(tool.title)
-        let lowerTitle = title.lowercased()
-        let genericTitle = ["grep", "glob", "search", "websearch", "webfetch", "find", "tool"].contains(lowerTitle)
-
-        if let path = tool.filePath, !path.isEmpty {
-            let dir = formatDirectory(path, workspacePath: workspacePath)
-            if !sub.isEmpty && sub != path {
-                return (sub, dir)
-            }
-            if !genericTitle && title != path {
-                return (title, dir)
-            }
-            return (dir, nil)
-        }
-
-        if !sub.isEmpty {
-            return (sub, nil)
-        }
-        return (genericTitle ? "" : title, nil)
+    /// `EC`: title-cases words, normalising `-` / `_`.
+    static func humanize(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "plugin:", with: "")
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(separator: " ")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
     }
 
-    private static func formattedMCPName(for tool: ToolCallItem) -> String {
-        let raw = (tool.toolName?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? tool.title
-        if raw.lowercased().hasPrefix("mcp__") {
-            let trimmed = String(raw.dropFirst(5))
-            let parts = trimmed.components(separatedBy: "__").filter { !$0.isEmpty }
-            if parts.count >= 2 {
-                return "\(parts[0]) · \(parts.dropFirst().joined(separator: "_"))"
-            }
-            return trimmed
-        }
-        return singleLine(raw)
+    static func relativePath(_ path: String, workspacePath: String?) -> String {
+        guard let ws = workspacePath?.trimmingCharacters(in: .whitespacesAndNewlines), !ws.isEmpty else { return path }
+        let root = ws.hasSuffix("/") ? String(ws.dropLast()) : ws
+        if path.hasPrefix(root + "/") { return String(path.dropFirst(root.count + 1)) }
+        return path
     }
 
-    private static func splitPath(_ rawPath: String, workspacePath: String?) -> (fileName: String, parentPath: String?) {
-        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return ("file", nil) }
-
-        let ns = trimmed as NSString
-        let fileName = ns.lastPathComponent.isEmpty ? trimmed : ns.lastPathComponent
-        let dir = ns.deletingLastPathComponent
-        if dir.isEmpty || dir == "." || dir == "/" {
-            return (fileName, nil)
-        }
-        return (fileName, formatDirectory(dir, workspacePath: workspacePath))
-    }
-
-    private static func formatDirectory(_ dir: String, workspacePath: String?) -> String {
-        let normalizedDir = dir.hasSuffix("/") && dir.count > 1 ? String(dir.dropLast()) : dir
-
-        if let ws = workspacePath?.trimmingCharacters(in: .whitespacesAndNewlines), !ws.isEmpty {
-            let normWs = ws.hasSuffix("/") && ws.count > 1 ? String(ws.dropLast()) : ws
-            let wsName = (normWs as NSString).lastPathComponent
-            if normalizedDir == normWs {
-                return wsName.isEmpty ? normalizedDir : wsName
-            }
-            if normalizedDir.hasPrefix(normWs + "/") {
-                let rel = String(normalizedDir.dropFirst(normWs.count + 1))
-                return wsName.isEmpty ? rel : "\(wsName)/\(rel)"
-            }
-        }
-
-        if normalizedDir.hasPrefix("/") {
-            let comps = normalizedDir.split(separator: "/").map(String.init)
-            if comps.count > 3 {
-                return comps.suffix(3).joined(separator: "/")
-            }
-            return comps.joined(separator: "/")
-        }
-        return normalizedDir
-    }
-
-    private static func singleLine(_ text: String) -> String {
+    static func singleLine(_ text: String) -> String {
         text.components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
     }
 }
-

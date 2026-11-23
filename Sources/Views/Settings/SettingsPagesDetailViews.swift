@@ -509,20 +509,24 @@ struct SettingsPagesDetailViews: View {
             }
 
             // Conversation Stream & Tool Grouping
-            ZCodeSettingsCard(title: "Conversation Stream & Tool Grouping") {
-                ZCodeSettingsRow(title: "Show Thinking / Reasoning Blocks", subtitle: "Display collapsible thought traces above assistant responses") {
+            ZCodeSettingsCard(title: "Message stream") {
+                ZCodeSettingsRow(title: "Show reasoning", subtitle: "Show full reasoning inside the message stream. When off, the first reasoning item in each turn remains visible.") {
                     Toggle("", isOn: $store.showReasoningBlocks).labelsHidden().tint(palette.accentBlue)
                 }
                 Divider().overlay(palette.border)
-                ZCodeSettingsRow(title: "Show Live Todo Progress Bar", subtitle: "Pin current TodoWrite checklist progress above composer") {
-                    Toggle("", isOn: $store.showTodoTracker).labelsHidden().tint(palette.accentBlue)
+                ZCodeSettingsRow(title: "Show todos", subtitle: "Show Todo tool cards inside the message stream.") {
+                    Toggle("", isOn: $store.messageStreamShowTodos).labelsHidden().tint(palette.accentBlue)
                 }
                 Divider().overlay(palette.border)
-                ZCodeSettingsRow(title: "Group Read / Search / Explore Calls", subtitle: "Collapse consecutive Read, Grep, and Glob steps cleanly") {
+                ZCodeSettingsRow(title: "Group exploration tools", subtitle: "Group consecutive reads and searches into an Explore section.") {
                     Toggle("", isOn: $store.toolGroupingExploreEnabled).labelsHidden().tint(palette.accentBlue)
                 }
                 Divider().overlay(palette.border)
-                ZCodeSettingsRow(title: "Group Terminal & Edit Batches", subtitle: "Bundle related shell commands and multi-file edits") {
+                ZCodeSettingsRow(title: "Group terminal commands", subtitle: "Group consecutive non-read-only shell commands into a Terminal section.") {
+                    Toggle("", isOn: $store.toolGroupingTerminalEnabled).labelsHidden().tint(palette.accentBlue)
+                }
+                Divider().overlay(palette.border)
+                ZCodeSettingsRow(title: "Group file changes", subtitle: "Group consecutive Write, Edit, and ApplyPatch calls into a Changes section.") {
                     Toggle("", isOn: $store.toolGroupingChangesEnabled).labelsHidden().tint(palette.accentBlue)
                 }
             }
@@ -1664,7 +1668,7 @@ struct SettingsPagesDetailViews: View {
                     ForEach(Array(archivedSessions.enumerated()), id: \.element.id) { idx, sess in
                         HStack(spacing: 10) {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(sess.title)
+                                Text(sess.displayTitle)
                                     .font(.system(size: 14, weight: .semibold))
                                     .foregroundStyle(palette.foreground)
                                     .lineLimit(1)

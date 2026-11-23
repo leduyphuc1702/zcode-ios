@@ -14,32 +14,12 @@ public struct WorkspaceSidebarView: View {
     @State private var showAddProjectAlert: Bool = false
     @State private var newProjectName: String = ""
     @State private var newProjectPath: String = ""
+    @State private var listLimits: [String: Int] = [:]
+    @State private var pinnedExpanded: Bool = false
 
     public init(store: AppStore, isEmbeddedColumn: Bool) {
         self.store = store
         self.isEmbeddedColumn = isEmbeddedColumn
-    }
-
-    private var visibleSessions: [AgentTaskSession] {
-        let base = store.sessions.filter { $0.archived == showArchivedOnly }
-        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return base }
-        return base.filter {
-            $0.title.localizedCaseInsensitiveContains(q) ||
-            $0.workspacePath.localizedCaseInsensitiveContains(q)
-        }
-    }
-
-    private var pinnedSessions: [AgentTaskSession] {
-        visibleSessions
-            .filter(\.pinned)
-            .sorted { $0.updatedAt > $1.updatedAt }
-    }
-
-    private var timelineSessions: [AgentTaskSession] {
-        visibleSessions
-            .filter { !$0.pinned }
-            .sorted { $0.updatedAt > $1.updatedAt }
     }
 
     public var body: some View {
@@ -74,20 +54,135 @@ public struct WorkspaceSidebarView: View {
                 renamingSession = nil
             }
         }
-        .alert("Open folder / Add workspace", isPresented: $showAddProjectAlert) {
-            TextField("Folder name (e.g. zcode-ios-sdk)", text: $newProjectName)
-            TextField("Workspace path (optional)", text: $newProjectPath)
+        .alert("New project", isPresented: $showAddProjectAlert) {
+            TextField("Folder path on your computer", text: $newProjectPath)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            TextField("Project name (optional)", text: $newProjectName)
             Button("Cancel", role: .cancel) {
                 newProjectName = ""
                 newProjectPath = ""
             }
-            Button("Add") {
+            Button("Create") {
                 store.createNewProject(name: newProjectName, rootPath: newProjectPath)
                 newProjectName = ""
                 newProjectPath = ""
             }
+        } message: {
+            Text("Enter the absolute path of a folder on your computer, e.g. /Users/you/code/my-app")
         }
     }
+
+    // MARK: - Data (project tree, with an open-workspace fallback when the host has no tree)
+
+    private var treeMode: Bool { store.sidebarTreeLoaded }
+
+    private var fallbackVisible: [AgentTaskSession] {
+        store.sessions.filter { !$0.archived }
+    }
+
+    private func matchesSearch(_ task: AgentTaskSession) -> Bool {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return true }
+        return task.displayTitle.localizedCaseInsensitiveContains(q) ||
+            task.workspacePath.localizedCaseInsensitiveContains(q)
+    }
+
+    private var isSearching: Bool {
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var pinnedTasks: [AgentTaskSession] {
+        let base = treeMode ? store.sidebarPinnedTasks() : AppStore.sortedForSidebar(fallbackVisible.filter(\.pinned))
+        return base.filter(matchesSearch)
+    }
+
+    private var sectionProjects: [SidebarProject] {
+        if treeMode { return store.sidebarProjects }
+        return store.projects.map { SidebarProject(id: $0.id, name: $0.name, pinned: false, roots: [$0.rootPath]) }
+    }
+
+    private func projectTasks(_ project: SidebarProject) -> [AgentTaskSession] {
+        let base = treeMode
+            ? store.sidebarTasks(inProject: project.id)
+            : AppStore.sortedForSidebar(fallbackVisible.filter { !$0.pinned && $0.projectId == project.id })
+        return base.filter(matchesSearch)
+    }
+
+    private var projectlessTasks: [AgentTaskSession] {
+        treeMode ? store.sidebarProjectlessTasks().filter(matchesSearch) : []
+    }
+
+    private var timelineTasks: [AgentTaskSession] {
+        let base = treeMode ? store.sidebarTimelineTasks() : AppStore.sortedForTimeline(fallbackVisible)
+        return base.filter(matchesSearch)
+    }
+
+    private var archivedTasks: [AgentTaskSession] {
+        store.sidebarArchivedTasks().filter(matchesSearch)
+    }
+
+    private var groupNodes: [SidebarGroupNode] {
+        let nodes = treeMode
+            ? store.sidebarGroupNodes()
+            : AppStore.sortedForTimeline(fallbackVisible.filter { !$0.pinned }).map { SidebarGroupNode.task($0) }
+        guard isSearching else { return nodes }
+        return nodes.compactMap { node in
+            switch node {
+            case .task(let task):
+                return matchesSearch(task) ? node : nil
+            case .group(let group, let tasks):
+                let filtered = tasks.filter(matchesSearch)
+                return filtered.isEmpty ? nil : .group(group, tasks: filtered)
+            }
+        }
+    }
+
+    private func isProjectExpanded(_ id: String) -> Bool {
+        if isSearching { return true }
+        return treeMode ? !store.collapsedSidebarProjectIds.contains(id) : store.expandedProjectIds.contains(id)
+    }
+
+    private func toggleProject(_ id: String) {
+        if treeMode {
+            if store.collapsedSidebarProjectIds.contains(id) {
+                store.collapsedSidebarProjectIds.remove(id)
+            } else {
+                store.collapsedSidebarProjectIds.insert(id)
+            }
+        } else {
+            store.toggleProjectExpanded(id)
+        }
+    }
+
+    private var allProjectsExpanded: Bool {
+        treeMode
+            ? store.collapsedSidebarProjectIds.isEmpty
+            : store.expandedProjectIds.count == store.projects.count
+    }
+
+    private func toggleAllProjects() {
+        if treeMode {
+            store.collapsedSidebarProjectIds = allProjectsExpanded ? Set(store.sidebarProjects.map(\.id)) : []
+        } else {
+            store.toggleAllProjectsExpanded()
+        }
+    }
+
+    private func openWorkspace(for project: SidebarProject) -> WorkspaceProject? {
+        store.projects.first { $0.id == project.id || (!project.rootPath.isEmpty && $0.rootPath == project.rootPath) }
+    }
+
+    private func newTask(in project: SidebarProject?) {
+        if treeMode {
+            store.createNewTask(treeProjectId: project?.id)
+        } else {
+            store.createNewSession(inProjectId: project.flatMap { openWorkspace(for: $0)?.id })
+        }
+        store.mobilePage = .chat
+    }
+
+    // MARK: - Primary navigation
 
     private var topGlobalNavSection: some View {
         VStack(spacing: 2) {
@@ -100,7 +195,7 @@ public struct WorkspaceSidebarView: View {
                 isSelected: false,
                 accessibilityId: "newSessionButton"
             ) {
-                store.createNewSession()
+                newTask(in: nil)
             }
 
             topNavActionRow(
@@ -128,13 +223,12 @@ public struct WorkspaceSidebarView: View {
         .padding(.bottom, 10)
     }
 
+    // MARK: - Task list toolbar
+
     private var taskListToolbarSection: some View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
-                let headerTitle = showArchivedOnly
-                    ? L10n.text("Archived tasks", vi: "Đã lưu trữ", zh: "已归档任务", lang: store.language)
-                    : L10n.text("Task list", vi: "Danh sách tác vụ", zh: "任务列表", lang: store.language)
-                Text(headerTitle)
+                Text(showArchivedOnly ? "Archived" : "Task list")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(palette.foregroundSubtle)
 
@@ -157,28 +251,23 @@ public struct WorkspaceSidebarView: View {
                 .accessibilityIdentifier("taskListSearchButton")
 
                 Menu {
-                    Picker("View Mode", selection: $store.taskListViewMode) {
+                    Picker("Filter view", selection: Binding(
+                        get: { store.taskListViewMode },
+                        set: { mode in
+                            store.taskListViewMode = mode
+                            showArchivedOnly = false
+                        }
+                    )) {
                         ForEach(TaskListViewMode.allCases) { mode in
-                            Label(mode.title, systemImage: mode.icon)
-                                .tag(mode)
+                            Label(mode.title, systemImage: mode.icon).tag(mode)
                         }
                     }
+                    .pickerStyle(.inline)
 
                     Divider()
 
-                    Button {
-                        showArchivedOnly.toggle()
-                    } label: {
-                        Label(
-                            showArchivedOnly ? "Show Active Tasks" : "Show Archived Tasks",
-                            systemImage: showArchivedOnly ? "tray.full" : "archivebox"
-                        )
-                    }
-
-                    Button {
-                        store.showCommandCenter = true
-                    } label: {
-                        Label("Command Center (⌘K)", systemImage: "command")
+                    Toggle(isOn: $showArchivedOnly) {
+                        Label("Archived", systemImage: "archivebox")
                     }
                 } label: {
                     Image(systemName: "line.3.horizontal.decrease")
@@ -187,7 +276,7 @@ public struct WorkspaceSidebarView: View {
                         .frame(width: 40, height: 38)
                         .contentShape(Rectangle())
                 }
-                .accessibilityLabel("Task list view options")
+                .accessibilityLabel("Filter view")
                 .accessibilityIdentifier("taskListViewMenuButton")
             }
             .padding(.horizontal, 18)
@@ -199,7 +288,7 @@ public struct WorkspaceSidebarView: View {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 13))
                         .foregroundStyle(palette.foregroundSubtle)
-                    TextField("Search tasks or workspaces...", text: $searchQuery)
+                    TextField("Search tasks", text: $searchQuery)
                         .font(.system(size: 14))
                         .foregroundStyle(palette.foreground)
                         .textInputAutocapitalization(.never)
@@ -229,57 +318,590 @@ public struct WorkspaceSidebarView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
                 if showArchivedOnly {
-                    ForEach(visibleSessions) { session in
-                        taskItemRow(session: session, isPinnedRow: false)
-                    }
+                    archivedSection
                 } else {
-                    if !pinnedSessions.isEmpty {
-                        Text(L10n.text("Pinned", vi: "Đã ghim", zh: "已置顶", lang: store.language))
-                            .font(.system(size: 13.5, weight: .medium))
-                            .foregroundStyle(palette.foregroundMuted)
-                            .padding(.horizontal, 18)
-                            .padding(.top, 6)
-                            .padding(.bottom, 4)
-
-                        ForEach(pinnedSessions) { session in
-                            taskItemRow(session: session, isPinnedRow: true)
-                        }
+                    switch store.taskListViewMode {
+                    case .byProject:
+                        pinnedSection
+                        pinnedProjectsSection
+                        projectsSection
+                        if treeMode { tasksSection }
+                    case .grouped:
+                        pinnedSection
+                        groupedSection
+                    case .timeline:
+                        timelineSection
                     }
-
-                    if store.taskListViewMode == .timeline {
-                        Text(L10n.text("Recently updated", vi: "Cập nhật gần đây", zh: "最近更新", lang: store.language))
-                            .font(.system(size: 13.5, weight: .medium))
-                            .foregroundStyle(palette.foregroundMuted)
-                            .padding(.horizontal, 18)
-                            .padding(.top, 14)
-                            .padding(.bottom, 4)
-
-                        ForEach(timelineSessions) { session in
-                            taskItemRow(session: session, isPinnedRow: false)
-                        }
-                    } else {
-                        projectsSectionHeader
-
-                        if store.projectsSectionExpanded {
-                            ForEach(store.projects) { project in
-                                projectGroupSection(project)
-                            }
-                        }
-                    }
-                }
-
-                if visibleSessions.isEmpty {
-                    Text(showArchivedOnly ? "No archived tasks" : "No tasks yet")
-                        .font(.system(size: 14))
-                        .foregroundStyle(palette.foregroundMuted)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 40)
                 }
             }
             .padding(.bottom, 16)
         }
         .refreshable {
             await store.refreshWorkspaceAndSessions()
+        }
+    }
+
+    // MARK: - Sections
+
+    @ViewBuilder
+    private var pinnedSection: some View {
+        let tasks = pinnedTasks
+        if !tasks.isEmpty {
+            sectionHeading("Pinned")
+            let visible = pinnedExpanded ? tasks : Array(tasks.prefix(20))
+            ForEach(visible) { session in
+                taskItemRow(session: session)
+            }
+            if tasks.count > 20 {
+                showMoreButton(pinnedExpanded ? "Show less" : "Show more") {
+                    pinnedExpanded.toggle()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var pinnedProjectsSection: some View {
+        let pinned = sectionProjects.filter(\.pinned)
+        if !pinned.isEmpty {
+            ForEach(pinned) { project in
+                projectGroupSection(project)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var projectsSection: some View {
+        purposeSectionHeader(
+            title: "Projects",
+            expanded: store.projectsSectionExpanded,
+            toggle: { store.projectsSectionExpanded.toggle() }
+        ) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) { toggleAllProjects() }
+            } label: {
+                Image(systemName: allProjectsExpanded ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 32, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(allProjectsExpanded ? "Collapse all projects" : "Expand all projects")
+            .accessibilityIdentifier("toggleExpandAllProjectsButton")
+
+            Button {
+                showAddProjectAlert = true
+            } label: {
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 14))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 32, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("New project")
+            .accessibilityIdentifier("addWorkspaceProjectButton")
+        }
+
+        if store.projectsSectionExpanded {
+            ForEach(sectionProjects.filter { !$0.pinned }) { project in
+                projectGroupSection(project)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var tasksSection: some View {
+        purposeSectionHeader(
+            title: "Tasks",
+            expanded: store.tasksSectionExpanded,
+            toggle: { store.tasksSectionExpanded.toggle() }
+        ) {
+            Button {
+                newTask(in: nil)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 32, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("New task")
+            .accessibilityIdentifier("newConversationTaskButton")
+        }
+
+        if store.tasksSectionExpanded {
+            limitedTaskList(projectlessTasks, key: "tasks", step: 5, indent: false)
+        }
+    }
+
+    @ViewBuilder
+    private var groupedSection: some View {
+        let nodes = groupNodes
+        if nodes.isEmpty && pinnedTasks.isEmpty {
+            emptyState("No tasks yet")
+        }
+        ForEach(nodes) { node in
+            switch node {
+            case .task(let task):
+                taskItemRow(session: task)
+            case .group(let group, let tasks):
+                taskGroupSection(group, tasks: tasks)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var timelineSection: some View {
+        let tasks = timelineTasks
+        if tasks.isEmpty {
+            emptyState("No tasks yet")
+        } else {
+            let limit = listLimits["timeline"] ?? 20
+            let visible = Array(tasks.prefix(limit))
+            let now = Date()
+            ForEach(Array(visible.enumerated()), id: \.element.id) { index, session in
+                let bucket = Self.timelineBucket(session.updatedAt, now: now)
+                if index == 0 || Self.timelineBucket(visible[index - 1].updatedAt, now: now) != bucket {
+                    sectionHeading(bucket)
+                }
+                taskItemRow(session: session, showsWorkspaceLabel: true)
+            }
+            if tasks.count > limit {
+                showMoreButton("Show more") { listLimits["timeline"] = limit + 20 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var archivedSection: some View {
+        let tasks = archivedTasks
+        if tasks.isEmpty {
+            emptyState("No archived tasks")
+        } else {
+            ForEach(tasks) { session in
+                taskItemRow(session: session, showsWorkspaceLabel: true)
+            }
+        }
+    }
+
+    // MARK: - Section building blocks
+
+    private func sectionHeading(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 13.5, weight: .medium))
+            .foregroundStyle(palette.foregroundMuted)
+            .padding(.horizontal, 18)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+    }
+
+    private func purposeSectionHeader<Actions: View>(
+        title: String,
+        expanded: Bool,
+        toggle: @escaping () -> Void,
+        @ViewBuilder actions: () -> Actions
+    ) -> some View {
+        HStack(spacing: 2) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) { toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Text(title)
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(palette.foregroundMuted)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(palette.foregroundMuted)
+                    Spacer(minLength: 0)
+                }
+                .frame(height: 30)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            actions()
+        }
+        .padding(.leading, 18)
+        .padding(.trailing, 10)
+        .padding(.top, 12)
+    }
+
+    private func showMoreButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13.5))
+                .foregroundStyle(palette.foregroundMuted)
+                .padding(.leading, 44)
+                .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func emptyState(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 14))
+            .foregroundStyle(palette.foregroundMuted)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 40)
+    }
+
+    @ViewBuilder
+    private func limitedTaskList(_ tasks: [AgentTaskSession], key: String, step: Int, indent: Bool) -> some View {
+        if tasks.isEmpty {
+            Text("No tasks yet")
+                .font(.system(size: 13.5))
+                .foregroundStyle(palette.foregroundMuted)
+                .padding(.leading, indent ? 44 : 36)
+                .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                .accessibilityIdentifier("project-no-tasks")
+        } else {
+            let limit = isSearching ? tasks.count : (listLimits[key] ?? step)
+            ForEach(tasks.prefix(limit)) { session in
+                taskItemRow(session: session)
+            }
+            if tasks.count > limit {
+                showMoreButton("Show more") { listLimits[key] = limit + step }
+            }
+        }
+    }
+
+    // MARK: - Project row
+
+    private func projectGroupSection(_ project: SidebarProject) -> some View {
+        let isExpanded = isProjectExpanded(project.id)
+        let workspace = openWorkspace(for: project)
+        let showsUnread = !isExpanded && (treeMode ? store.sidebarProjectHasUnread(project) : false)
+
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) { toggleProject(project.id) }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: isExpanded ? "folder" : "folder.fill")
+                            .font(.system(size: 14, weight: .regular))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .frame(width: 18)
+
+                        Text(project.name)
+                            .font(.system(size: 14.5, weight: .regular))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+
+                        if showsUnread {
+                            Circle()
+                                .fill(palette.accentBlue)
+                                .frame(width: 6, height: 6)
+                                .accessibilityLabel("Project has unread tasks")
+                        }
+
+                        Spacer(minLength: 4)
+                    }
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Menu {
+                    Button {
+                        newTask(in: project)
+                    } label: {
+                        Label("New task", systemImage: "plus.bubble")
+                    }
+                    if let workspace {
+                        Button {
+                            store.activeProjectId = workspace.id
+                            store.activeInspectorTab = .files
+                            store.mobilePage = .chat
+                            store.showInspectorSheet = true
+                        } label: {
+                            Label("Show file tree", systemImage: "list.bullet.indent")
+                        }
+                    }
+                    if !project.rootPath.isEmpty {
+                        Button {
+                            UIPasteboard.general.string = project.rootPath
+                        } label: {
+                            Label("Copy path", systemImage: "doc.on.doc")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 13))
+                        .foregroundStyle(palette.foregroundMuted)
+                        .frame(width: 32, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("More")
+
+                Button {
+                    newTask(in: project)
+                } label: {
+                    Image(systemName: "plus.bubble")
+                        .font(.system(size: 14))
+                        .foregroundStyle(palette.foregroundMuted)
+                        .frame(width: 32, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("New task")
+                .accessibilityIdentifier("newProjectTask_\(project.id)")
+            }
+            .padding(.leading, 18)
+            .padding(.trailing, 10)
+            .frame(height: 38)
+
+            if isExpanded {
+                limitedTaskList(projectTasks(project), key: "project:\(project.id)", step: 5, indent: true)
+            }
+        }
+    }
+
+    // MARK: - Task group (By group view)
+
+    private func taskGroupSection(_ group: TaskGroupsStructure.Group, tasks: [AgentTaskSession]) -> some View {
+        let collapsed = store.collapsedTaskGroupIds.contains(group.id) && !isSearching
+
+        return VStack(alignment: .leading, spacing: 2) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    if store.collapsedTaskGroupIds.contains(group.id) {
+                        store.collapsedTaskGroupIds.remove(group.id)
+                    } else {
+                        store.collapsedTaskGroupIds.insert(group.id)
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(palette.foregroundMuted)
+                        .frame(width: 14)
+                    Circle()
+                        .fill(groupColor(group.color))
+                        .frame(width: 8, height: 8)
+                    Text(AppStore.groupDisplayTitle(group))
+                        .font(.system(size: 14.5, weight: .medium))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .lineLimit(1)
+                    Text("\(tasks.count)")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(palette.foregroundMuted)
+                        .padding(.horizontal, 6)
+                        .frame(height: 18)
+                        .background(Capsule().fill(palette.card))
+                    Spacer(minLength: 4)
+                }
+                .padding(.leading, 18)
+                .padding(.trailing, 12)
+                .frame(height: 38)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if !collapsed {
+                if tasks.isEmpty {
+                    Text("Drag tasks into this group")
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(palette.foregroundMuted)
+                        .padding(.leading, 44)
+                        .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                } else {
+                    ForEach(tasks) { session in
+                        taskItemRow(session: session)
+                    }
+                }
+            }
+        }
+    }
+
+    private func groupColor(_ name: String?) -> Color {
+        switch name?.lowercased() {
+        case "red": return .red
+        case "orange": return .orange
+        case "yellow": return .yellow
+        case "green": return .green
+        case "teal", "cyan": return .teal
+        case "blue": return .blue
+        case "purple", "violet": return .purple
+        case "pink": return .pink
+        case "gray", "grey": return .gray
+        default: return palette.foregroundMuted
+        }
+    }
+
+    // MARK: - Task row
+
+    private func taskItemRow(session: AgentTaskSession, showsWorkspaceLabel: Bool = false) -> some View {
+        let isSelected = session.id == store.activeSessionId
+
+        return Button {
+            store.selectSession(session)
+        } label: {
+            HStack(alignment: showsWorkspaceLabel ? .top : .center, spacing: 10) {
+                statusSlot(session: session)
+                    .frame(width: 16, height: showsWorkspaceLabel ? 20 : 16)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text(session.displayTitle)
+                            .font(.system(size: 14.5, weight: isSelected ? .medium : .regular))
+                            .foregroundStyle(palette.foreground)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+
+                        Spacer(minLength: 4)
+
+                        taskMetadata(session: session)
+                    }
+                    if showsWorkspaceLabel {
+                        Text(store.sidebarWorkspaceLabel(for: session))
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(palette.foregroundMuted)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 10)
+            .padding(.vertical, showsWorkspaceLabel ? 7 : 0)
+            .frame(minHeight: 42)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected ? palette.card : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .accessibilityIdentifier("sessionRow_\(session.id)")
+        .contextMenu {
+            Button {
+                store.togglePinSession(session.id)
+            } label: {
+                Label(session.pinned ? "Unpin task" : "Pin task", systemImage: session.pinned ? "pin.slash" : "pin")
+            }
+            Button {
+                renameText = session.title
+                renamingSession = session
+            } label: {
+                Label("Rename task", systemImage: "pencil")
+            }
+            if session.archived {
+                Button {
+                    store.restoreSession(session.id)
+                } label: {
+                    Label("Unarchive task", systemImage: "tray.and.arrow.up")
+                }
+            } else {
+                Button {
+                    store.archiveSession(session.id)
+                } label: {
+                    Label("Archive task", systemImage: "archivebox")
+                }
+            }
+            if !session.unread && !session.archived {
+                Button {
+                    store.markSessionUnread(session.id)
+                } label: {
+                    Label("Mark as unread", systemImage: "circle.inset.filled")
+                }
+            }
+            if !session.workspacePath.isEmpty {
+                Divider()
+                Button {
+                    UIPasteboard.general.string = session.workspacePath
+                } label: {
+                    Label("Copy path", systemImage: "doc.on.doc")
+                }
+            }
+            if session.archived {
+                Divider()
+                Button(role: .destructive) {
+                    store.deleteSession(session.id)
+                } label: {
+                    Label("Delete task", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statusSlot(session: AgentTaskSession) -> some View {
+        switch session.sidebarIndicator {
+        case .error:
+            if differentiateWithoutColor {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(palette.destructive)
+            } else {
+                Circle().fill(palette.destructive).frame(width: 6, height: 6)
+            }
+        case .unread:
+            if differentiateWithoutColor {
+                Image(systemName: "circle.inset.filled")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(palette.accentBlue)
+            } else {
+                Circle().fill(palette.accentBlue).frame(width: 7, height: 7)
+            }
+        case .loading:
+            ProgressView()
+                .controlSize(.mini)
+                .tint(palette.foregroundSubtle)
+        case .none:
+            if session.pinned {
+                Image(systemName: "pin")
+                    .font(.system(size: 11.5, weight: .regular))
+                    .foregroundStyle(palette.foregroundMuted)
+            } else {
+                Color.clear
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func taskMetadata(session: AgentTaskSession) -> some View {
+        HStack(spacing: 6) {
+            if let tag = session.pendingTagText {
+                Text(tag)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(palette.success)
+                    .lineLimit(1)
+                    .padding(.horizontal, 7)
+                    .frame(height: 20)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(palette.success.opacity(0.14)))
+                    .fixedSize()
+            }
+            if session.changeFileCount > 0 || session.changeAdded > 0 || session.changeRemoved > 0 {
+                HStack(spacing: 3) {
+                    Text("+\(session.changeAdded)").foregroundStyle(palette.success)
+                    Text("-\(session.changeRemoved)").foregroundStyle(palette.destructive)
+                }
+                .font(.system(size: 12.5, weight: .regular).monospacedDigit())
+                .fixedSize()
+            }
+            if session.cronAutomationId != nil {
+                Image(systemName: "calendar.badge.clock")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(palette.foregroundMuted)
+                    .accessibilityLabel("Scheduled task")
+            }
+            if session.offPeakTaskId != nil {
+                Image(systemName: "moon.zzz")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(palette.foregroundMuted)
+                    .accessibilityLabel("Idle-time task")
+            }
+            Text(Self.relativeAge(from: session.updatedAt))
+                .font(.system(size: 13, weight: .regular).monospacedDigit())
+                .foregroundStyle(palette.foregroundMuted)
+                .fixedSize()
         }
     }
 
@@ -378,306 +1000,6 @@ public struct WorkspaceSidebarView: View {
         .accessibilityIdentifier(accessibilityId)
     }
 
-    // MARK: - Projects Header & Collapsible Folder Groups
-
-    private var projectsSectionHeader: some View {
-        HStack(spacing: 6) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.16)) {
-                    store.projectsSectionExpanded.toggle()
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Text(L10n.text("Projects", vi: "Dự án", zh: "项目", lang: store.language))
-                        .font(.system(size: 13.5, weight: .medium))
-                        .foregroundStyle(palette.foregroundMuted)
-                    Image(systemName: store.projectsSectionExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(palette.foregroundMuted)
-                }
-            }
-            .buttonStyle(.plain)
-
-            Spacer()
-
-            Button {
-                withAnimation(.easeInOut(duration: 0.16)) {
-                    store.toggleAllProjectsExpanded()
-                }
-            } label: {
-                Image(systemName: "list.bullet.indent")
-                    .font(.system(size: 14))
-                    .foregroundStyle(palette.foregroundSubtle)
-                    .frame(width: 30, height: 28)
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("toggleExpandAllProjectsButton")
-
-            Button {
-                showAddProjectAlert = true
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(palette.foregroundSubtle)
-                    .frame(width: 30, height: 28)
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("addWorkspaceProjectButton")
-        }
-        .padding(.leading, 18)
-        .padding(.trailing, 12)
-        .padding(.top, 14)
-        .padding(.bottom, 2)
-    }
-
-    private func projectGroupSection(_ project: WorkspaceProject) -> some View {
-        let isExpanded = store.expandedProjectIds.contains(project.id)
-        let projectTasks = visibleSessions
-            .filter { $0.projectId == project.id && (store.taskListViewMode == .grouped || !$0.pinned) }
-            .sorted { $0.updatedAt > $1.updatedAt }
-
-        return VStack(alignment: .leading, spacing: 2) {
-            // Project Folder Row
-            HStack(spacing: 10) {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        store.toggleProjectExpanded(project.id)
-                    }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: isExpanded ? "folder" : "folder.fill")
-                            .font(.system(size: 14, weight: .regular))
-                            .foregroundStyle(palette.foregroundSubtle)
-                            .frame(width: 18)
-
-                        Text(project.name)
-                            .font(.system(size: 14.5, weight: .regular))
-                            .foregroundStyle(palette.foregroundSubtle)
-                            .lineLimit(1)
-
-                        Spacer(minLength: 4)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                Menu {
-                    Button {
-                        store.activeProjectId = project.id
-                        store.activeInspectorTab = .files
-                        store.mobilePage = .chat
-                        store.showInspectorSheet = true
-                    } label: {
-                        Label("Browse Workspace Files", systemImage: "folder")
-                    }
-                    Button {
-                        store.activeProjectId = project.id
-                        store.activeInspectorTab = .gitDiff
-                        store.mobilePage = .chat
-                        store.showInspectorSheet = true
-                    } label: {
-                        Label("Review Git Changes (\(project.gitBranch))", systemImage: "arrow.triangle.branch")
-                    }
-                    Button {
-                        store.createNewSession(inProjectId: project.id)
-                    } label: {
-                        Label("New Task in \(project.name)", systemImage: "plus.bubble")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 13))
-                        .foregroundStyle(palette.foregroundMuted)
-                        .frame(width: 26, height: 30)
-                }
-
-                Button {
-                    store.activeProjectId = project.id
-                    store.activeInspectorTab = .files
-                    store.mobilePage = .chat
-                    store.showInspectorSheet = true
-                } label: {
-                    Image(systemName: "list.bullet.indent")
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(palette.foregroundMuted)
-                        .frame(width: 26, height: 30)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    store.createNewSession(inProjectId: project.id)
-                } label: {
-                    Image(systemName: "plus.bubble")
-                        .font(.system(size: 14))
-                        .foregroundStyle(palette.foregroundMuted)
-                        .frame(width: 28, height: 30)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("newProjectTask_\(project.id)")
-            }
-            .padding(.leading, 18)
-            .padding(.trailing, 12)
-            .frame(height: 36)
-
-            if isExpanded {
-                ForEach(projectTasks) { session in
-                    taskItemRow(session: session, isPinnedRow: false)
-                }
-            }
-        }
-    }
-
-    // MARK: - Individual Task Row (Pinned & Project Tasks)
-
-    private func taskItemRow(session: AgentTaskSession, isPinnedRow: Bool) -> some View {
-        let isSelected = session.id == store.activeSessionId && store.mobilePage == .chat
-        let isCurrentSessionOnHome = session.id == store.activeSessionId && !isPinnedRow
-
-        return HStack(spacing: 8) {
-            Button {
-                store.selectSession(session)
-            } label: {
-                HStack(spacing: 10) {
-                    leadingTaskMarker(session: session, isPinnedRow: isPinnedRow)
-                        .frame(width: 18, alignment: .center)
-
-                    Text(session.title)
-                        .font(.system(size: 14.5, weight: (isSelected || isCurrentSessionOnHome) ? .medium : .regular))
-                        .foregroundStyle(palette.foreground)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-
-                    Spacer(minLength: 4)
-
-                    Text(relativeAgeString(from: session.updatedAt))
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundStyle(palette.foregroundMuted)
-                        .fixedSize()
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("sessionRow_\(session.id)")
-
-            if isPinnedRow {
-                Button {
-                    store.selectSession(session)
-                    store.activeInspectorTab = .files
-                    store.showInspectorSheet = true
-                } label: {
-                    Image(systemName: "list.bullet.indent")
-                        .font(.system(size: 13))
-                        .foregroundStyle(palette.foregroundMuted)
-                        .frame(width: 24, height: 32)
-                }
-                .buttonStyle(.plain)
-            }
-
-            Button {
-                if session.archived {
-                    store.restoreSession(session.id)
-                } else {
-                    store.archiveSession(session.id)
-                }
-            } label: {
-                Image(systemName: session.archived ? "tray.and.arrow.up" : "archivebox")
-                    .font(.system(size: 13))
-                    .foregroundStyle(palette.foregroundMuted)
-                    .frame(width: 32, height: 38)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(session.archived ? "Restore task" : "Archive task")
-            .accessibilityIdentifier("archiveTask_\(session.id)")
-        }
-        .padding(.leading, 10)
-        .padding(.trailing, 8)
-        .frame(height: 42)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill((isSelected || isCurrentSessionOnHome) ? palette.card : Color.clear)
-        )
-        .padding(.horizontal, 8)
-        .contextMenu {
-            Button {
-                store.togglePinSession(session.id)
-            } label: {
-                Label(session.pinned ? "Unpin task" : "Pin task", systemImage: session.pinned ? "pin.slash" : "pin")
-            }
-            Button {
-                renameText = session.title
-                renamingSession = session
-            } label: {
-                Label("Rename task", systemImage: "pencil")
-            }
-            Button {
-                store.forkSession(session.id)
-            } label: {
-                Label("Fork session", systemImage: "arrow.triangle.branch")
-            }
-            if session.archived {
-                Button {
-                    store.restoreSession(session.id)
-                } label: {
-                    Label("Unarchive task", systemImage: "tray.and.arrow.up")
-                }
-            } else {
-                Button {
-                    store.archiveSession(session.id)
-                } label: {
-                    Label("Archive task", systemImage: "archivebox")
-                }
-            }
-            Divider()
-            Button(role: .destructive) {
-                store.deleteSession(session.id)
-            } label: {
-                Label("Delete session", systemImage: "trash")
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func leadingTaskMarker(session: AgentTaskSession, isPinnedRow: Bool) -> some View {
-        if session.status == .running {
-            if differentiateWithoutColor {
-                Image(systemName: "bolt.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.94, green: 0.34, blue: 0.33))
-            } else {
-                Circle()
-                    .fill(Color(red: 0.94, green: 0.34, blue: 0.33))
-                    .frame(width: 8, height: 8)
-            }
-        } else if session.pendingPermission != nil || session.pendingQuestion != nil || session.pendingPlan != nil {
-            if differentiateWithoutColor {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(palette.warning)
-            } else {
-                Circle()
-                    .fill(palette.warning)
-                    .frame(width: 8, height: 8)
-            }
-        } else if isPinnedRow {
-            Image(systemName: "pin")
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(palette.foregroundMuted)
-        } else if session.unread {
-            if differentiateWithoutColor {
-                Image(systemName: "circle.inset.filled")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Color(red: 0.31, green: 0.61, blue: 1.0))
-            } else {
-                Circle()
-                    .fill(Color(red: 0.31, green: 0.61, blue: 1.0))
-                    .frame(width: 8, height: 8)
-            }
-        } else {
-            Color.clear
-                .frame(width: 8, height: 8)
-        }
-    }
-
     // MARK: - Bottom User Profile & Settings Footer
 
     private var bottomProfileFooter: some View {
@@ -732,14 +1054,35 @@ public struct WorkspaceSidebarView: View {
         .background(palette.sidebar)
     }
 
-    private func relativeAgeString(from date: Date) -> String {
-        let seconds = max(1, Int(Date().timeIntervalSince(date)))
-        if seconds < 60 { return "now" }
-        let minutes = seconds / 60
+    // MARK: - Formatting
+
+    /// `wA`: now / {m}m / {h}h / {d}d from `updatedAt`.
+    static func relativeAge(from date: Date, now: Date = Date()) -> String {
+        let minutes = Int(floor(now.timeIntervalSince(date) / 60))
+        if minutes < 1 { return "now" }
         if minutes < 60 { return "\(minutes)m" }
         let hours = minutes / 60
         if hours < 24 { return "\(hours)h" }
-        let days = hours / 24
-        return "\(days)d"
+        return "\(hours / 24)d"
+    }
+
+    /// `Fyt` date buckets for the Recently updated view (en-US: weeks start on Sunday).
+    static func timelineBucket(_ date: Date, now: Date) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.firstWeekday = 1
+        let startOfToday = calendar.startOfDay(for: now)
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: startOfToday).day ?? 0
+        if days <= 0 { return "Today" }
+        if days == 1 { return "Yesterday" }
+        if days <= 3 { return "\(days) days ago" }
+        if let week = calendar.dateInterval(of: .weekOfYear, for: now) {
+            if date >= week.start { return "This week" }
+            if let lastWeek = calendar.date(byAdding: .day, value: -7, to: week.start), date >= lastWeek { return "Last week" }
+        }
+        if let month = calendar.dateInterval(of: .month, for: now) {
+            if date >= month.start { return "This month" }
+            if let lastMonth = calendar.date(byAdding: .month, value: -1, to: month.start), date >= lastMonth { return "Last month" }
+        }
+        return "Older"
     }
 }

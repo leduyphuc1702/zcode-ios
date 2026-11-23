@@ -64,7 +64,7 @@ extension AppStore {
         case "state:notificationEnabled":
             if let enabled = payload as? Bool { applyHostSettings(["notificationEnabled": enabled]) }
         case "state:projects", "state:task-groups":
-            Task { @MainActor in await self.loadAllWorkspaceTasks(preferredActiveTaskId: self.activeSessionId) }
+            scheduleProjectTreeRefresh()
         default:
             break
         }
@@ -96,7 +96,10 @@ extension AppStore {
         }
         if let enabled = dict["notificationEnabled"] as? Bool, enabled != notificationsEnabled { notificationsEnabled = enabled }
         if let show = dict["messageStreamShowReasoning"] as? Bool, show != showReasoningBlocks { showReasoningBlocks = show }
-        if let show = dict["messageStreamShowTodos"] as? Bool, show != showTodoTracker { showTodoTracker = show }
+        if let show = dict["messageStreamShowTodos"] as? Bool, show != messageStreamShowTodos { messageStreamShowTodos = show }
+        if let on = dict["toolGroupingExploreEnabled"] as? Bool, on != toolGroupingExploreEnabled { toolGroupingExploreEnabled = on }
+        if let on = dict["toolGroupingTerminalEnabled"] as? Bool, on != toolGroupingTerminalEnabled { toolGroupingTerminalEnabled = on }
+        if let on = dict["toolGroupingChangesEnabled"] as? Bool, on != toolGroupingChangesEnabled { toolGroupingChangesEnabled = on }
         if let behavior = dict["zcodeInteractionBehavior"] as? String { hostSettings.interactionBehavior = behavior }
     }
 
@@ -106,7 +109,10 @@ extension AppStore {
             "theme": themeMode == .light ? "zai-light" : (themeMode == .system ? "system" : "zai-dark"),
             "notificationEnabled": notificationsEnabled,
             "messageStreamShowReasoning": showReasoningBlocks,
-            "messageStreamShowTodos": showTodoTracker
+            "messageStreamShowTodos": messageStreamShowTodos,
+            "toolGroupingExploreEnabled": toolGroupingExploreEnabled,
+            "toolGroupingTerminalEnabled": toolGroupingTerminalEnabled,
+            "toolGroupingChangesEnabled": toolGroupingChangesEnabled
         ]
         switch language {
         case .english: out["localePreference"] = "en-US"

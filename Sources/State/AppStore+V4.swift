@@ -26,6 +26,11 @@ final class V4SyncState {
     var rowTargets: [String: [String: Any]] = [:]
     var foregroundExecutionId: String?
     var loadingOlder = false
+    /// Read-only child conversation shown in the subagent pane (`subscribeConversationV4` on `childSessionId`).
+    var child: V4ConversationState?
+    var childAwaitingAck = false
+    var childStaged: [[String: Any]] = []
+    var childResyncInFlight = false
     /// Locally echoed user prompts shown until the host row arrives.
     var optimistic: [(message: ChatTurnMessage, sentAt: Date)] = []
 
@@ -46,6 +51,10 @@ final class V4SyncState {
         indexFrameSubs.removeAll()
         lifecycleSubId = nil
         conversation?.subscriptionId = nil
+        child?.subscriptionId = nil
+        childAwaitingAck = false
+        childStaged.removeAll()
+        childResyncInFlight = false
         awaitingAck = false
         staged.removeAll()
         subscribeInFlight = nil
@@ -184,6 +193,10 @@ extension AppStore {
         guard let topic = envelope["topic"] as? String else { return }
         if topic.hasPrefix("sessions-index/") {
             v4HandleIndexEnvelope(envelope, topic: topic)
+            return
+        }
+        if let child = v4Sync.child, topic == child.topic {
+            v4HandleChildEnvelope(envelope)
             return
         }
         guard let conv = v4Sync.conversation, topic == conv.topic else { return }
@@ -375,6 +388,7 @@ extension AppStore {
             session.cachedTokens = usage.cumulativeCacheReadTokens
         }
         session.todos = projection.todos
+        session.subagentRuns = projection.subagentRuns
         session.queuedPrompts = projection.queue
         session.pendingPermission = projection.permission
         session.pendingQuestion = projection.question
@@ -623,6 +637,190 @@ extension AppStore {
         return true
     }
 
+    func v4CanTarget(messageId: String) -> Bool {
+        guard let session = activeSession, v4Owns(session.id) else { return false }
+        return v4Sync.rowTargets[messageId]?["entityId"] != nil
+    }
+
+    /// `forkAssistant`: the host branches a new task from this assistant turn.
+    func v4ForkAssistant(messageId: String) {
+        guard let session = activeSession, v4Owns(session.id),
+              let target = v4Sync.rowTargets[messageId], target["entityId"] != nil else { return }
+        Task { @MainActor in
+            do {
+                let ack = try await self.v4Command("forkAssistant", payload: ["target": target], sessionId: session.id, workspacePath: session.workspacePath, rowTarget: true)
+                let result = ack["result"] as? [String: Any]
+                let childId = (result?["childSessionId"] as? String) ?? (result?["sessionId"] as? String)
+                await self.loadAllWorkspaceTasks(preferredActiveTaskId: nil)
+                if let childId, let child = self.sessions.first(where: { $0.id == childId }) {
+                    self.selectSession(child)
+                }
+            } catch {
+                self.showToast("Couldn't fork task: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// `applyFileRewind`: restores workspace files to the state at this turn.
+    func v4ApplyFileRewind(messageId: String) {
+        guard let session = activeSession, v4Owns(session.id),
+              let target = v4Sync.rowTargets[messageId], target["entityId"] != nil else { return }
+        v4Fire("applyFileRewind", payload: ["target": target], session: session, rowTarget: true, failure: "Couldn't rewind files")
+    }
+
+    func v4RetryTurn(messageId: String) {
+        guard let session = activeSession, v4Owns(session.id),
+              let target = v4Sync.rowTargets[messageId], target["entityId"] != nil else { return }
+        v4Fire("retryTurn", payload: ["target": target], session: session, rowTarget: true, failure: "Couldn't retry")
+    }
+
+    // MARK: - Subagent child conversation (read-only pane)
+
+    /// Opens the read-only transcript of a subagent's child session, like the desktop side pane (`wIn`).
+    public func openSubagentSession(childSessionId: String, title: String) {
+        guard !childSessionId.isEmpty else { return }
+        if let current = subagentPane, current.sessionId != childSessionId {
+            subagentPaneBackStack.append(current)
+        }
+        subagentPane = SubagentPaneState(sessionId: childSessionId, title: title.isEmpty ? "Subagent" : title)
+        showInspectorSheet = false
+        showSubagentDrawer = true
+        Task { @MainActor in await self.v4SubscribeChild(childSessionId) }
+    }
+
+    /// Returns to the parent subagent pane, or closes the pane at the root.
+    public func popSubagentSession() {
+        if let previous = subagentPaneBackStack.popLast() {
+            subagentPane = previous
+            subagentPane?.messages = []
+            subagentPane?.isLoading = true
+            Task { @MainActor in await self.v4SubscribeChild(previous.sessionId) }
+        } else {
+            closeSubagentSession()
+        }
+    }
+
+    public func closeSubagentSession() {
+        showSubagentDrawer = false
+        subagentPane = nil
+        subagentPaneBackStack.removeAll()
+        v4UnsubscribeChild()
+    }
+
+    private func v4UnsubscribeChild() {
+        guard let child = v4Sync.child else { return }
+        v4Sync.child = nil
+        v4Sync.childAwaitingAck = false
+        v4Sync.childStaged.removeAll()
+        guard let subId = child.subscriptionId else { return }
+        var arg = v4WorkspaceArg(v4Sync.conversationWorkspacePath, v4Sync.conversationWorkspaceIdentity)
+        arg["subscriptionId"] = subId
+        let client = rpcClient
+        Task { _ = try? await client.call(channel: "zcode-agent", method: "unsubscribeConversationV4", args: [.fromJSONObject(arg)], timeoutSec: 6) }
+    }
+
+    private func v4SubscribeChild(_ childSessionId: String) async {
+        v4UnsubscribeChild()
+        guard !isUITestSeededMode, isLiveHostConnected, await v4EnsureHandshake(),
+              let path = activeSession?.workspacePath else {
+            subagentPane?.isLoading = false
+            subagentPane?.errorText = "Connect to your computer to view this subagent."
+            return
+        }
+        let identity = workspaceIdentityByPath[path]
+        guard await v4EnsureFrameListener(path: path, identity: identity, event: "onDynamicConversationFrame") else {
+            subagentPane?.isLoading = false
+            subagentPane?.errorText = "Couldn't open the subagent session."
+            return
+        }
+        let child = V4ConversationState(sessionId: childSessionId)
+        v4Sync.child = child
+        v4Sync.childAwaitingAck = true
+        v4Sync.childStaged.removeAll()
+        v4Sync.assembler.reset(topic: child.topic)
+        var arg = v4WorkspaceArg(path, identity)
+        arg["sessionId"] = childSessionId
+        do {
+            let value = try await rpcClient.call(channel: "zcode-agent", method: "subscribeConversationV4", args: [.fromJSONObject(arg)], timeoutSec: 25)
+            guard v4Sync.child?.sessionId == childSessionId else { return }
+            let dict = value.decodeJSONDictionary() ?? [:]
+            let ack = (dict["ack"] as? [String: Any]) ?? dict
+            guard let subscriptionId = ack["subscriptionId"] as? String else {
+                throw V4CommandError(status: "failed", reasonCode: nil, message: "Host returned no subscription id.")
+            }
+            v4Sync.child?.subscriptionId = subscriptionId
+            v4Sync.childAwaitingAck = false
+            let staged = v4Sync.childStaged
+            v4Sync.childStaged.removeAll()
+            for envelope in staged where (envelope["subscriptionId"] as? String) == subscriptionId {
+                v4HandleChildEnvelope(envelope)
+            }
+        } catch {
+            guard v4Sync.child?.sessionId == childSessionId else { return }
+            v4Sync.child = nil
+            v4Sync.childAwaitingAck = false
+            subagentPane?.isLoading = false
+            subagentPane?.errorText = error.localizedDescription
+        }
+    }
+
+    private func v4HandleChildEnvelope(_ envelope: [String: Any]) {
+        if v4Sync.childAwaitingAck {
+            if v4Sync.childStaged.count < 1024 { v4Sync.childStaged.append(envelope) }
+            return
+        }
+        guard let child = v4Sync.child, let subId = child.subscriptionId,
+              (envelope["subscriptionId"] as? String) == subId else { return }
+        switch v4Sync.assembler.ingest(envelope) {
+        case .frame(let frame, _):
+            guard var current = v4Sync.child, current.subscriptionId == subId else { return }
+            let result = current.apply(frame: frame)
+            v4Sync.child = current
+            switch result {
+            case .applied: v4PublishChild()
+            case .gap: v4ResyncChild()
+            case .ignored: break
+            }
+        case .fault:
+            v4ResyncChild()
+        case .ignored:
+            break
+        }
+    }
+
+    private func v4ResyncChild() {
+        guard !v4Sync.childResyncInFlight, let child = v4Sync.child, let subId = child.subscriptionId else { return }
+        v4Sync.childResyncInFlight = true
+        var arg = v4WorkspaceArg(v4Sync.conversationWorkspacePath, v4Sync.conversationWorkspaceIdentity)
+        arg["subscriptionId"] = subId
+        arg["base"] = NSNull()
+        arg["forceSnapshot"] = true
+        v4Sync.assembler.reset(topic: child.topic)
+        Task { @MainActor in
+            defer { self.v4Sync.childResyncInFlight = false }
+            _ = try? await self.rpcClient.call(channel: "zcode-agent", method: "resyncConversationV4", args: [.fromJSONObject(arg)], timeoutSec: 25)
+        }
+    }
+
+    private func v4PublishChild() {
+        guard let child = v4Sync.child, child.hasSnapshot, subagentPane?.sessionId == child.sessionId else { return }
+        let projection = V4ConversationMapper.project(child) { _ in 0 }
+        var pane = subagentPane!
+        pane.messages = projection.messages
+        pane.status = projection.status
+        pane.statusNotice = projection.statusNotice
+        pane.todos = projection.todos
+        pane.isLoading = false
+        pane.errorText = nil
+        if pane != subagentPane { subagentPane = pane }
+    }
+
+    /// Stops a running subagent or background job (`cancelBackgroundWork {workId}`) on the active session.
+    public func cancelBackgroundWork(workId: String) {
+        guard let session = activeSession else { return }
+        v4Fire("cancelBackgroundWork", payload: ["workId": workId], session: session, cas: false, failure: "Couldn't stop the subagent")
+    }
+
     // MARK: - Sessions index
 
     func v4SubscribeSessionsIndex(projectId: String, path: String, identity: String?) async {
@@ -705,6 +903,15 @@ extension AppStore {
                 session.title = title
             }
             let pendingKind = (entry["pendingInteraction"] as? [String: Any])?["kind"] as? String
+            if let counts = entry["pendingInteractions"] as? [String: Any] {
+                let permission = Int(ZCodeV4.double(counts["permissionCount"]) ?? 0)
+                let userInput = Int(ZCodeV4.double(counts["userInputCount"]) ?? 0)
+                session.pendingInteractionCount = permission + userInput
+                session.pendingInteractionIsUserInput = userInput > 0
+            } else {
+                session.pendingInteractionCount = pendingKind == nil ? 0 : 1
+                session.pendingInteractionIsUserInput = pendingKind == "userInput"
+            }
             session.status = {
                 if pendingKind == "permission" { return .waitingApproval }
                 if pendingKind == "userInput" { return .waitingQuestion }

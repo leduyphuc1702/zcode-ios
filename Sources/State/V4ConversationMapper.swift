@@ -21,6 +21,8 @@ struct V4SessionProjection {
     /// Row targets (`rowId`, `entityId`) for row-scoped commands, keyed by message id.
     var rowTargets: [String: [String: Any]] = [:]
     var foregroundExecutionId: String?
+    /// Running subagents (`snapshot.subagents.running` merged with `backgroundWorks`).
+    var subagentRuns: [SubagentSessionRun] = []
 }
 
 @MainActor
@@ -79,7 +81,62 @@ enum V4ConversationMapper {
 
         applyInteractions((state["pendingInteractions"] as? [[String: Any]]) ?? [], into: &out, elicitationIndex: elicitationIndex)
         out.messages = messages(conv.rows, rowTargets: &out.rowTargets)
+        out.subagentRuns = runningSubagents(state)
         return out
+    }
+
+    /// Status-panel merge (`O2t`): running subagents keyed by `childSessionId`, stop control from background works.
+    static func runningSubagents(_ state: [String: Any]) -> [SubagentSessionRun] {
+        let works = ((state["backgroundWorks"] as? [[String: Any]]) ?? [])
+        var workByChild: [String: [String: Any]] = [:]
+        for work in works {
+            if let child = work["childSessionId"] as? String { workByChild[child] = work }
+        }
+        var seen = Set<String>()
+        var runs: [SubagentSessionRun] = []
+        let running = ((state["subagents"] as? [String: Any])?["running"] as? [[String: Any]]) ?? []
+        for item in running {
+            guard let child = item["childSessionId"] as? String, seen.insert(child).inserted else { continue }
+            let work = workByChild[child]
+            runs.append(subagentRun(
+                childSessionId: child,
+                title: (item["title"] as? String) ?? (work?["title"] as? String) ?? "",
+                type: (item["subagentType"] as? String) ?? "subagent",
+                status: (item["status"] as? String) ?? "running",
+                startedAt: ZCodeV4.double(item["startedAt"]) ?? ZCodeV4.double(work?["startedAt"]),
+                work: work
+            ))
+        }
+        for work in works where (work["kind"] as? String) == "subagent" && (work["status"] as? String) == "running" {
+            guard let child = work["childSessionId"] as? String, seen.insert(child).inserted else { continue }
+            runs.append(subagentRun(
+                childSessionId: child,
+                title: (work["title"] as? String) ?? "",
+                type: "subagent",
+                status: "running",
+                startedAt: ZCodeV4.double(work["startedAt"]),
+                work: work
+            ))
+        }
+        return runs
+    }
+
+    private static func subagentRun(childSessionId: String, title: String, type: String, status: String,
+                                    startedAt: Double?, work: [String: Any]?) -> SubagentSessionRun {
+        let started = startedAt.map { Date(timeIntervalSince1970: $0 > 9_999_999_999 ? $0 / 1000 : $0) }
+        var run = SubagentSessionRun(
+            id: childSessionId,
+            title: title.isEmpty ? type : title,
+            agentType: type,
+            isRunning: true,
+            elapsedText: "",
+            transcriptMarkdown: "",
+            timestamp: started ?? Date()
+        )
+        run.startedAt = started
+        run.status = status
+        if let work, (work["cancellable"] as? Bool) != false { run.controlWorkId = work["workId"] as? String }
+        return run
     }
 
     // MARK: Usage / plan / queue
@@ -253,6 +310,7 @@ enum V4ConversationMapper {
         for row in rows where (row["kind"] as? String) == "turnHeader" {
             if let turn = row["turnId"] as? String { turnHeaders[turn] = row }
         }
+        let pairing = pairSubagents(rows)
 
         func flush() {
             if let msg = current { result.append(msg) }
@@ -293,6 +351,7 @@ enum V4ConversationMapper {
                 result.append(msg)
 
             case "reasoning", "assistantText", "toolCall", "subagent":
+                if kind == "subagent", pairing.suppressed.contains(rowId) { continue }
                 let rank: SegmentRank = kind == "reasoning" ? .reasoning : (kind == "assistantText" ? .text : .tool)
                 if current == nil || rank.rawValue < currentRank {
                     flush()
@@ -320,7 +379,8 @@ enum V4ConversationMapper {
                     }
                     rowTargets[current!.id] = target
                 case "toolCall":
-                    current!.tools.append(tool(row))
+                    let key = "\(turnId ?? "")|\((row["toolCallId"] as? String) ?? "")"
+                    current!.tools.append(tool(row, subagent: pairing.byToolCall[key]))
                 default:
                     current!.tools.append(subagent(row))
                 }
@@ -345,81 +405,320 @@ enum V4ConversationMapper {
         return result
     }
 
-    static func tool(_ row: [String: Any]) -> ToolCallItem {
+    static let agentToolNames: Set<String> = ["Agent", "Task", "subagent"]
+
+    /// `$sn`: subagent rows attach to the Agent tool call with the same `(turnId, toolCallId)`;
+    /// a parentless row pairs only when its turn has exactly one unpaired Agent call and one unpaired subagent row.
+    static func pairSubagents(_ rows: [[String: Any]]) -> (byToolCall: [String: [String: Any]], suppressed: Set<Int>) {
+        var agentCalls: [String: [String]] = [:]
+        for row in rows where (row["kind"] as? String) == "toolCall" {
+            guard agentToolNames.contains((row["toolName"] as? String) ?? ""), let id = row["toolCallId"] as? String else { continue }
+            agentCalls[(row["turnId"] as? String) ?? "", default: []].append(id)
+        }
+        var byToolCall: [String: [String: Any]] = [:]
+        var suppressed = Set<Int>()
+        var parentless: [String: [[String: Any]]] = [:]
+        for row in rows where (row["kind"] as? String) == "subagent" {
+            let turn = (row["turnId"] as? String) ?? ""
+            if let parent = row["parentToolCallId"] as? String, !parent.isEmpty {
+                guard agentCalls[turn]?.contains(parent) == true, let rowId = ZCodeV4.int(row["rowId"]) else { continue }
+                byToolCall["\(turn)|\(parent)"] = row
+                suppressed.insert(rowId)
+            } else {
+                parentless[turn, default: []].append(row)
+            }
+        }
+        for (turn, list) in parentless where list.count == 1 {
+            let unpaired = (agentCalls[turn] ?? []).filter { byToolCall["\(turn)|\($0)"] == nil }
+            guard unpaired.count == 1, let rowId = ZCodeV4.int(list[0]["rowId"]) else { continue }
+            byToolCall["\(turn)|\(unpaired[0])"] = list[0]
+            suppressed.insert(rowId)
+        }
+        return (byToolCall, suppressed)
+    }
+
+    static func tool(_ row: [String: Any], subagent: [String: Any]? = nil) -> ToolCallItem {
         let toolName = (row["toolName"] as? String) ?? "Tool"
+        let lower = toolName.lowercased()
+        let rawStatus = (row["status"] as? String) ?? "success"
         var input = row["input"] as? [String: Any]
         if input == nil, let text = row["inputText"] as? String, let data = text.data(using: .utf8) {
             input = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         }
+        let inputDict = input ?? [:]
         let output = row["output"] as? [String: Any]
-        let error = row["error"] as? [String: Any]
-        var legacy: [String: Any] = [
-            "toolId": (row["toolCallId"] as? String) ?? "r\(ZCodeV4.int(row["rowId"]) ?? 0)",
-            "toolName": toolName,
-            "input": input ?? [:],
-            "status": "completed"
-        ]
-        if let text = output?["text"] as? String { legacy["output"] = text }
-        else if let preview = (row["outputPreview"] as? [String: Any])?["text"] as? String { legacy["output"] = preview }
-        if let message = error?["message"] as? String { legacy["error"] = message }
-        if let started = ZCodeV4.double(row["startedAt"]), let ended = ZCodeV4.double(row["endedAt"]) {
-            legacy["durationMs"] = max(0, ended - started)
-        }
-        var item = AppStore.parseTool(legacy, fallbackId: legacy["toolId"] as! String)
-        item.toolName = toolName
-        item.status = {
-            switch row["status"] as? String {
+        let display = (output?["display"] as? [String: Any]) ?? (row["display"] as? [String: Any])
+        let displayKind = display?["kind"] as? String
+        let id = (row["toolCallId"] as? String) ?? "r\(ZCodeV4.int(row["rowId"]) ?? 0)"
+        let status: ToolCallStatus = {
+            switch rawStatus {
             case "pendingApproval": return .pendingApproval
             case "inputStreaming", "running": return .running
-            case "error", "cancelled": return .failed
+            case "error": return .failed
             default: return .completed
             }
         }()
-        if let display = output?["display"] as? [String: Any], (display["kind"] as? String) == "file_diff" {
-            item.addedLines = ZCodeV4.int(display["additions"]) ?? item.addedLines
-            item.removedLines = ZCodeV4.int(display["deletions"]) ?? item.removedLines
-            if let path = display["filePath"] as? String, !path.isEmpty { item.filePath = path }
-            let hunks = ((display["structuredPatch"] as? [[String: Any]]) ?? []).map { hunk -> String in
+
+        let outputText: String? = {
+            if status == .running, let preview = row["outputPreview"] as? [String: Any] {
+                return (preview["fullText"] as? String) ?? (preview["text"] as? String)
+            }
+            if displayKind == "bash_output", let text = display?["output"] as? String { return text }
+            if let text = output?["text"] as? String { return text }
+            return (row["outputPreview"] as? [String: Any])?["text"] as? String
+        }()
+        let errorText: String? = {
+            guard rawStatus == "error" else { return nil }
+            if let message = (row["error"] as? [String: Any])?["message"] as? String, !message.isEmpty { return message }
+            if let text = outputText, !text.isEmpty { return text }
+            return "Failed"
+        }()
+
+        let filePath = (display?["filePath"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? firstString(inputDict, ["file_path", "filePath", "path", "filename", "notebook_path"])
+
+        var item = ToolCallItem(
+            id: id,
+            kind: legacyKind(lower),
+            title: toolName,
+            subtitle: "",
+            status: status,
+            filePath: filePath,
+            lineRange: nil,
+            diffPatch: nil,
+            command: shellCommand(inputDict),
+            output: outputText,
+            durationMs: 0,
+            addedLines: 0,
+            removedLines: 0,
+            subagentSteps: [],
+            subagentRunId: nil,
+            toolName: toolName
+        )
+        item.rawStatus = rawStatus
+        item.errorText = errorText
+        item.workId = row["workId"] as? String
+        if let input { item.inputJSON = prettyJSON(input) }
+        item.rawJSON = prettyJSON(row, limit: 24_000)
+
+        // File changes
+        if displayKind == "file_diff" {
+            item.addedLines = ZCodeV4.int(display?["additions"]) ?? 0
+            item.removedLines = ZCodeV4.int(display?["deletions"]) ?? 0
+            let hunks = ((display?["structuredPatch"] as? [[String: Any]]) ?? []).map { hunk -> String in
                 let header = "@@ -\(ZCodeV4.int(hunk["oldStart"]) ?? 0),\(ZCodeV4.int(hunk["oldLines"]) ?? 0) +\(ZCodeV4.int(hunk["newStart"]) ?? 0),\(ZCodeV4.int(hunk["newLines"]) ?? 0) @@"
                 return ([header] + ((hunk["lines"] as? [String]) ?? [])).joined(separator: "\n")
             }
             if !hunks.isEmpty { item.diffPatch = hunks.joined(separator: "\n") }
+        } else if let oldText = inputDict["old_string"] as? String, let newText = inputDict["new_string"] as? String {
+            item.diffPatch = AppStore.miniDiff(old: oldText, new: newText)
+            item.removedLines = oldText.isEmpty ? 0 : oldText.components(separatedBy: "\n").count
+            item.addedLines = newText.isEmpty ? 0 : newText.components(separatedBy: "\n").count
+        } else if let content = inputDict["content"] as? String, ["write", "write_file", "create_file"].contains(lower) {
+            item.contentPreview = content
+            item.addedLines = content.isEmpty ? 0 : content.components(separatedBy: "\n").count
         }
+
+        // Search / fetch
+        item.webURL = inputDict["url"] as? String
+        item.searchLabel = searchLabel(lower: lower, input: inputDict, rawInput: row["input"])
+
+        // MCP
+        if displayKind == "mcp_tool" {
+            item.mcpServer = display?["serverName"] as? String
+            item.mcpTool = display?["toolName"] as? String
+            item.mcpDescription = display?["description"] as? String
+        }
+        if item.mcpServer == nil, let parsed = parseMCPName(toolName) {
+            item.mcpServer = parsed.server
+            item.mcpTool = parsed.tool
+        }
+
+        // Todo / questions / skill / plan
+        if lower == "todowrite" || lower == "todoread" || lower == "update_plan" {
+            item.todoItems = todoItems(inputDict) ?? outputText.flatMap { text in
+                (try? JSONSerialization.jsonObject(with: Data(text.utf8))).flatMap { $0 as? [String: Any] }.flatMap(todoItems)
+            }
+        }
+        if lower == "askuserquestion" {
+            item.questionAnswers = questionAnswers(input: inputDict, output: outputText)
+        }
+        if lower == "skill" {
+            item.skillName = firstString(inputDict, ["skill", "name", "command"])
+            item.skillArgs = firstString(inputDict, ["args", "arguments"])
+        }
+        if lower == "exitplanmode" || lower == "enterplanmode" {
+            item.planMarkdown = (inputDict["plan"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        }
+
+        // Agent / Task (inline subagent card)
+        if agentToolNames.contains(toolName) || ["agent", "task", "spawn_agent"].contains(lower) {
+            item.kind = .subagent
+            item.agentName = (subagent?["subagentType"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ?? firstString(inputDict, ["nickname", "agentType", "agent_type", "subagent_type", "subagentType"])
+            item.agentDescription = firstString(inputDict, ["description", "subagent_type", "agent_type"])
+            item.subagentRunId = subagent?["childSessionId"] as? String
+            if item.workId == nil { item.workId = subagent?["workId"] as? String }
+        }
+
+        item.subtitle = item.command ?? item.filePath ?? item.searchLabel ?? item.webURL ?? ""
         return item
     }
 
     private static func subagent(_ row: [String: Any]) -> ToolCallItem {
-        let type = (row["subagentType"] as? String) ?? "Agent"
+        let type = (row["subagentType"] as? String) ?? "subagent"
         let summary = (row["summaryText"] as? String) ?? ""
+        let rawStatus = (row["status"] as? String) ?? "running"
         let status: ToolCallStatus = {
-            switch row["status"] as? String {
+            switch rawStatus {
             case "running": return .running
-            case "failed", "cancelled": return .failed
+            case "failed": return .failed
             default: return .completed
             }
         }()
         var item = ToolCallItem(
-            id: (row["parentToolCallId"] as? String) ?? "sub-r\(ZCodeV4.int(row["rowId"]) ?? 0)",
+            id: "sub-r\(ZCodeV4.int(row["rowId"]) ?? 0)",
             kind: .subagent,
             title: type,
-            subtitle: String(summary.split(separator: "\n").first ?? "").prefix(120).description,
+            subtitle: summary,
             status: status,
             filePath: nil,
             lineRange: nil,
             diffPatch: nil,
             command: nil,
-            output: summary.isEmpty ? nil : summary,
+            output: nil,
             durationMs: 0,
             addedLines: 0,
             removedLines: 0,
             subagentSteps: [],
             subagentRunId: row["childSessionId"] as? String,
-            toolName: "Task"
+            toolName: "subagent"
         )
-        if let started = ZCodeV4.double(row["startedAt"]), let ended = ZCodeV4.double(row["endedAt"]) {
-            item.durationMs = Int(max(0, ended - started))
-        }
+        item.rawStatus = rawStatus
+        item.standaloneSubagentLine = "\(type) · \(rawStatus)" + (summary.isEmpty ? "" : " — \(summary)")
         return item
+    }
+
+    private static func legacyKind(_ lower: String) -> ToolCallKind {
+        switch lower {
+        case "read", "notebookread": return .readFile
+        case "write", "write_file", "create_file": return .writeFile
+        case "edit", "multiedit", "apply_patch", "applypatch", "notebookedit": return .editFile
+        case "bash", "shell", "execute": return .bash
+        case "grep", "glob", "ls", "websearch", "web_search", "webfetch", "fetch", "web_fetch": return .search
+        default: return lower.hasPrefix("mcp__") ? .mcp : .readFile
+        }
+    }
+
+    /// `JZ`/`YZ`: string, argv (element after `-lc`, else the tail), or `command|cmd|script`; strips `/bin/zsh -lc`.
+    static func shellCommand(_ input: [String: Any]) -> String? {
+        var command: String?
+        for key in ["command", "cmd", "script"] {
+            if let text = input[key] as? String, !text.isEmpty { command = text; break }
+            if let argv = input[key] as? [String], !argv.isEmpty {
+                if let idx = argv.firstIndex(of: "-lc"), idx + 1 < argv.count { command = argv[idx + 1] }
+                else { command = argv.count > 1 ? argv.dropFirst().joined(separator: " ") : argv[0] }
+                break
+            }
+        }
+        if command == nil, let parsed = input["parsed_cmd"] as? [[String: Any]] {
+            command = parsed.compactMap { $0["cmd"] as? String }.first
+        }
+        guard var text = command else { return nil }
+        for prefix in ["/bin/zsh -lc ", "/bin/bash -lc ", "zsh -lc ", "bash -lc "] where text.hasPrefix(prefix) {
+            text = String(text.dropFirst(prefix.count))
+            if text.count >= 2, let first = text.first, first == text.last, first == "'" || first == "\"" {
+                text = String(text.dropFirst().dropLast())
+            }
+            break
+        }
+        return text
+    }
+
+    /// `d7t`: "Find {query}" / "List in {cwd}".
+    private static func searchLabel(lower: String, input: [String: Any], rawInput: Any?) -> String? {
+        guard ["grep", "glob", "ls", "websearch", "web_search", "toolsearch", "localtoolsearch"].contains(lower) else { return nil }
+        if lower == "toolsearch" || lower == "localtoolsearch" {
+            let query = firstString(input, ["query"]) ?? ""
+            return query.isEmpty ? "Search tools" : "Search tools: \(query)"
+        }
+        if let text = rawInput as? String { return text.isEmpty ? "Find" : "Find \(text)" }
+        if let parsed = input["parsed_cmd"] as? [[String: Any]], let first = parsed.first {
+            if (first["type"] as? String) == "list_files" {
+                let cwd = (first["path"] as? String) ?? (first["cwd"] as? String) ?? ""
+                return cwd.isEmpty ? "List" : "List in \(cwd)"
+            }
+            if let value = firstString(first, ["pattern", "query", "path"]) { return "Find \(value)" }
+        }
+        if lower == "ls" {
+            let path = firstString(input, ["path"]) ?? ""
+            return path.isEmpty ? "List" : "List in \(path)"
+        }
+        let value = firstString(input, ["search_query", "searchQuery", "query", "pattern", "path", "url", "prompt", "target", "name"])
+        return value.map { "Find \($0)" } ?? "Find"
+    }
+
+    /// `FYe`: `mcp__<server>__<tool>`, deduping a suffix shared by server and tool segments.
+    static func parseMCPName(_ name: String) -> (server: String, tool: String)? {
+        guard name.lowercased().hasPrefix("mcp__") else { return nil }
+        let parts = String(name.dropFirst(5)).components(separatedBy: "__").filter { !$0.isEmpty }
+        guard parts.count >= 2 else { return nil }
+        var server = parts[0]
+        if server.hasPrefix("plugin_") { server = String(server.dropFirst(7)) }
+        return (server, parts.dropFirst().joined(separator: "__"))
+    }
+
+    private static func todoItems(_ dict: [String: Any]) -> [TodoChecklistItem]? {
+        guard let list = ["todos", "plan", "steps", "items"].lazy.compactMap({ dict[$0] as? [Any] }).first else { return nil }
+        var out: [TodoChecklistItem] = []
+        for (i, element) in list.enumerated() {
+            if let text = element as? String {
+                out.append(TodoChecklistItem(id: text, content: text, status: i == 0 ? "in_progress" : "pending", priority: "medium"))
+            } else if let obj = element as? [String: Any],
+                      let title = firstString(obj, ["content", "step", "title", "text", "activeForm"]) {
+                let raw = ((obj["status"] as? String) ?? "pending").replacingOccurrences(of: "-", with: "_")
+                guard ["pending", "in_progress", "completed"].contains(raw) else { return nil }
+                out.append(TodoChecklistItem(id: (obj["id"] as? String) ?? title, content: title, status: raw, priority: "medium"))
+            } else {
+                return nil
+            }
+        }
+        return out
+    }
+
+    private static func questionAnswers(input: [String: Any], output: String?) -> [ToolQuestionAnswer] {
+        let questions = (input["questions"] as? [[String: Any]]) ?? []
+        var answers: [String: Any] = [:]
+        if let output, let obj = (try? JSONSerialization.jsonObject(with: Data(output.utf8))) as? [String: Any] {
+            answers = (obj["answers"] as? [String: Any]) ?? [:]
+        }
+        return questions.compactMap { q in
+            guard let text = (q["question"] as? String) ?? (q["header"] as? String) else { return nil }
+            let raw = answers[text] ?? (q["id"] as? String).flatMap { answers[$0] }
+            let answer: String? = {
+                if let s = raw as? String { return s }
+                if let list = raw as? [String] { return list.joined(separator: "，") }
+                return nil
+            }()
+            return ToolQuestionAnswer(question: text, answer: answer)
+        }
+    }
+
+    private static func firstString(_ dict: [String: Any], _ keys: [String]) -> String? {
+        for key in keys {
+            if let value = dict[key] as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
+        }
+        return nil
+    }
+
+    static func prettyJSON(_ object: Any, limit: Int = 60_000) -> String? {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        return text.count > limit ? String(text.prefix(limit)) + "\n…" : text
     }
 
     static func attachments(_ raw: Any?) -> [ComposerAttachment] {

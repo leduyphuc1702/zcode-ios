@@ -38,7 +38,9 @@ public final class AppStore {
     public var compactToolCards: Bool = false { didSet { persistPreferences() } }
     public var toolGroupingExploreEnabled: Bool = true { didSet { persistPreferences() } }
     public var toolGroupingTerminalEnabled: Bool = true { didSet { persistPreferences() } }
-    public var toolGroupingChangesEnabled: Bool = true { didSet { persistPreferences() } }
+    public var toolGroupingChangesEnabled: Bool = false { didSet { persistPreferences() } }
+    /// Host `messageStreamShowTodos`: TodoWrite tool rows are hidden from the transcript unless enabled.
+    public var messageStreamShowTodos: Bool = false { didSet { persistPreferences() } }
     public var hapticsEnabled: Bool = true { didSet { persistPreferences() } }
 
     // MARK: - ZCode v3.16.3 General, Terminal, Search, Interaction & Archive Settings
@@ -97,6 +99,15 @@ public final class AppStore {
     public var taskListViewMode: TaskListViewMode = .byProject
     public var projectsSectionExpanded: Bool = true
     public var expandedProjectIds: Set<String> = []
+    /// ZCode projects from `project.readTree`; the sidebar groups tasks by these, not by open workspace tabs.
+    public var sidebarProjects: [SidebarProject] = []
+    public var sidebarTreeLoaded: Bool = false
+    public var tasksSectionExpanded: Bool = true
+    /// Desktop default is expanded, so only collapsed ZCode projects are tracked.
+    public var collapsedSidebarProjectIds: Set<String> = []
+    public var taskGroups = TaskGroupsStructure()
+    public var collapsedTaskGroupIds: Set<String> = []
+    var projectTreeRefreshTask: Task<Void, Never>?
     public var userDisplayName: String = "ZCode User" { didSet { persistPreferences() } }
     public var isInspectorExpandedFull: Bool = false
 
@@ -106,8 +117,8 @@ public final class AppStore {
     public var showTaskStatusPanel: Bool = false
     public var hideCompletedTodosInStatusPanel: Bool = false
     public var showSubagentDrawer: Bool = false
-    public var openSubagentTabIds: [String] = []
-    public var activeSubagentId: String = ""
+    public var subagentPane: SubagentPaneState?
+    public var subagentPaneBackStack: [SubagentPaneState] = []
     public var activeGitBranch: String = "main"
     public var showSettingsSheet: Bool = false
     public var showConnectionsSheet: Bool = false
@@ -216,15 +227,13 @@ public final class AppStore {
         let shouldSeed = seedDemoWorkspace ?? args.contains("--uitesting-seed-workspace")
         self.isUITestSeededMode = shouldSeed
 
-        // Client capability definitions (built-in ZCode models, slash commands, skills, official plugins)
-        self.providers = SeedWorkspaceFactory.defaultProviders()
-        self.skills = SeedWorkspaceFactory.defaultSkills()
-        self.plugins = SeedWorkspaceFactory.defaultPlugins()
-        self.subagents = SeedWorkspaceFactory.defaultSubagents()
-        self.slashCommands = SeedWorkspaceFactory.defaultSlashCommands()
-
         if shouldSeed {
             // Deterministic XCTest fixture mode ONLY
+            self.providers = SeedWorkspaceFactory.defaultProviders()
+            self.skills = SeedWorkspaceFactory.defaultSkills()
+            self.plugins = SeedWorkspaceFactory.defaultPlugins()
+            self.subagents = SeedWorkspaceFactory.defaultSubagents()
+            self.slashCommands = SeedWorkspaceFactory.defaultSlashCommands()
             self.connections = SeedWorkspaceFactory.defaultConnections()
             self.activeConnectionId = "conn-workstation-primary"
             self.projects = SeedWorkspaceFactory.defaultProjects()
@@ -277,12 +286,17 @@ public final class AppStore {
             self.automations = []
             self.tokenUsageStats = []
             self.notificationInbox = []
+            self.providers = []
+            self.skills = []
+            self.plugins = []
+            self.subagents = []
+            self.slashCommands = []
             self.showConnectionHub = true
             self.pairingPhase = .idle
         }
 
         loadPreferences()
-        loadPersistedCatalogsIfAvailable()
+        UserDefaults.standard.removeObject(forKey: "zcode_custom_catalogs_v3")
         loadAccountMetadata()
 
         if let acct = zaiAccount {
@@ -538,35 +552,34 @@ public final class AppStore {
                 showToast("\(conn.name) didn't respond. Try again in a moment.")
             }
         } else {
-            try? await Task.sleep(nanoseconds: 220_000_000)
-            showToast("Workspace synced")
+            showToast("Connect to your computer to sync")
         }
     }
 
     // MARK: - Session & Project Operations
 
+    /// `project.saveProject({roots, name?})`: registers a folder on the computer as a ZCode project.
     public func createNewProject(name: String, rootPath: String? = nil) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        let id = "proj-\(UUID().uuidString.prefix(6))"
-        let path = rootPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            ? rootPath!
-            : "~/\(trimmed)"
-        let proj = WorkspaceProject(
-            id: id,
-            name: trimmed,
-            rootPath: path,
-            gitBranch: "main",
-            ahead: 0,
-            behind: 0,
-            isDirty: false,
-            isRemote: true,
-            pinned: false
-        )
-        projects.append(proj)
-        activeProjectId = id
-        expandedProjectIds.insert(id)
-        showToast("Added workspace \(trimmed)")
+        let path = (rootPath ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard path.hasPrefix("/") else {
+            showToast("Enter the folder's absolute path on your computer")
+            return
+        }
+        guard !isUITestSeededMode, activeConnection?.state == .connected else {
+            showToast("Connect to your computer to add a project")
+            return
+        }
+        var args: [String: Any] = ["roots": [path]]
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty { args["name"] = trimmedName }
+        Task { @MainActor in
+            do {
+                _ = try await self.rpcClient.call(channel: "project", method: "saveProject", args: [.fromJSONObject(args)], timeoutSec: 10.0)
+                await self.loadProjectTree(preferredActiveTaskId: self.activeSessionId)
+            } catch {
+                self.showToast("Couldn't add project: \(error.localizedDescription)")
+            }
+        }
     }
 
     public func toggleProjectExpanded(_ projectId: String) {
@@ -618,22 +631,18 @@ public final class AppStore {
         if let current = activeProject {
             return current
         }
-        let hostName = activeConnection?.name ?? "Remote Workspace"
-        let fallback = WorkspaceProject(
-            id: "proj-\(UUID().uuidString.prefix(6))",
-            name: hostName,
-            rootPath: "~",
-            gitBranch: "main",
+        // No open workspace: the relay bridge prepares a conversation draft workspace on first send.
+        return WorkspaceProject(
+            id: "",
+            name: "Tasks",
+            rootPath: "",
+            gitBranch: "",
             ahead: 0,
             behind: 0,
             isDirty: false,
             isRemote: true,
             pinned: false
         )
-        projects.append(fallback)
-        activeProjectId = fallback.id
-        expandedProjectIds.insert(fallback.id)
-        return fallback
     }
 
     public func createNewSession(inProjectId: String? = nil, initialPrompt: String? = nil) {
@@ -648,7 +657,7 @@ public final class AppStore {
             traceId: UUID().uuidString.lowercased(),
             projectId: project.id,
             workspacePath: project.rootPath,
-            title: "New task",
+            title: "",
             status: .idle,
             mode: inheritedMode,
             modelId: isUITestSeededMode ? "anthropic/claude-opus-4-7" : (inheritedModel?.modelId ?? ""),
@@ -686,8 +695,12 @@ public final class AppStore {
 
     public func selectSession(_ session: AgentTaskSession) {
         playSelectionHaptic()
+        if session.id != activeSessionId, subagentPane != nil { closeSubagentSession() }
         activeSessionId = session.id
-        activeProjectId = session.projectId
+        if projects.contains(where: { $0.id == session.projectId }) {
+            activeProjectId = session.projectId
+        }
+        let wasUnread = session.unread
         if let idx = sessions.firstIndex(where: { $0.id == session.id }) {
             sessions[idx].unread = false
         }
@@ -700,12 +713,17 @@ public final class AppStore {
            !session.id.hasPrefix("task-") {
             let sid = session.id
             let wsPath = session.workspacePath
-            let wsIdentity = workspaceIdentityByPath[wsPath]
+            let wsIdentity = session.workspaceIdentity ?? workspaceIdentityByPath[wsPath]
             let wsKey = ZCodeRPCClient.resolveWorkspaceKey(workspacePath: wsPath, workspaceIdentity: wsIdentity)
             Task { @MainActor in
                 if conn.transport == .cloudRelayV2 {
-                    _ = try? await self.rpcClient.openWorkspaceBridge(workspaceKey: wsKey, taskId: sid, timeoutSec: 6.0)
+                    try? await self.openBridge(for: session)
                     await self.rpcClient.sendMobileViewStateUpdate(workspaceKey: wsKey, taskId: sid)
+                }
+                if wasUnread {
+                    var args = self.hostTaskScope(for: session)
+                    args["unread"] = false
+                    _ = try? await self.rpcClient.call(channel: "zcode-task", method: "setTaskUnread", args: [.fromJSONObject(args)], timeoutSec: 8.0)
                 }
                 if let current = self.sessions.first(where: { $0.id == sid }) {
                     await self.subscribeActiveTask(current)
@@ -724,61 +742,91 @@ public final class AppStore {
         activeSession = session
     }
 
-    public func togglePinSession(_ id: String) {
+    private func hostTaskScope(for session: AgentTaskSession) -> [String: Any] {
+        var scope: [String: Any] = ["taskId": session.id, "workspacePath": session.workspacePath]
+        if let identity = session.workspaceIdentity ?? workspaceIdentityByPath[session.workspacePath], !identity.isEmpty {
+            scope["workspaceIdentity"] = identity
+        }
+        return scope
+    }
+
+    private var canMutateHostTasks: Bool {
+        !isUITestSeededMode && activeConnection?.state == .connected
+    }
+
+    /// Applies `local` optimistically, sends `zcode-task.<method>`, and rolls back on failure.
+    private func mutateHostTask(
+        _ id: String,
+        method: String,
+        extra: [String: Any] = [:],
+        failureMessage: String,
+        local: (inout AgentTaskSession) -> Void
+    ) {
         guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
-        sessions[idx].pinned.toggle()
-        showToast(sessions[idx].pinned ? "Session pinned" : "Session unpinned")
+        let before = sessions[idx]
+        local(&sessions[idx])
+        guard canMutateHostTasks, !id.hasPrefix("task-") else { return }
+        let args = hostTaskScope(for: before).merging(extra) { _, new in new }
+        Task { @MainActor in
+            do {
+                _ = try await self.rpcClient.call(channel: "zcode-task", method: method, args: [.fromJSONObject(args)], timeoutSec: 8.0)
+            } catch {
+                if let i = self.sessions.firstIndex(where: { $0.id == id }) {
+                    self.sessions[i] = before
+                } else {
+                    self.sessions.append(before)
+                }
+                self.showToast("\(failureMessage): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func togglePinSession(_ id: String) {
+        guard let current = sessions.first(where: { $0.id == id }) else { return }
+        let pinned = !current.pinned
+        mutateHostTask(id, method: "setTaskPinned", extra: ["pinned": pinned], failureMessage: pinned ? "Couldn't pin task" : "Couldn't unpin task") {
+            $0.pinned = pinned
+        }
     }
 
     public func archiveSession(_ id: String) {
-        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
-        sessions[idx].archived = true
+        mutateHostTask(id, method: "archiveTask", failureMessage: "Couldn't archive task") {
+            $0.archived = true
+            $0.pinned = false
+        }
         if activeSessionId == id {
             activeSessionId = sessions.first(where: { !$0.archived })?.id ?? ""
         }
-        showToast("Session archived")
     }
 
     public func restoreSession(_ id: String) {
-        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
-        sessions[idx].archived = false
-        activeSessionId = id
-        showToast("Session restored")
+        mutateHostTask(id, method: "unarchiveTask", failureMessage: "Couldn't unarchive task") {
+            $0.archived = false
+        }
+    }
+
+    public func markSessionUnread(_ id: String) {
+        mutateHostTask(id, method: "setTaskUnread", extra: ["unread": true], failureMessage: "Couldn't mark as unread") {
+            $0.unread = true
+        }
     }
 
     public func deleteSession(_ id: String) {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+        let method = session.archived ? "deleteArchivedTask" : "deleteTask"
+        mutateHostTask(id, method: method, failureMessage: "Couldn't delete task") { _ in }
         sessions.removeAll(where: { $0.id == id })
         if activeSessionId == id {
             activeSessionId = sessions.first(where: { !$0.archived })?.id ?? ""
         }
-        showToast("Session deleted")
     }
 
     public func renameSession(_ id: String, newTitle: String) {
         let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
-        sessions[idx].title = trimmed
-    }
-
-    public func forkSession(_ id: String) {
-        guard let source = sessions.first(where: { $0.id == id }) else { return }
-        var copy = source
-        copy.id = "task-fork-\(UUID().uuidString.prefix(6))"
-        copy.title = "\(source.title) (Fork)"
-        copy.updatedAt = Date()
-        sessions.insert(copy, at: 0)
-        activeSessionId = copy.id
-        showToast("Forked session created")
-    }
-
-    public func rewindToCheckpoint(_ checkpoint: GitCheckpointSnapshot) {
-        guard var session = activeSession else { return }
-        if checkpoint.messageIndex + 1 < session.messages.count {
-            session.messages = Array(session.messages.prefix(checkpoint.messageIndex + 1))
+        guard !trimmed.isEmpty else { return }
+        mutateHostTask(id, method: "renameTask", extra: ["title": trimmed], failureMessage: "Couldn't rename task") {
+            $0.title = trimmed
         }
-        session.updatedAt = Date()
-        activeSession = session
-        showToast("Rewound to \(checkpoint.commitShortHash)")
     }
 
     // MARK: - Streaming Prompt & Agent Execution
@@ -860,7 +908,7 @@ public final class AppStore {
         composerAttachments = []
         composerQuotes = []
 
-        if session.messages.isEmpty && (session.title == "New Coding Session" || session.title == "New task") {
+        if isUITestSeededMode, session.messages.isEmpty, session.title.isEmpty {
             session.title = String(trimmed.prefix(48))
         }
 
@@ -908,9 +956,16 @@ public final class AppStore {
                 }
 
                 if v4Sync.available != false {
-                    let wsKey = ZCodeRPCClient.resolveWorkspaceKey(workspacePath: session.workspacePath, workspaceIdentity: workspaceIdentityByPath[session.workspacePath])
                     if conn.transport == .cloudRelayV2 {
-                        _ = try? await rpcClient.openWorkspaceBridge(workspaceKey: wsKey, taskId: sessionId.hasPrefix("task-") ? nil : sessionId, timeoutSec: 6.0)
+                        do {
+                            try await openBridge(for: session)
+                        } catch let error where sessionId.hasPrefix("task-") && session.workspacePath.isEmpty {
+                            if let idx = sessions.firstIndex(where: { $0.id == sessionId }) {
+                                sessions[idx].status = .error
+                                sessions[idx].statusNoticeText = "Couldn't prepare a workspace on your computer: \(error.localizedDescription)"
+                            }
+                            return
+                        } catch {}
                     }
                     v4Sync.optimistic.append((userMsg, Date()))
                     if await v4SendPrompt(sessionId: sessionId, text: promptText, attachments: outgoingAttachments, quotes: outgoingQuotes, queue: false) {
@@ -921,14 +976,13 @@ public final class AppStore {
 
                 var targetSessionId = sessionId
                 do {
-                    let wsPath = session.workspacePath
-                    let wsIdentity = workspaceIdentityByPath[wsPath]
-                    let wsKey = ZCodeRPCClient.resolveWorkspaceKey(workspacePath: wsPath, workspaceIdentity: wsIdentity)
                     let isDraft = targetSessionId.hasPrefix("task-")
-
                     if conn.transport == .cloudRelayV2 {
-                        _ = try await rpcClient.openWorkspaceBridge(workspaceKey: wsKey, taskId: isDraft ? nil : targetSessionId, timeoutSec: 6.0)
+                        try await openBridge(for: sessions.first(where: { $0.id == sessionId }) ?? session)
                     }
+                    let current = sessions.first(where: { $0.id == sessionId }) ?? session
+                    let wsPath = current.workspacePath
+                    let wsIdentity = current.workspaceIdentity ?? workspaceIdentityByPath[wsPath]
 
                     let selection = (sessions.first(where: { $0.id == sessionId })).flatMap { modelSelection(for: $0) }
 
@@ -1230,54 +1284,14 @@ public final class AppStore {
         currentSubagentRuns.filter(\.isRunning).count
     }
 
+    /// Opens a running subagent's transcript; with no id, the first running subagent.
     public func openSubagentInspector(_ runId: String? = nil) {
         let runs = currentSubagentRuns
-        guard !runs.isEmpty else {
-            spawnInteractiveSubagentTab()
+        guard let run = runId.flatMap({ id in runs.first(where: { $0.id == id }) }) ?? runs.first else {
+            showToast("No running subagents")
             return
         }
-        for r in runs where !openSubagentTabIds.contains(r.id) {
-            openSubagentTabIds.append(r.id)
-        }
-        if let runId, runs.contains(where: { $0.id == runId }) {
-            activeSubagentId = runId
-        } else if activeSubagentId.isEmpty || !runs.contains(where: { $0.id == activeSubagentId }) {
-            activeSubagentId = runs[0].id
-        }
-        showInspectorSheet = false
-        showSubagentDrawer = true
-    }
-
-    public func closeSubagentTab(_ runId: String) {
-        openSubagentTabIds.removeAll(where: { $0 == runId })
-        if openSubagentTabIds.isEmpty {
-            showSubagentDrawer = false
-            activeSubagentId = ""
-        } else if activeSubagentId == runId {
-            activeSubagentId = openSubagentTabIds[0]
-        }
-    }
-
-    public func spawnInteractiveSubagentTab() {
-        guard var session = activeSession else { return }
-        let idx = session.subagentRuns.count + 1
-        let newId = "sub-spawn-\(idx)-\(UUID().uuidString.prefix(4))"
-        let newRun = SubagentSessionRun(
-            id: newId,
-            title: "Explore workspace #\(idx)",
-            agentType: "Explore",
-            isRunning: true,
-            elapsedText: "Running for 0m 02s",
-            transcriptMarkdown: "Connected to subagent session for `\(session.title)`. Waiting for remote agent events…",
-            artifactImagePath: nil,
-            timestamp: Date()
-        )
-        session.subagentRuns.append(newRun)
-        activeSession = session
-        openSubagentTabIds.append(newId)
-        activeSubagentId = newId
-        showInspectorSheet = false
-        showSubagentDrawer = true
+        openSubagentSession(childSessionId: run.id, title: run.title)
     }
 
     public func toggleGoalPaused() {
@@ -1540,8 +1554,7 @@ public final class AppStore {
                         out = stdout
                         isErr = (dict["exitCode"] as? Int ?? 0) != 0
                     } else {
-                        out = "Dispatched `\(cmd)` to \(conn.name) PTY."
-                        isErr = false
+                        out = "\(conn.name) didn't run `\(cmd)`. Use the terminal tab for an interactive shell."
                     }
                 }
                 if let tIdx = self.terminalTabs.firstIndex(where: { $0.id == tabId }) {
@@ -1926,8 +1939,12 @@ public final class AppStore {
             self.isBulkSyncingWorkspaces = false
         }
 
-        // Official renderer parity: every opened workspace gets its full task scope, not just the active one.
-        await loadAllWorkspaceTasks(preferredActiveTaskId: preferredActiveTaskId)
+        // Desktop sidebar parity: `project.readTree` covers every known workspace (projects + project-less tasks);
+        // older hosts fall back to the per-open-workspace fan-out.
+        if !(await loadProjectTree(preferredActiveTaskId: preferredActiveTaskId)) {
+            sidebarTreeLoaded = false
+            await loadAllWorkspaceTasks(preferredActiveTaskId: preferredActiveTaskId)
+        }
 
         let primaryProject = self.activeProject
         activeHydrationTask = Task { @MainActor in

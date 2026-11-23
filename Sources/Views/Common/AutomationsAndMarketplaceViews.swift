@@ -430,11 +430,13 @@ public struct ZCodeUnifiedTaskStatusPanelView: View {
                         )
                     }
                 }
-                Button {
-                    store.showTaskStatusPanel = false
-                    store.openSubagentInspector(nil)
-                } label: {
-                    Label("Open SubAgent View", systemImage: "rectangle.righthalf.inset.filled.arrow.right")
+                if runningSubagentCount > 0 {
+                    Button {
+                        store.showTaskStatusPanel = false
+                        store.openSubagentInspector(nil)
+                    } label: {
+                        Label("Open subagent session", systemImage: "rectangle.righthalf.inset.filled.arrow.right")
+                    }
                 }
                 Button {
                     store.showTaskStatusPanel = false
@@ -515,7 +517,7 @@ public struct ZCodeUnifiedTaskStatusPanelView: View {
             Menu {
                 ForEach(store.gitBranches, id: \.self) { branch in
                     Button {
-                        store.switchGitBranch(branch)
+                        Task { await store.switchInspectorGitBranch(branch, state: InspectorLiveState()) }
                     } label: {
                         HStack {
                             Text(branch)
@@ -580,9 +582,7 @@ public struct ZCodeUnifiedTaskStatusPanelView: View {
             ForEach(visibleTodos) { item in
                 let isDone = item.status == "completed"
                 let isActive = item.status == "in_progress"
-                Button {
-                    toggleTodoStatus(item.id)
-                } label: {
+                Group {
                     HStack(alignment: .top, spacing: 10) {
                         Group {
                             if isDone {
@@ -610,10 +610,9 @@ public struct ZCodeUnifiedTaskStatusPanelView: View {
 
                         Spacer(minLength: 0)
                     }
-                    .contentShape(Rectangle())
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("statusTodoRow_\(item.id)")
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("statusTodoRow_\(item.id)")
             }
         }
     }
@@ -663,56 +662,86 @@ public struct ZCodeUnifiedTaskStatusPanelView: View {
     }
 
     private var agentsSection: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack(spacing: 7) {
-                Text("Agents")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(palette.foreground)
-                Text("\(runningSubagentCount) running")
-                    .font(.system(size: 13.5, weight: .regular))
-                    .foregroundStyle(palette.foregroundSubtle)
-                Spacer()
-            }
-
-            ForEach(session.subagentRuns) { run in
-                Button {
-                    store.showTaskStatusPanel = false
-                    store.openSubagentInspector(run.id)
-                } label: {
-                    HStack(alignment: .top, spacing: 10) {
-                        ZCodeRobotIconView(size: 16, color: palette.foregroundSubtle)
-                            .frame(width: 18, height: 20)
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(run.title)
-                                .font(.system(size: 14, weight: .regular))
-                                .foregroundStyle(palette.foreground)
-                                .lineLimit(1)
-                            Text(run.elapsedText)
-                                .font(.system(size: 12.5, weight: .regular))
-                                .foregroundStyle(palette.foregroundSubtle)
-                        }
-
-                        Spacer(minLength: 0)
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(alignment: .leading, spacing: 11) {
+                HStack(spacing: 7) {
+                    Text("Agents")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(palette.foreground)
+                    if runningSubagentCount > 0 {
+                        let longest = session.subagentRuns.compactMap(\.startedAt).map { context.date.timeIntervalSince($0) }.max()
+                        Text([longest.map(Self.compactElapsed), "\(runningSubagentCount) running"].compactMap { $0 }.joined(separator: " · "))
+                            .font(.system(size: 13.5, weight: .regular))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .monospacedDigit()
                     }
-                    .contentShape(Rectangle())
+                    Spacer()
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("statusSubagentRow_\(run.id)")
+
+                ForEach(session.subagentRuns) { run in
+                    HStack(alignment: .top, spacing: 10) {
+                        Button {
+                            store.showTaskStatusPanel = false
+                            store.openSubagentSession(childSessionId: run.id, title: run.title)
+                        } label: {
+                            HStack(alignment: .top, spacing: 10) {
+                                ZCodeRobotIconView(size: 16, color: palette.foregroundSubtle)
+                                    .frame(width: 18, height: 20)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(run.title)
+                                        .font(.system(size: 14, weight: .regular))
+                                        .foregroundStyle(palette.foreground)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                    if let started = run.startedAt {
+                                        Text(Self.runningFor(context.date.timeIntervalSince(started)))
+                                            .font(.system(size: 12.5, weight: .regular))
+                                            .foregroundStyle(palette.foregroundSubtle)
+                                            .monospacedDigit()
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open subagent session")
+                        .accessibilityIdentifier("statusSubagentRow_\(run.id)")
+
+                        if let workId = run.controlWorkId {
+                            Button {
+                                store.playImpactHaptic(.light)
+                                store.cancelBackgroundWork(workId: workId)
+                            } label: {
+                                Label("Stop", systemImage: "stop.fill")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                                    .padding(.horizontal, 9)
+                                    .frame(minHeight: 30)
+                                    .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 7))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("statusSubagentStop_\(run.id)")
+                        }
+                    }
+                }
             }
         }
     }
 
-    private func toggleTodoStatus(_ todoId: String) {
-        store.playSelectionHaptic()
-        guard var updated = store.activeSession,
-              let idx = updated.todos.firstIndex(where: { $0.id == todoId }) else { return }
-        updated.todos[idx].status = (updated.todos[idx].status == "completed") ? "pending" : "completed"
-        store.activeSession = updated
+    /// `chat.longRunning.elapsedSeconds` / `elapsedMinutesSeconds`.
+    static func runningFor(_ interval: TimeInterval) -> String {
+        let total = max(0, Int(interval))
+        return total < 60 ? "Running for \(total)s" : "Running for \(total / 60)m \(total % 60)s"
+    }
+
+    static func compactElapsed(_ interval: TimeInterval) -> String {
+        let total = max(0, Int(interval))
+        return total < 60 ? "\(total)s" : "\(total / 60)m \(total % 60)s"
     }
 }
 
-// MARK: - 1:1 Official ZCode Slide-Over SubAgent Multi-Tab Transcript View
+// MARK: - Subagent pane: read-only child conversation (desktop `wIn` side pane)
 
 public struct ZCodeSubagentSlideOverDrawerView: View {
     @Bindable var store: AppStore
@@ -722,295 +751,108 @@ public struct ZCodeSubagentSlideOverDrawerView: View {
         self.store = store
     }
 
-    private var openRuns: [SubagentSessionRun] {
-        let all = store.currentSubagentRuns
-        let filtered = store.openSubagentTabIds.compactMap { id in
-            all.first(where: { $0.id == id })
-        }
-        return filtered.isEmpty ? all : filtered
-    }
-
-    private var activeRun: SubagentSessionRun? {
-        let runs = openRuns
-        return runs.first(where: { $0.id == store.activeSubagentId }) ?? runs.first
-    }
-
     public var body: some View {
         VStack(spacing: 0) {
-            subagentTopTabStrip
-
+            header
             Rectangle()
                 .fill(palette.border)
                 .frame(height: 1)
-
-            if let run = activeRun {
-                subagentTranscriptScrollView(run)
-            } else {
-                VStack(spacing: 12) {
-                    Spacer()
-                    ZCodeRobotIconView(size: 32, color: palette.foregroundMuted)
-                    Text("No active SubAgent transcript")
-                        .font(.system(size: 14))
-                        .foregroundStyle(palette.foregroundSubtle)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            content
         }
         .background(palette.background)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("subagentSlideOverDrawer")
     }
 
-    private var subagentTopTabStrip: some View {
-        HStack(spacing: 8) {
-            Menu {
-                ForEach(store.currentSubagentRuns) { run in
-                    Button {
-                        if !store.openSubagentTabIds.contains(run.id) {
-                            store.openSubagentTabIds.append(run.id)
-                        }
-                        store.activeSubagentId = run.id
-                    } label: {
-                        HStack {
-                            Text(run.title)
-                            if run.id == activeRun?.id {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-                Divider()
-                Button(role: .destructive) {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        store.showSubagentDrawer = false
-                    }
-                } label: {
-                    Label("Close SubAgent View", systemImage: "xmark")
-                }
+    private var header: some View {
+        HStack(spacing: 6) {
+            Button {
+                store.popSubagentSession()
             } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 13, weight: .medium))
+                Image(systemName: store.subagentPaneBackStack.isEmpty ? "xmark" : "chevron.left")
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(palette.foregroundSubtle)
-                    .frame(width: 34, height: 36)
+                    .frame(width: 36, height: 36)
                     .contentShape(Rectangle())
-                    .accessibilityLabel("Switch or close SubAgent")
             }
-            .accessibilityIdentifier("subagentSwitcherMenuButton")
+            .buttonStyle(.plain)
+            .accessibilityLabel(store.subagentPaneBackStack.isEmpty ? "Close" : "Back")
+            .accessibilityIdentifier("subagentPaneBackButton")
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(openRuns) { run in
-                        subagentTabPill(run, isSelected: run.id == activeRun?.id)
-                    }
-
-                    Button {
-                        store.playImpactHaptic(.light)
-                        store.spawnInteractiveSubagentTab()
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 13.5, weight: .medium))
-                            .foregroundStyle(palette.foregroundSubtle)
-                            .frame(width: 34, height: 34)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("New SubAgent tab")
-                    .accessibilityIdentifier("newSubagentTabButton")
-                }
+            ZCodeRobotIconView(size: 15, color: palette.foregroundSubtle)
+            Text(store.subagentPane?.title ?? "Subagent")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(palette.foreground)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if store.subagentPane?.status == .running {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(palette.foregroundSubtle)
             }
+            Spacer(minLength: 8)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 6)
         .frame(height: 46)
         .background(palette.header)
     }
 
-    private func subagentTabPill(_ run: SubagentSessionRun, isSelected: Bool) -> some View {
-        HStack(spacing: 7) {
-            Button {
-                store.activeSubagentId = run.id
-            } label: {
-                HStack(spacing: 7) {
-                    ZCodeRobotIconView(
-                        size: 14,
-                        color: isSelected ? palette.foreground : palette.foregroundSubtle
-                    )
-                    Text(run.title)
-                        .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-                        .foregroundStyle(isSelected ? palette.foreground : palette.foregroundSubtle)
-                        .lineLimit(1)
-                        .frame(maxWidth: 148, alignment: .leading)
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("subagentTab_\(run.id)")
-
-            Button {
-                store.closeSubagentTab(run.id)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(palette.foregroundSubtle)
-                    .frame(width: 18, height: 18)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("closeSubagentTab_\(run.id)")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            isSelected
-                ? (store.themeMode == .light ? palette.card : Color(hex: 0x2B2B2D))
-                : Color.clear,
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(
-                    isSelected ? (store.themeMode == .light ? palette.border : Color(hex: 0x3D3D40)) : Color.clear,
-                    lineWidth: 1
-                )
-        )
-    }
-
-    private func subagentTranscriptScrollView(_ run: SubagentSessionRun) -> some View {
-        ScrollView(.vertical, showsIndicators: true) {
-            VStack(alignment: .leading, spacing: 14) {
-                // Status pill for live running / completed SubAgent
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(run.isRunning ? palette.accentBlue : palette.success)
-                        .frame(width: 7, height: 7)
-                    Text("\(run.agentType) SubAgent")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(palette.foreground)
-                    Text("·")
-                        .foregroundStyle(palette.foregroundMuted)
-                    Text(run.elapsedText)
-                        .font(.system(size: 12))
-                        .foregroundStyle(palette.foregroundSubtle)
+    @ViewBuilder
+    private var content: some View {
+        if let pane = store.subagentPane {
+            if let error = pane.errorText, pane.messages.isEmpty {
+                placeholder(icon: "exclamationmark.triangle", text: error)
+            } else if pane.isLoading && pane.messages.isEmpty {
+                VStack {
+                    Spacer()
+                    ProgressView()
                     Spacer()
                 }
-                .padding(.bottom, 2)
-
-                // Structured markdown paragraphs & bullet items with 1:1 inline code pills
-                ForEach(Array(parsedTranscriptBlocks(run.transcriptMarkdown).enumerated()), id: \.offset) { _, block in
-                    if block.isBullet {
-                        HStack(alignment: .top, spacing: 9) {
-                            Text("•")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundStyle(palette.foregroundSubtle)
-                                .padding(.top, 1)
-                            Text(styledInlineCode(block.text))
-                                .font(.system(size: 14.5))
-                                .lineSpacing(4)
-                                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if pane.messages.isEmpty {
+                placeholder(icon: "text.bubble", text: "No messages yet")
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: true) {
+                        LazyVStack(alignment: .leading, spacing: 16) {
+                            ForEach(pane.messages) { message in
+                                ChatTurnCardView(store: store, message: message, readOnly: true)
+                                    .id(message.id)
+                            }
+                            if let notice = pane.statusNotice, !notice.isEmpty {
+                                Text(notice)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(pane.status == .error ? palette.destructive : palette.foregroundSubtle)
+                            }
+                            Color.clear.frame(height: 8).id("subagent-bottom")
                         }
-                    } else {
-                        Text(styledInlineCode(block.text))
-                            .font(.system(size: 14.5))
-                            .lineSpacing(4)
-                            .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 14)
+                    }
+                    .onAppear { proxy.scrollTo("subagent-bottom", anchor: .bottom) }
+                    .onChange(of: pane.messages.count) { _, _ in
+                        proxy.scrollTo("subagent-bottom", anchor: .bottom)
                     }
                 }
-
-                // Embedded artifact image preview (matching User Screenshot 1)
-                if let imagePath = run.artifactImagePath,
-                   let data = store.binaryData(forPath: imagePath),
-                   let uiImage = UIImage(data: data) {
-                    Button {
-                        store.showSubagentDrawer = false
-                        store.openFileInInspector(pathOrId: imagePath, preferPreview: true)
-                    } label: {
-                        Image(uiImage: uiImage)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxWidth: 260)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(palette.border, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("subagentArtifactPreviewButton")
-                }
-
-                // Footer: Copy + MM/dd, hh:mm a timestamp (matching User Screenshot 1)
-                HStack(spacing: 12) {
-                    Button {
-                        UIPasteboard.general.string = run.transcriptMarkdown
-                        store.showToast("Copied SubAgent output")
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "doc.on.doc")
-                                .font(.system(size: 11.5))
-                            Text("Copy")
-                                .font(.system(size: 12.5))
-                        }
-                        .foregroundStyle(palette.foregroundMuted)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("copySubagentTranscriptButton")
-
-                    Text(Self.timestampFormatter.string(from: run.timestamp))
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(palette.foregroundMuted)
-
-                    Spacer()
-                }
-                .padding(.top, 4)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 16)
+        } else {
+            placeholder(icon: "person.2", text: "No subagent selected")
         }
     }
 
-    private struct TranscriptBlock {
-        let isBullet: Bool
-        let text: String
-    }
-
-    private func parsedTranscriptBlocks(_ raw: String) -> [TranscriptBlock] {
-        raw.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .map { line in
-                if line.hasPrefix("- ") {
-                    return TranscriptBlock(isBullet: true, text: String(line.dropFirst(2)))
-                }
-                return TranscriptBlock(isBullet: false, text: line)
-            }
-    }
-
-    private func styledInlineCode(_ text: String) -> AttributedString {
-        if var parsed = try? AttributedString(
-            markdown: text,
-            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
-            let codeBg = store.themeMode == .light ? Color.black.opacity(0.07) : Color(hex: 0x2C2C2E)
-            for run in parsed.runs {
-                if run.inlinePresentationIntent?.contains(.code) == true {
-                    parsed[run.range].font = .system(size: 13, weight: .medium, design: .monospaced)
-                    parsed[run.range].foregroundColor = palette.foreground
-                    parsed[run.range].backgroundColor = codeBg
-                } else {
-                    parsed[run.range].foregroundColor = palette.foreground
-                }
-            }
-            return parsed
+    private func placeholder(icon: String, text: String) -> some View {
+        VStack(spacing: 10) {
+            Spacer()
+            Image(systemName: icon)
+                .font(.system(size: 26))
+                .foregroundStyle(palette.foregroundMuted)
+            Text(text)
+                .font(.system(size: 14))
+                .foregroundStyle(palette.foregroundSubtle)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            Spacer()
         }
-        var fallback = AttributedString(text)
-        fallback.foregroundColor = palette.foreground
-        return fallback
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-
-    private static let timestampFormatter: DateFormatter = {
-        let df = DateFormatter()
-        df.locale = Locale(identifier: "en_US_POSIX")
-        df.dateFormat = "MM/dd, hh:mm a"
-        return df
-    }()
 }
-

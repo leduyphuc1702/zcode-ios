@@ -622,6 +622,10 @@ extension AppStore {
     }
 
     func scheduleWorkspaceRefresh(projectId: String, workspacePath: String, workspaceIdentity: String?) {
+        if sidebarTreeLoaded {
+            scheduleProjectTreeRefresh()
+            return
+        }
         guard liveSync.workspaceRefresh[projectId] == nil else { return }
         liveSync.workspaceRefresh[projectId] = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 400_000_000)
@@ -679,11 +683,21 @@ extension AppStore {
             if reason.contains("pin") { sessions[idx].pinned = !reason.contains("unpin") }
             if summary.archived { sessions[idx].archived = true }
             if summary.pinned { sessions[idx].pinned = true }
+            if let tree = Self.treeTaskSession(from: meta) {
+                sessions[idx].lastOutcomeError = tree.lastOutcomeError
+                if tree.changeFileCount > 0 || sessions[idx].changeFileCount > 0 {
+                    sessions[idx].changeAdded = tree.changeAdded
+                    sessions[idx].changeRemoved = tree.changeRemoved
+                    sessions[idx].changeFileCount = tree.changeFileCount
+                }
+            }
             let isViewing = summary.id == activeSessionId && liveSync.activeTaskId == summary.id
             if !isViewing {
-                sessions[idx].status = fresh.status
+                if !sidebarTreeLoaded { sessions[idx].status = fresh.status }
                 sessions[idx].unread = fresh.unread
             }
+        } else if sidebarTreeLoaded {
+            scheduleProjectTreeRefresh()
         } else if !summary.archived {
             sessions.insert(fresh, at: 0)
         }

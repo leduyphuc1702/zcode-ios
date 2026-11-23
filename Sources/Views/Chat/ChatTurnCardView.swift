@@ -3,6 +3,8 @@ import SwiftUI
 public struct ChatTurnCardView: View {
     @Bindable var store: AppStore
     let message: ChatTurnMessage
+    /// Subagent transcripts are read-only: no feedback, fork, or quote actions.
+    var readOnly: Bool = false
     @Environment(\.zcodePalette) private var palette
     @State private var isThoughtExpanded: Bool = false
     @State private var showSelectTextSheet: Bool = false
@@ -337,6 +339,7 @@ public struct ChatTurnCardView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Copy message")
 
+                if !readOnly {
                 Button {
                     store.toggleMessageFeedback(messageId: message.id, rating: 1)
                 } label: {
@@ -360,22 +363,23 @@ public struct ChatTurnCardView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Mark unhelpful")
-
-                Button {
-                    if let s = store.activeSession {
-                        store.forkSession(s.id)
-                    }
-                } label: {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 13.5, weight: .regular))
-                        .foregroundStyle(palette.foregroundSubtle)
-                        .frame(width: 32, height: 34)
-                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Fork session from this turn")
 
-                if hasQuotableContent {
+                if !readOnly, store.v4CanTarget(messageId: message.id) {
+                    Button {
+                        store.v4ForkAssistant(messageId: message.id)
+                    } label: {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 13.5, weight: .regular))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .frame(width: 32, height: 34)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Fork from this turn")
+                }
+
+                if !readOnly, hasQuotableContent {
                     Button {
                         quoteText(message.content)
                     } label: {

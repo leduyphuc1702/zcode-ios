@@ -410,7 +410,7 @@ public actor ZCodeRPCClient {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let identity = (rawIdentity?.isEmpty == false) ? rawIdentity : nil
         let rawTitle = ((dict["title"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = rawTitle.isEmpty ? "Untitled task" : rawTitle
+        let title = rawTitle
         let status = (dict["status"] as? String) ?? "idle"
         let pinned = (dict["pinned"] as? Bool) ?? false
         let archived = (dict["archived"] as? Bool) ?? false
@@ -683,10 +683,12 @@ public actor ZCodeRPCClient {
     public func openWorkspaceBridge(
         workspaceKey: String,
         taskId: String? = nil,
+        taskHostId: String? = nil,
+        project: [String: Any]? = nil,
         timeoutSec: Double = 4.0,
         forceReopen: Bool = false
     ) async throws -> RelayBridgeIdentity {
-        if !forceReopen, let current = activeBridgeIdentity, current.workspaceKey == workspaceKey {
+        if !forceReopen, project == nil, let current = activeBridgeIdentity, current.workspaceKey == workspaceKey {
             return current
         }
 
@@ -706,8 +708,13 @@ public actor ZCodeRPCClient {
             "bridgeGeneration": generation,
             "workspaceKey": workspaceKey
         ]
-        if let taskId, !taskId.isEmpty {
+        if let project {
+            openPayload["project"] = project
+        } else if let taskId, !taskId.isEmpty {
             openPayload["taskId"] = taskId
+            if let taskHostId, !taskHostId.isEmpty {
+                openPayload["taskHostId"] = taskHostId
+            }
         }
         if let recoveryId {
             openPayload["recoveryId"] = recoveryId

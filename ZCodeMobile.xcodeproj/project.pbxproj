@@ -35,11 +35,13 @@
 		834D06A8E9F2AB840AF0FB7F /* AppStore+V4.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FB486095FF73380919FDD44 /* AppStore+V4.swift */; };
 		869D9BE27889CC4B521357DE /* RootWorkspaceContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB266185DD2C969EC0F06565 /* RootWorkspaceContainerView.swift */; };
 		86C553DFBE825356589D7E7E /* AgentChatCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17A7FE7393D697023ADC9444 /* AgentChatCanvasView.swift */; };
+		8B21A474DC46A223D897EFE0 /* ProjectTreeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE936A12FAE0B1D6A9AB6B4E /* ProjectTreeTests.swift */; };
 		8D5573D9B2B1CAEA4F879BA9 /* V4ProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED9D97A18BD8FEFCC2CE75A0 /* V4ProtocolTests.swift */; };
 		910322FA7F5936090C7207FC /* SeedWorkspaceFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08937AF5D7EA3C6AF718FA72 /* SeedWorkspaceFactory.swift */; };
 		92081F74BC94EB342C07A94E /* ZCodeMobileE2EUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 519E650C90EF618B960A2FD7 /* ZCodeMobileE2EUITests.swift */; };
 		935135BBE10C7CA5962770AA /* NativeMediaDocumentViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB0773D4E22E0F5640DBD1AF /* NativeMediaDocumentViewer.swift */; };
 		96C9B0EA56038BACB86B19A6 /* ZCodeVQLCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = C69B1E89A391AD40E347D376 /* ZCodeVQLCodec.swift */; };
+		9C554A6AF149269E74D194C0 /* AppStore+ProjectTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BECCF783A3E0AA64E59421D /* AppStore+ProjectTree.swift */; };
 		9E05EEA60A22F5285AA8F47D /* LiveSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD0A11859108C2E9920D961 /* LiveSyncTests.swift */; };
 		9F69794568EFFCC6B329E660 /* SubagentsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0481138DDF4B591E9225890 /* SubagentsSettingsView.swift */; };
 		9FB957241A1BDCB8C3586498 /* ChatTurnCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 365AF81EBFD79497ACA43675 /* ChatTurnCardView.swift */; };
@@ -107,6 +109,7 @@
 		73C64FAD71928A73EA3A7019 /* ModelProviderSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelProviderSettingsView.swift; sourceTree = "<group>"; };
 		7627E9AA18A7E1A3D5DFCE5D /* ZCodeOnboardingAndHubView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeOnboardingAndHubView.swift; sourceTree = "<group>"; };
 		78029FC612DF7ACCAFC3A918 /* ZCodeModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeModels.swift; sourceTree = "<group>"; };
+		7BECCF783A3E0AA64E59421D /* AppStore+ProjectTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppStore+ProjectTree.swift"; sourceTree = "<group>"; };
 		87C2CF3895B3F2F9D5AB9B39 /* ZCodeV4Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeV4Protocol.swift; sourceTree = "<group>"; };
 		97855C4C145655E375AEB0CB /* ZCodeMobileUnitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeMobileUnitTests.swift; sourceTree = "<group>"; };
 		9D414E304EA1890084AE0718 /* CommandCenterSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCenterSheetView.swift; sourceTree = "<group>"; };
@@ -115,6 +118,7 @@
 		B296D89A887ECBA85C7B16C3 /* ZCodeMobileTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = ZCodeMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B9F7367D2A4D907B5BC25138 /* MessageTextSelectionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageTextSelectionSheet.swift; sourceTree = "<group>"; };
 		BE1E67CAD789E9E31380BAA4 /* ContextWindowPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextWindowPopover.swift; sourceTree = "<group>"; };
+		BE936A12FAE0B1D6A9AB6B4E /* ProjectTreeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectTreeTests.swift; sourceTree = "<group>"; };
 		BEEF67AED666A980DECF571A /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
 		C69B1E89A391AD40E347D376 /* ZCodeVQLCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeVQLCodec.swift; sourceTree = "<group>"; };
 		C9D939E56E02C2E684BBB319 /* ZCodeMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeMobileApp.swift; sourceTree = "<group>"; };
@@ -135,6 +139,7 @@
 				BEEF67AED666A980DECF571A /* AppStore.swift */,
 				0D2F70C50DC1875B9476E22D /* AppStore+Inspector.swift */,
 				085607869B2EC5917323082D /* AppStore+Live.swift */,
+				7BECCF783A3E0AA64E59421D /* AppStore+ProjectTree.swift */,
 				02E8390D33DDBECB78523C58 /* AppStore+Settings.swift */,
 				A5E1167E86C6134271122327 /* AppStore+SettingsSync.swift */,
 				0FB486095FF73380919FDD44 /* AppStore+V4.swift */,
@@ -148,6 +153,7 @@
 			isa = PBXGroup;
 			children = (
 				0DD0A11859108C2E9920D961 /* LiveSyncTests.swift */,
+				BE936A12FAE0B1D6A9AB6B4E /* ProjectTreeTests.swift */,
 				ED9D97A18BD8FEFCC2CE75A0 /* V4ProtocolTests.swift */,
 				97855C4C145655E375AEB0CB /* ZCodeMobileUnitTests.swift */,
 			);
@@ -455,6 +461,7 @@
 				86C553DFBE825356589D7E7E /* AgentChatCanvasView.swift in Sources */,
 				16DA12BB2D613A83BA8E8241 /* AppStore+Inspector.swift in Sources */,
 				DB51EFE049A0DF9E91641E18 /* AppStore+Live.swift in Sources */,
+				9C554A6AF149269E74D194C0 /* AppStore+ProjectTree.swift in Sources */,
 				7E331A9F764CBF56AA5C574D /* AppStore+Settings.swift in Sources */,
 				807D351D58300A57F5DC0DC8 /* AppStore+SettingsSync.swift in Sources */,
 				834D06A8E9F2AB840AF0FB7F /* AppStore+V4.swift in Sources */,
@@ -511,6 +518,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				9E05EEA60A22F5285AA8F47D /* LiveSyncTests.swift in Sources */,
+				8B21A474DC46A223D897EFE0 /* ProjectTreeTests.swift in Sources */,
 				8D5573D9B2B1CAEA4F879BA9 /* V4ProtocolTests.swift in Sources */,
 				6B63DAC183438635D43F9908 /* ZCodeMobileUnitTests.swift in Sources */,
 			);

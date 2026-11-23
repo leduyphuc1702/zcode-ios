@@ -42,7 +42,6 @@ extension AppStore {
             group.addTask { await self.syncHooksRPC(workspacePath: ctx.path, workspaceIdentity: ctx.identity) }
             group.addTask { await self.syncMemoriesRPC() }
             group.addTask { await self.syncUsageStatsRPC() }
-            group.addTask { await self.syncArchivedTasksRPC(workspacePath: ctx.path, workspaceIdentity: ctx.identity) }
         }
     }
 
@@ -71,7 +70,7 @@ extension AppStore {
         if let noProxy = d["httpProxyNoProxy"] as? String { httpProxyNoProxy = noProxy }
         if let ca = d["httpProxyCaCertPath"] as? String { httpProxyCaCertPath = ca }
         if let sr = d["messageStreamShowReasoning"] as? Bool { showReasoningBlocks = sr }
-        if let st = d["messageStreamShowTodos"] as? Bool { showTodoTracker = st }
+        if let st = d["messageStreamShowTodos"] as? Bool { messageStreamShowTodos = st }
         if let ge = d["toolGroupingExploreEnabled"] as? Bool { toolGroupingExploreEnabled = ge }
         if let gt = d["toolGroupingTerminalEnabled"] as? Bool { toolGroupingTerminalEnabled = gt }
         if let gc = d["toolGroupingChangesEnabled"] as? Bool { toolGroupingChangesEnabled = gc }
@@ -207,7 +206,6 @@ extension AppStore {
 
         if !parsed.isEmpty {
             self.providers = parsed
-            persistCustomCatalogs()
         }
     }
 
@@ -267,7 +265,6 @@ extension AppStore {
             models: seedModels
         )
         providers.append(newProvider)
-        persistCustomCatalogs()
         showToast("Added provider \(cleanName)")
 
         if isRemoteRPCReady {
@@ -321,7 +318,6 @@ extension AppStore {
                 if !providers[idx].isBuiltin { providers[idx].statusText = "API Key Configured" }
             }
         }
-        persistCustomCatalogs()
         showToast("Saved \(providers[idx].name)")
 
         if isRemoteRPCReady, !providers[idx].isAccountProvider {
@@ -361,7 +357,6 @@ extension AppStore {
         let removedName = providers[idx].name
         KeychainStore.delete("provider_key_\(providerId)")
         providers.remove(at: idx)
-        persistCustomCatalogs()
         showToast("Deleted \(removedName)")
 
         if isRemoteRPCReady {
@@ -387,7 +382,6 @@ extension AppStore {
         guard let a = providers.firstIndex(where: { $0.id == providerId }),
               let b = providers.firstIndex(where: { $0.id == otherId }) else { return }
         providers.swapAt(a, b)
-        persistCustomCatalogs()
 
         if isRemoteRPCReady {
             let reordered = providers.filter { !$0.isAccountProvider }.map(\.id)
@@ -418,7 +412,6 @@ extension AppStore {
             normalized.builtin = false
             providers[pIdx].models.append(normalized)
         }
-        persistCustomCatalogs()
         showToast("Saved model \(draft.modelId)")
 
         if isRemoteRPCReady {
@@ -477,7 +470,6 @@ extension AppStore {
               let mIdx = providers[pIdx].models.firstIndex(where: { $0.modelId == modelId || $0.id == modelId }) else { return }
         providers[pIdx].models[mIdx].enabled = enabled
         let rawModelId = providers[pIdx].models[mIdx].modelId
-        persistCustomCatalogs()
 
         if isRemoteRPCReady {
             Task {
@@ -496,7 +488,6 @@ extension AppStore {
               let mIdx = providers[pIdx].models.firstIndex(where: { $0.modelId == modelId || $0.id == modelId }) else { return }
         let rawModelId = providers[pIdx].models[mIdx].modelId
         providers[pIdx].models.remove(at: mIdx)
-        persistCustomCatalogs()
         showToast("Removed \(rawModelId)")
 
         if isRemoteRPCReady {
@@ -564,26 +555,8 @@ extension AppStore {
             }
         }
 
-        // Direct endpoint reachability check when not paired over RPC
-        let provider = providers[pIdx]
-        if !provider.isAccountProvider && !provider.hasConfiguredAPIKey {
-            providers[pIdx].models[mIdx].connectivityState = .failed
-            providers[pIdx].models[mIdx].connectivityMessage = "Configure API Key first"
-            return
-        }
-        guard let url = URL(string: provider.baseURL), url.scheme != nil else {
-            providers[pIdx].models[mIdx].connectivityState = .failed
-            providers[pIdx].models[mIdx].connectivityMessage = "Invalid Base URL"
-            return
-        }
-        try? await Task.sleep(nanoseconds: 180_000_000)
-        let ms = max(18, Int(Date().timeIntervalSince(started) * 1000))
-        if let p2 = providers.firstIndex(where: { $0.id == providerId }),
-           let m2 = providers[p2].models.firstIndex(where: { $0.modelId == rawModelId }) {
-            providers[p2].models[m2].connectivityState = .connected
-            providers[p2].models[m2].connectivityMessage = "Ready • \(ms)ms"
-            showToast("\(rawModelId) verified (\(ms)ms)")
-        }
+        providers[pIdx].models[mIdx].connectivityState = .failed
+        providers[pIdx].models[mIdx].connectivityMessage = "Connect to your computer to test"
     }
 
     // MARK: - 2. Subagents Studio (1:1 `subagents` RPC + Validation)
@@ -618,8 +591,7 @@ extension AppStore {
         }
         guard let val = try? await rpcClient.call(channel: "subagents", method: "list", args: [.fromJSONObject(req)], timeoutSec: 4.5),
               let dict = val.decodeJSONDictionary(),
-              let rawAgents = dict["agents"] as? [[String: Any]],
-              !rawAgents.isEmpty else { return }
+              let rawAgents = dict["agents"] as? [[String: Any]] else { return }
 
         var parsed: [SubagentDefinitionItem] = []
         for a in rawAgents {
@@ -680,10 +652,7 @@ extension AppStore {
             )
         }
 
-        if !parsed.isEmpty {
-            self.subagents = parsed
-            persistCustomCatalogs()
-        }
+        self.subagents = parsed
     }
 
     public func saveSubagent(_ draft: SubagentDefinitionItem, isNew: Bool) {
@@ -708,11 +677,9 @@ extension AppStore {
             showToast("Updated subagent \(clean.name)")
             if isRemoteRPCReady {
                 dispatchSubagentUpsertRPC(clean, isNew: false, oldFilePath: oldPath)
-                persistCustomCatalogs()
                 return
             }
         }
-        persistCustomCatalogs()
         if isRemoteRPCReady {
             dispatchSubagentUpsertRPC(clean, isNew: true, oldFilePath: nil)
         }
@@ -768,7 +735,6 @@ extension AppStore {
         guard let idx = subagents.firstIndex(where: { $0.id == id }),
               !subagents[idx].readOnly else { return }
         let removed = subagents.remove(at: idx)
-        persistCustomCatalogs()
         showToast("Deleted subagent \(removed.name)")
 
         if isRemoteRPCReady {
@@ -786,7 +752,6 @@ extension AppStore {
     public func setSubagentEnabled(_ id: String, enabled: Bool) {
         guard let idx = subagents.firstIndex(where: { $0.id == id }) else { return }
         subagents[idx].enabled = enabled
-        persistCustomCatalogs()
 
         if isRemoteRPCReady {
             Task {
@@ -805,7 +770,6 @@ extension AppStore {
         subagents[idx].modelOverride = modelOverride
         subagents[idx].reasoningOverride = reasoningOverride
         let item = subagents[idx]
-        persistCustomCatalogs()
         showToast("Updated model for \(item.displayName)")
 
         guard isRemoteRPCReady else { return }
@@ -859,7 +823,7 @@ extension AppStore {
         let (dirVal, statusVal) = await (dirCall, statusCall)
         let statuses = (statusVal?.decodeJSONDictionary()?["statuses"] as? [String: [String: Any]]) ?? [:]
 
-        guard let rawServers = dirVal?.decodeJSONDictionary()?["servers"] as? [[String: Any]], !rawServers.isEmpty else { return }
+        guard let rawServers = dirVal?.decodeJSONDictionary()?["servers"] as? [[String: Any]] else { return }
         var list: [MCPServerItem] = []
         for s in rawServers {
             guard let name = s["name"] as? String else { continue }
@@ -892,9 +856,7 @@ extension AppStore {
                 )
             )
         }
-        if !list.isEmpty {
-            self.mcpServers = list
-        }
+        self.mcpServers = list
     }
 
     public func upsertMCPServer(_ draft: MCPServerItem, isNew: Bool) {
@@ -903,7 +865,6 @@ extension AppStore {
         } else {
             mcpServers.append(draft)
         }
-        persistCustomCatalogs()
         showToast("Saved MCP server \(draft.name)")
 
         if isRemoteRPCReady {
@@ -939,7 +900,6 @@ extension AppStore {
 
     public func deleteMCPServer(_ item: MCPServerItem) {
         mcpServers.removeAll(where: { $0.id == item.id })
-        persistCustomCatalogs()
         showToast("Removed MCP server \(item.name)")
         if isRemoteRPCReady {
             Task {
@@ -957,7 +917,6 @@ extension AppStore {
         guard let idx = mcpServers.firstIndex(where: { $0.id == item.id }) else { return }
         mcpServers[idx].enabled = enabled
         mcpServers[idx].statusText = enabled ? "Enabled" : "Disabled"
-        persistCustomCatalogs()
         if isRemoteRPCReady {
             Task {
                 _ = try? await rpcClient.call(
@@ -974,8 +933,7 @@ extension AppStore {
         var req: [String: Any] = ["workspacePath": workspacePath, "provider": "glm"]
         if let workspaceIdentity { req["workspaceIdentity"] = workspaceIdentity }
         guard let val = try? await rpcClient.call(channel: "skills", method: "list", args: [.fromJSONObject(req)], timeoutSec: 4.5),
-              let rawSkills = val.decodeJSONDictionary()?["skills"] as? [[String: Any]],
-              !rawSkills.isEmpty else { return }
+              let rawSkills = val.decodeJSONDictionary()?["skills"] as? [[String: Any]] else { return }
 
         self.skills = rawSkills.compactMap { s in
             guard let id = s["id"] as? String, let name = s["name"] as? String else { return nil }
@@ -1060,7 +1018,7 @@ extension AppStore {
                 )
             }
         }
-        if !merged.isEmpty { self.plugins = merged }
+        self.plugins = merged
     }
 
     public func setPluginEnabled(_ item: PluginCatalogItem, enabled: Bool) {
@@ -1082,9 +1040,9 @@ extension AppStore {
             method: "list",
             args: [.fromJSONObject(["workspacePath": workspacePath, "agentSource": "zcodeAgent"])],
             timeoutSec: 4.0
-        ), let raw = val.decodeJSONDictionary()?["commands"] as? [[String: Any]], !raw.isEmpty else { return }
+        ), let raw = val.decodeJSONDictionary()?["commands"] as? [[String: Any]] else { return }
 
-        var parsed: [SlashCommandItem] = SeedWorkspaceFactory.defaultSlashCommands().filter { $0.scope == "System" }
+        var parsed: [SlashCommandItem] = []
         for c in raw {
             guard let id = c["id"] as? String, let name = c["name"] as? String else { continue }
             let src = (c["source"] as? String) ?? "user"
@@ -1112,7 +1070,6 @@ extension AppStore {
         } else {
             slashCommands.append(draft)
         }
-        persistCustomCatalogs()
         showToast("Saved command \(draft.trigger)")
 
         if isRemoteRPCReady {
@@ -1143,7 +1100,6 @@ extension AppStore {
     public func deleteSlashCommand(_ item: SlashCommandItem) {
         guard item.scope != "System" else { return }
         slashCommands.removeAll(where: { $0.id == item.id })
-        persistCustomCatalogs()
         showToast("Deleted \(item.trigger)")
         if isRemoteRPCReady && !item.filePath.isEmpty {
             Task {
@@ -1187,14 +1143,12 @@ extension AppStore {
         } else {
             hooks.append(draft)
         }
-        persistCustomCatalogs()
         pushHooksToDesktopIfConnected()
         showToast("Saved hook on \(draft.event)")
     }
 
     public func deleteHookRule(_ item: HookRuleItem) {
         hooks.removeAll(where: { $0.id == item.id })
-        persistCustomCatalogs()
         pushHooksToDesktopIfConnected()
         showToast("Deleted hook")
     }
@@ -1287,121 +1241,11 @@ extension AppStore {
         }
     }
 
-    public func syncArchivedTasksRPC(workspacePath: String, workspaceIdentity: String?) async {
-        var req: [String: Any] = [:]
-        if !workspacePath.isEmpty { req["workspacePath"] = workspacePath }
-        if let workspaceIdentity { req["workspaceIdentity"] = workspaceIdentity }
-        guard let val = try? await rpcClient.call(channel: "zcode-task", method: "listArchivedTasks", args: [.fromJSONObject(req)], timeoutSec: 4.0),
-              case .array(let arr) = val else { return }
-
-        for entry in arr {
-            guard let d = entry.decodeJSONDictionary(),
-                  let tid = d["taskId"] as? String,
-                  !sessions.contains(where: { $0.id == tid }) else { continue }
-            let wsPath = (d["workspacePath"] as? String) ?? workspacePath
-            sessions.append(
-                AgentTaskSession(
-                    id: tid,
-                    traceId: "trc_\(tid.prefix(8))",
-                    projectId: activeProjectId,
-                    workspacePath: wsPath,
-                    title: (d["title"] as? String) ?? "Archived Session",
-                    status: .completed,
-                    mode: .ask,
-                    modelId: (d["model"] as? String) ?? "zai/GLM-5.3",
-                    effort: .medium,
-                    pinned: false,
-                    archived: true,
-                    unread: false,
-                    offPeakEnabled: false,
-                    createdAt: Date(),
-                    updatedAt: Date(),
-                    contextUsedPercent: 0,
-                    totalTokensIn: 0,
-                    totalTokensOut: 0,
-                    cachedTokens: 0,
-                    costUSD: 0,
-                    messages: [],
-                    todos: [],
-                    pendingPermission: nil,
-                    pendingQuestion: nil,
-                    pendingPlan: nil,
-                    queuedPrompts: [],
-                    checkpoints: []
-                )
-            )
-        }
-    }
-
     public func restoreArchivedSession(_ sessionId: String) {
-        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
-        sessions[idx].archived = false
-        let session = sessions[idx]
-        showToast("Restored \(session.title)")
-        if isRemoteRPCReady {
-            Task {
-                _ = try? await rpcClient.call(
-                    channel: "zcode-task",
-                    method: "unarchiveTask",
-                    args: [.fromJSONObject(["workspacePath": session.workspacePath, "taskId": session.id])],
-                    timeoutSec: 4.0
-                )
-            }
-        }
+        restoreSession(sessionId)
     }
 
     public func deleteArchivedSessionPermanently(_ sessionId: String) {
-        let session = sessions.first(where: { $0.id == sessionId })
-        sessions.removeAll(where: { $0.id == sessionId })
-        showToast("Deleted archived session")
-        if isRemoteRPCReady, let session {
-            Task {
-                _ = try? await rpcClient.call(
-                    channel: "zcode-task",
-                    method: "deleteArchivedTask",
-                    args: [.fromJSONObject(["workspacePath": session.workspacePath, "taskId": session.id])],
-                    timeoutSec: 4.0
-                )
-            }
-        }
-    }
-
-    // MARK: - Local Persistence of Custom Providers, Subagents, MCP, Commands & Hooks
-
-    private static let catalogsStorageKey = "zcode_custom_catalogs_v3"
-
-    private struct PersistedCatalogs: Codable {
-        var providers: [ModelProviderConfig]
-        var subagents: [SubagentDefinitionItem]
-        var mcpServers: [MCPServerItem]
-        var slashCommands: [SlashCommandItem]
-        var hooks: [HookRuleItem]
-    }
-
-    public func persistCustomCatalogs() {
-        guard !isUITestSeededMode else { return }
-        let snap = PersistedCatalogs(
-            providers: providers,
-            subagents: subagents,
-            mcpServers: mcpServers,
-            slashCommands: slashCommands,
-            hooks: hooks
-        )
-        if let data = try? JSONEncoder().encode(snap) {
-            UserDefaults.standard.set(data, forKey: Self.catalogsStorageKey)
-        }
-    }
-
-    public func loadPersistedCatalogsIfAvailable() {
-        guard !isUITestSeededMode,
-              let data = UserDefaults.standard.data(forKey: Self.catalogsStorageKey),
-              let snap = try? JSONDecoder().decode(PersistedCatalogs.self, from: data) else {
-            return
-        }
-        if !snap.providers.isEmpty { providers = snap.providers }
-        if !snap.subagents.isEmpty { subagents = snap.subagents }
-        if !snap.mcpServers.isEmpty { mcpServers = snap.mcpServers }
-        if !snap.slashCommands.isEmpty { slashCommands = snap.slashCommands }
-        if !snap.hooks.isEmpty { hooks = snap.hooks }
+        deleteSession(sessionId)
     }
 }
