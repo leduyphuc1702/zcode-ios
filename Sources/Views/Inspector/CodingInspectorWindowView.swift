@@ -5,6 +5,7 @@ public struct CodingInspectorWindowView: View {
     let isDockedPane: Bool
     @Environment(\.zcodePalette) private var palette
     @Environment(\.dismiss) private var dismiss
+    @State private var liveState = InspectorLiveState()
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -89,13 +90,13 @@ public struct CodingInspectorWindowView: View {
             Group {
                 switch store.activeInspectorTab {
                 case .files:
-                    FileExplorerAndCodeViewer(store: store)
+                    FileExplorerAndCodeViewer(store: store, liveState: liveState)
                 case .preview:
-                    NativeMediaDocumentViewer(store: store)
+                    NativeMediaDocumentViewer(store: store, liveState: liveState)
                 case .gitDiff:
-                    GitChangesAndDiffViewer(store: store)
+                    GitChangesAndDiffViewer(store: store, liveState: liveState)
                 case .terminal:
-                    IntegratedTerminalView(store: store)
+                    IntegratedTerminalView(store: store, liveState: liveState)
                 case .workflows:
                     WorkflowGraphCanvasView(store: store)
                 }
@@ -104,5 +105,17 @@ public struct CodingInspectorWindowView: View {
             .background(palette.background)
         }
         .background(palette.background)
+        .onChange(of: store.inspectorWorkspacePath) { _, newPath in
+            if store.isLiveHostConnected {
+                liveState.resetForWorkspace(newPath)
+            }
+        }
+        .onDisappear {
+            if liveState.ptyId != nil {
+                Task { @MainActor in
+                    await store.disposeInspectorLiveTerminal(state: liveState)
+                }
+            }
+        }
     }
 }

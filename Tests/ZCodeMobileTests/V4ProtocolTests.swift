@@ -1,0 +1,194 @@
+import XCTest
+@testable import ZCode
+
+final class V4WireFrameAssemblerTests: XCTestCase {
+    private func envelope(ordinal: Int, kind: String = "complete", extra: [String: Any] = [:]) -> [String: Any] {
+        var env: [String: Any] = [
+            "wireVersion": 3, "topic": "conversation/s1", "subscriptionId": "sub1",
+            "logicalFrameOrdinal": ordinal, "kind": kind
+        ]
+        for (k, v) in extra { env[k] = v }
+        return env
+    }
+
+    func testCompleteFrameDeliveredOnceAndStaleOrdinalIgnored() {
+        var assembler = V4WireFrameAssembler()
+        let frame: [String: Any] = ["topic": "conversation/s1", "subscriptionId": "sub1", "fromSeq": 0, "toSeq": 1]
+        guard case .frame(let out, let delivery) = assembler.ingest(envelope(ordinal: 1, extra: ["frame": frame, "deliveryKind": "initial"])) else {
+            return XCTFail("expected frame")
+        }
+        XCTAssertEqual(ZCodeV4.int(out["toSeq"]), 1)
+        XCTAssertEqual(delivery, "initial")
+        guard case .ignored = assembler.ingest(envelope(ordinal: 1, extra: ["frame": frame])) else {
+            return XCTFail("duplicate ordinal must be ignored")
+        }
+    }
+
+    func testFragmentsReassembleWithChecksum() throws {
+        var assembler = V4WireFrameAssembler()
+        let data = try JSONSerialization.data(withJSONObject: ["topic": "conversation/s1", "toSeq": 7])
+        let mid = data.count / 2
+        let parts = [data.prefix(mid), data.suffix(from: mid)]
+        let common: [String: Any] = [
+            "fragmentCount": 2, "logicalFrameId": "f1", "logicalBytes": data.count,
+            "checksum": ["algorithm": "crc32", "value": ZCodeVQLCodec.crc32Hex(data)]
+        ]
+        var first = common
+        first["fragmentIndex"] = 1
+        first["dataBase64"] = Data(parts[1]).base64EncodedString()
+        guard case .ignored = assembler.ingest(envelope(ordinal: 1, kind: "fragment", extra: first)) else {
+            return XCTFail("partial assembly must wait")
+        }
+        var second = common
+        second["fragmentIndex"] = 0
+        second["dataBase64"] = Data(parts[0]).base64EncodedString()
+        guard case .frame(let out, _) = assembler.ingest(envelope(ordinal: 1, kind: "fragment", extra: second)) else {
+            return XCTFail("expected assembled frame")
+        }
+        XCTAssertEqual(ZCodeV4.int(out["toSeq"]), 7)
+    }
+
+    func testChecksumMismatchFaults() throws {
+        var assembler = V4WireFrameAssembler()
+        let data = try JSONSerialization.data(withJSONObject: ["toSeq": 1])
+        let extra: [String: Any] = [
+            "fragmentIndex": 0, "fragmentCount": 1, "dataBase64": data.base64EncodedString(),
+            "checksum": ["value": "deadbeef"]
+        ]
+        guard case .fault(let code) = assembler.ingest(envelope(ordinal: 1, kind: "fragment", extra: extra)) else {
+            return XCTFail("expected fault")
+        }
+        XCTAssertEqual(code, "proto.frameAssemblyChecksumMismatch")
+    }
+
+    func testWrongWireVersionIgnored() {
+        var assembler = V4WireFrameAssembler()
+        guard case .ignored = assembler.ingest(["wireVersion": 2, "topic": "t", "subscriptionId": "s", "logicalFrameOrdinal": 1, "kind": "complete", "frame": [:]]) else {
+            return XCTFail("old wire version must be ignored")
+        }
+    }
+}
+
+final class V4ConversationStateTests: XCTestCase {
+    private func snapshotFrame(rows: [[String: Any]], seq: Int = 5) -> [String: Any] {
+        [
+            "toSeq": seq,
+            "payload": [
+                "kind": "snapshot",
+                "snapshot": [
+                    "revision": 3, "seq": seq, "logEpoch": "E1", "phase": "idle",
+                    "rows": ["window": rows, "totalCount": rows.count, "firstRowId": 1]
+                ]
+            ]
+        ]
+    }
+
+    private func deltas(from: Int, to: Int, _ ops: [[String: Any]]) -> [String: Any] {
+        ["fromSeq": from, "toSeq": to, "payload": ["kind": "deltas", "deltas": ops]]
+    }
+
+    func testDeltasBeforeSnapshotAreGap() {
+        var conv = V4ConversationState(sessionId: "s1")
+        XCTAssertEqual(conv.apply(frame: deltas(from: 0, to: 1, [])), .gap)
+    }
+
+    func testSnapshotThenDeltasStreamText() {
+        var conv = V4ConversationState(sessionId: "s1")
+        XCTAssertEqual(conv.apply(frame: snapshotFrame(rows: [["rowId": 1, "kind": "userInput", "text": "hi"]])), .applied)
+        XCTAssertEqual(conv.revision, 3)
+        XCTAssertEqual(conv.base?["seq"] as? Int, 5)
+
+        XCTAssertEqual(conv.apply(frame: deltas(from: 5, to: 6, [
+            ["op": "row.appended", "row": ["rowId": 2, "kind": "assistantText", "text": "Hel"]],
+            ["op": "state.updated", "patch": ["phase": "running", "revision": 4]]
+        ])), .applied)
+        XCTAssertEqual(conv.apply(frame: deltas(from: 6, to: 7, [
+            ["op": "row.delta", "rowId": 2, "path": "text", "append": "lo"]
+        ])), .applied)
+        XCTAssertEqual(conv.rows.last?["text"] as? String, "Hello")
+        XCTAssertEqual(conv.state["phase"] as? String, "running")
+        XCTAssertEqual(conv.revision, 4)
+        XCTAssertEqual(conv.totalCount, 2)
+
+        // Replayed frame is ignored, skipped seq is a gap.
+        XCTAssertEqual(conv.apply(frame: deltas(from: 6, to: 7, [])), .ignored)
+        XCTAssertEqual(conv.apply(frame: deltas(from: 9, to: 10, [])), .gap)
+    }
+
+    func testRowRemovedTruncatesTail() {
+        var conv = V4ConversationState(sessionId: "s1")
+        _ = conv.apply(frame: snapshotFrame(rows: (1...4).map { ["rowId": $0, "kind": "assistantText", "text": "\($0)"] }))
+        XCTAssertEqual(conv.apply(frame: deltas(from: 5, to: 6, [["op": "row.removed", "fromRowId": 3]])), .applied)
+        XCTAssertEqual(conv.rows.compactMap { ZCodeV4.int($0["rowId"]) }, [1, 2])
+        XCTAssertEqual(conv.totalCount, 2)
+    }
+
+    func testPrependOlderRowsOnlyForSameEpoch() {
+        var conv = V4ConversationState(sessionId: "s1")
+        _ = conv.apply(frame: snapshotFrame(rows: [["rowId": 5, "kind": "userInput", "text": "x"]]))
+        XCTAssertTrue(conv.hasOlderRows)
+        XCTAssertFalse(conv.prepend(olderRows: [["rowId": 4]], atLogEpoch: "OTHER"))
+        XCTAssertTrue(conv.prepend(olderRows: [["rowId": 3], ["rowId": 4], ["rowId": 5]], atLogEpoch: "E1"))
+        XCTAssertEqual(conv.rows.compactMap { ZCodeV4.int($0["rowId"]) }, [3, 4, 5])
+    }
+}
+
+final class V4SessionsIndexStateTests: XCTestCase {
+    func testSnapshotAndUpserts() {
+        var index = V4SessionsIndexState(workspaceKey: "local:/w")
+        XCTAssertEqual(index.apply(frame: [
+            "toSeq": 2,
+            "payload": ["kind": "snapshot", "snapshot": ["logEpoch": "E", "sessions": [["sessionId": "a", "phase": "idle"]]]]
+        ]), .applied)
+        XCTAssertEqual(index.apply(frame: [
+            "fromSeq": 2, "toSeq": 3,
+            "payload": ["kind": "deltas", "deltas": [
+                ["op": "session.upserted", "session": ["sessionId": "b", "phase": "running"]],
+                ["op": "session.removed", "sessionId": "a"]
+            ]]
+        ]), .applied)
+        XCTAssertEqual(Set(index.sessions.keys), ["b"])
+        XCTAssertEqual(index.apply(frame: ["fromSeq": 5, "toSeq": 6, "payload": ["kind": "deltas", "deltas": []]]), .gap)
+    }
+}
+
+@MainActor
+final class V4ConversationMapperTests: XCTestCase {
+    func testContextBreakdownSortedAndNormalized() throws {
+        let usage = V4ConversationMapper.contextUsage([
+            "contextWindow": [
+                "usedTokens": 50_000, "maxTokens": 200_000,
+                "breakdown": [
+                    ["source": "systemPrompt", "chars": 100],
+                    ["source": "messages", "chars": 300],
+                    ["source": "messages", "chars": 100],
+                    ["source": "skills", "chars": 0]
+                ]
+            ]
+        ])
+        let snapshot = try XCTUnwrap(usage)
+        XCTAssertEqual(snapshot.fraction, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(snapshot.breakdown.map(\.source), ["messages", "systemPrompt"])
+        XCTAssertEqual(snapshot.breakdown.first?.fraction ?? 0, 0.8, accuracy: 0.0001)
+    }
+
+    func testRowsGroupIntoUserAndAssistantTurns() {
+        var targets: [String: [String: Any]] = [:]
+        let rows: [[String: Any]] = [
+            ["rowId": 1, "turnId": "t1", "kind": "userInput", "origin": "realUser", "text": "Fix it",
+             "conversationQuotes": [["text": "quoted line", "path": "a.swift"]]],
+            ["rowId": 2, "turnId": "t1", "kind": "turnHeader", "activeMs": 4200, "outputTokens": 99],
+            ["rowId": 3, "turnId": "t1", "kind": "reasoning", "text": "thinking"],
+            ["rowId": 4, "turnId": "t1", "kind": "assistantText", "text": "Done", "feedback": "like"]
+        ]
+        let messages = V4ConversationMapper.messages(rows, rowTargets: &targets)
+        XCTAssertEqual(messages.map(\.role), ["user", "assistant"])
+        XCTAssertEqual(messages[0].quotes?.first?.text, "quoted line")
+        XCTAssertEqual(messages[1].thought, "thinking")
+        XCTAssertEqual(messages[1].content, "Done")
+        XCTAssertEqual(messages[1].feedback, 1)
+        XCTAssertEqual(messages[1].durationMs, 4200)
+        XCTAssertEqual(messages[1].tokensOut, 99)
+        XCTAssertEqual(ZCodeV4.int(targets[messages[1].id]?["rowId"]), 4)
+    }
+}

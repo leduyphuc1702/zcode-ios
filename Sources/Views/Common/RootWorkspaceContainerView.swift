@@ -133,6 +133,41 @@ public struct RootWorkspaceContainerView: View {
                     .zIndex(35)
                 }
 
+                if let notice = store.liveConnectionNotice, !store.showConnectionHub {
+                    VStack {
+                        Button {
+                            if let id = store.activeConnection?.id, store.activeConnection?.state != .connected {
+                                store.clearReconnectBlock(for: id)
+                                Task { await store.connectToWorkstation(id, silent: true) }
+                            } else {
+                                store.verifyLiveConnection()
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                Text(notice)
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(palette.foreground)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Capsule().fill(palette.card))
+                            .overlay(Capsule().strokeBorder(palette.borderStrong, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("liveConnectionNotice")
+                        .accessibilityHint("Retries the connection to your computer")
+                        .padding(.top, 6)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(34)
+                }
+
                 // Enterprise Security Lock Gate
                 if store.isLocked {
                     SecurityUnlockGateView(store: store)
@@ -142,6 +177,7 @@ public struct RootWorkspaceContainerView: View {
             }
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: store.mobilePage)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: store.toastMessage)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: store.liveConnectionNotice)
             .background {
                 // Apple HIG iPadOS / Hardware Keyboard Shortcuts
                 ZStack {

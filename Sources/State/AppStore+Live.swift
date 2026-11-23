@@ -1,4 +1,6 @@
 import Foundation
+import Network
+import SwiftUI
 
 // MARK: - Host model selection types (mirror of @zcode/shared ModelSelection / model-selection view)
 
@@ -81,6 +83,17 @@ final class LiveSyncState {
     var resubscribeTask: Task<Void, Never>?
     var reconnectTask: Task<Void, Never>?
     var reconnectAttempts = 0
+    var syncedConnectionId: String?
+    var kickedConnectionId: String?
+    var isForeground = true
+    var networkSatisfied = true
+    var networkInterfaceSignature = ""
+    var pathMonitor: NWPathMonitor?
+    var resumeCheckTask: Task<Void, Never>?
+    var peerResyncTask: Task<Void, Never>?
+    var backgroundedAt: Date?
+    var rebootstrapTask: Task<Void, Never>?
+    var bridgeRecoveryTask: Task<Void, Never>?
 
     func reset() {
         workspaceSubs.removeAll()
@@ -212,6 +225,10 @@ extension AppStore {
         sessions[sIdx].reasoningLevel = selection.reasoningLevel
         let session = sessions[sIdx]
         guard isLiveHostConnected, !session.id.hasPrefix("task-") else { return }
+        if v4Owns(session.id) {
+            v4SwitchModel(selection, session: session)
+            return
+        }
         Task { @MainActor in
             do {
                 _ = try await self.rpcClient.call(
@@ -237,6 +254,10 @@ extension AppStore {
         sessions[sIdx].reasoningLevel = level
         let session = sessions[sIdx]
         guard isLiveHostConnected, !session.id.hasPrefix("task-") else { return }
+        if v4Owns(session.id), let selection = modelSelection(for: session) {
+            v4SwitchModel(LiveModelSelection(providerId: selection.providerId, modelId: selection.modelId, reasoningLevel: level), session: session)
+            return
+        }
         Task { @MainActor in
             do {
                 _ = try await self.rpcClient.call(
@@ -258,6 +279,10 @@ extension AppStore {
         sessions[sIdx].mode = mode
         let session = sessions[sIdx]
         guard isLiveHostConnected, !session.id.hasPrefix("task-") else { return }
+        if v4Owns(session.id) {
+            v4Fire("switchCollaborationMode", payload: ["mode": mode.wireValue], session: session, failure: "Couldn't change mode")
+            return
+        }
         Task { @MainActor in
             do {
                 _ = try await self.rpcClient.call(
@@ -271,6 +296,12 @@ extension AppStore {
                 self.scheduleSnapshotRefetch(taskId: session.id, delay: 0.05)
             }
         }
+    }
+
+    private func v4SwitchModel(_ selection: LiveModelSelection, session: AgentTaskSession) {
+        var payload: [String: Any] = ["provider": selection.providerId, "model": selection.modelId]
+        if let level = selection.reasoningLevel { payload["thought"] = level }
+        v4Fire("switchModelConfig", payload: payload, session: session, failure: "Couldn't switch model")
     }
 
     // MARK: - Task lists (all workspaces, official scope fan-out)
@@ -431,9 +462,24 @@ extension AppStore {
                 self?.recoverDegradedBridge(reason: reason)
             }
         }
+        await rpcClient.setBootstrapRequiredHandler { [weak self] in
+            Task { @MainActor in
+                self?.rebootstrapRelay(reason: "bootstrap-required")
+            }
+        }
         await rpcClient.setConnectionLostHandler { [weak self] reason in
             Task { @MainActor in
                 self?.handleHostConnectionLost(reason: reason)
+            }
+        }
+        await rpcClient.setPeerStatusHandler { [weak self] online in
+            Task { @MainActor in
+                self?.handlePeerStatus(online: online)
+            }
+        }
+        await rpcClient.setTerminalErrorHandler { [weak self] code, message in
+            Task { @MainActor in
+                self?.handleTerminalError(code: code, message: message)
             }
         }
     }
@@ -453,7 +499,16 @@ extension AppStore {
             for subId in liveSync.workspaceSubs.values { await rpcClient.unlisten(subId) }
             if let modelSub = liveSync.modelViewSubId { await rpcClient.unlisten(modelSub) }
             if let taskSub = liveSync.activeTaskSubId { await rpcClient.unlisten(taskSub) }
+            for subId in Array(v4Sync.conversationFrameSubs.values) + Array(v4Sync.indexFrameSubs.values) {
+                await rpcClient.unlisten(subId)
+            }
+            if let lifecycle = v4Sync.lifecycleSubId { await rpcClient.unlisten(lifecycle) }
+            for subId in [hostSettings.broadcastSubId, hostSettings.providerSubId].compactMap({ $0 }) {
+                await rpcClient.unlisten(subId)
+            }
         }
+        v4Sync.resetConnection()
+        resetHostSettingsSubscriptions()
         liveSync.workspaceSubs.removeAll()
         liveSync.modelViewSubId = nil
         liveSync.activeTaskSubId = nil
@@ -465,6 +520,7 @@ extension AppStore {
             liveSync.modelViewSubId = subId
         }
         await refreshLiveModelView()
+        await subscribeHostSettings()
 
         for project in projects {
             await subscribeWorkspaceEvents(project)
@@ -472,6 +528,20 @@ extension AppStore {
 
         if let session = activeSession, !session.id.hasPrefix("task-") {
             await subscribeActiveTask(session)
+        }
+        await subscribeSessionsIndexes()
+    }
+
+    /// Live status badges for every session; over the relay only the bridged workspace is reachable.
+    func subscribeSessionsIndexes() async {
+        guard await v4EnsureHandshake() else { return }
+        let bridgeKey = await rpcClient.currentBridge()?.workspaceKey
+        let isRelay = await rpcClient.isRelay
+        for project in projects {
+            let identity = workspaceIdentityByPath[project.rootPath]
+            let key = ZCodeRPCClient.resolveWorkspaceKey(workspacePath: project.rootPath, workspaceIdentity: identity)
+            if isRelay, key != bridgeKey { continue }
+            await v4SubscribeSessionsIndex(projectId: project.id, path: project.rootPath, identity: identity)
         }
     }
 
@@ -510,6 +580,8 @@ extension AppStore {
         liveSync.activeTaskSubId = nil
         liveSync.activeTaskId = nil
 
+        if await v4SubscribeConversation(session) { return }
+
         let taskId = session.id
         let identity = workspaceIdentityByPath[session.workspacePath]
         var req: [String: Any] = [
@@ -537,7 +609,7 @@ extension AppStore {
     }
 
     func scheduleSnapshotRefetch(taskId: String, delay: Double = 0.35) {
-        guard !isUITestSeededMode, liveSync.snapshotRefetch[taskId] == nil,
+        guard !isUITestSeededMode, !v4Owns(taskId), liveSync.snapshotRefetch[taskId] == nil,
               let session = sessions.first(where: { $0.id == taskId }) else { return }
         let path = session.workspacePath
         let identity = workspaceIdentityByPath[path]
@@ -817,7 +889,7 @@ extension AppStore {
         sessions[sIdx].status = .waitingQuestion
     }
 
-    private static func elicitationQuestions(_ request: [String: Any]) -> [[String: Any]] {
+    static func elicitationQuestions(_ request: [String: Any]) -> [[String: Any]] {
         if let questions = request["questions"] as? [[String: Any]], !questions.isEmpty { return questions }
         return [[
             "question": (request["message"] as? String) ?? "Input required",
@@ -827,7 +899,7 @@ extension AppStore {
         ]]
     }
 
-    private static func questionPrompt(from request: [String: Any], index: Int) -> QuestionPrompt {
+    static func questionPrompt(from request: [String: Any], index: Int) -> QuestionPrompt {
         let questions = elicitationQuestions(request)
         let q = questions[min(index, questions.count - 1)]
         let options = ((q["options"] as? [[String: Any]]) ?? []).enumerated().map { i, opt in
@@ -880,6 +952,10 @@ extension AppStore {
         ]
         if let identity = workspaceIdentityByPath[session.workspacePath], !identity.isEmpty { req["workspaceIdentity"] = identity }
         playNotificationHaptic(allow ? .success : .warning)
+        if v4Owns(session.id) {
+            v4ResolveInteraction(sessionId: session.id, workspacePath: session.workspacePath, interactionId: perm.id, answer: ["optionId": optionId])
+            return true
+        }
         Task { @MainActor in
             do {
                 _ = try await self.rpcClient.call(channel: "zcode-task", method: "respondPermission", args: [.fromJSONObject(req)], timeoutSec: 10.0)
@@ -964,6 +1040,16 @@ extension AppStore {
         if let content { req["content"] = content }
         if let identity = workspaceIdentityByPath[session.workspacePath], !identity.isEmpty { req["workspaceIdentity"] = identity }
         playNotificationHaptic(.success)
+        if v4Owns(session.id) {
+            var answer: [String: Any] = ["action": action]
+            if let content { answer["content"] = content }
+            if action == "accept", (liveSync.elicitations[requestId]?["v4Generic"] as? Bool) == true,
+               let value = content?["answer_0"] as? String {
+                answer = ["optionId": value]
+            }
+            v4ResolveInteraction(sessionId: session.id, workspacePath: session.workspacePath, interactionId: requestId, answer: answer)
+            return
+        }
         Task { @MainActor in
             do {
                 _ = try await self.rpcClient.call(channel: "zcode-task", method: "respondElicitation", args: [.fromJSONObject(req)], timeoutSec: 10.0)
@@ -979,17 +1065,57 @@ extension AppStore {
 
     // MARK: - Connection recovery
 
-    private func recoverDegradedBridge(reason: String) {
-        guard isLiveHostConnected, let session = activeSession ?? sessions.first else { return }
+    private var recoveryTarget: (key: String, taskId: String?)? {
+        guard let session = activeSession ?? sessions.first else { return nil }
         let identity = workspaceIdentityByPath[session.workspacePath]
         let key = ZCodeRPCClient.resolveWorkspaceKey(workspacePath: session.workspacePath, workspaceIdentity: identity)
-        Task { @MainActor in
-            _ = try? await self.rpcClient.openWorkspaceBridge(
-                workspaceKey: key,
-                taskId: session.id.hasPrefix("task-") ? nil : session.id,
-                timeoutSec: 6.0,
-                forceReopen: true
-            )
+        return (key, session.id.hasPrefix("task-") ? nil : session.id)
+    }
+
+    /// Bridge faulted while this terminal still owns the session: reopen with a new bridge identity and recoveryId.
+    private func recoverDegradedBridge(reason: String) {
+        guard isLiveHostConnected, liveSync.rebootstrapTask == nil, let target = recoveryTarget else { return }
+        liveSync.bridgeRecoveryTask?.cancel()
+        liveSync.bridgeRecoveryTask = Task { @MainActor in
+            defer { self.liveSync.bridgeRecoveryTask = nil }
+            await self.rpcClient.sendMobileDiagnostic(event: "recover-start", detail: ["reason": "bridge-degraded", "degradedReason": reason])
+            for delay: UInt64 in [0, 500_000_000, 2_000_000_000] {
+                if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+                guard !Task.isCancelled, self.isLiveHostConnected else { return }
+                do {
+                    _ = try await self.rpcClient.openWorkspaceBridge(
+                        workspaceKey: target.key,
+                        taskId: target.taskId,
+                        timeoutSec: 6.0,
+                        forceReopen: true
+                    )
+                    return
+                } catch {
+                    if self.liveSync.rebootstrapTask != nil { return }
+                }
+            }
+            self.rebootstrapRelay(reason: "bridge-reopen-failed")
+        }
+    }
+
+    /// Desktop ended this terminal's ownership (grace timer, restart, or replaced): bootstrap again, then reopen the bridge.
+    func rebootstrapRelay(reason: String) {
+        guard isLiveHostConnected, liveSync.rebootstrapTask == nil else { return }
+        liveSync.bridgeRecoveryTask?.cancel()
+        let target = recoveryTarget
+        liveSync.rebootstrapTask = Task { @MainActor in
+            defer { self.liveSync.rebootstrapTask = nil }
+            await self.rpcClient.sendMobileDiagnostic(event: "recover-start", detail: ["reason": reason])
+            for delay: UInt64 in [0, 1_000_000_000, 3_000_000_000] {
+                if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+                guard !Task.isCancelled, self.isLiveHostConnected else { return }
+                let snapshot = await self.rpcClient.rebootstrap(preferredWorkspaceKey: target?.key, preferredTaskId: target?.taskId)
+                if snapshot.openedBridge != nil {
+                    await self.loadAllWorkspaceTasks(preferredActiveTaskId: self.activeSessionId)
+                    return
+                }
+            }
+            self.setLiveNotice("Lost the workspace on your computer. Pull to refresh or reconnect.")
         }
     }
 
@@ -998,25 +1124,177 @@ extension AppStore {
               connections[idx].state == .connected else { return }
         connections[idx].state = .disconnected
         liveSync.reset()
-        for i in sessions.indices where sessions[i].status == .running {
-            sessions[i].statusNoticeText = "Connection to the host was lost. Reconnecting…"
-        }
-        let connectionId = connections[idx].id
+        setLiveNotice("Connection to your computer was lost. Reconnecting…")
+        startReconnectLoop(connectionId: connections[idx].id, immediate: false)
+    }
+
+    /// Keeps retrying while the app is in the foreground with a usable network; paused otherwise and resumed by
+    /// `handleScenePhase(.active)` / the path monitor. Never gives up on its own.
+    func startReconnectLoop(connectionId: String, immediate: Bool) {
+        guard liveSync.kickedConnectionId != connectionId else { return }
+        if immediate { liveSync.reconnectAttempts = 0 }
         liveSync.reconnectTask?.cancel()
         liveSync.reconnectTask = Task { @MainActor in
-            while !Task.isCancelled, self.liveSync.reconnectAttempts < 6 {
+            while !Task.isCancelled {
+                guard self.activeConnectionId == connectionId,
+                      self.liveSync.kickedConnectionId != connectionId,
+                      let state = self.connections.first(where: { $0.id == connectionId })?.state,
+                      state != .connected,
+                      self.liveSync.isForeground, self.liveSync.networkSatisfied else { return }
                 let attempt = self.liveSync.reconnectAttempts
                 self.liveSync.reconnectAttempts += 1
-                try? await Task.sleep(nanoseconds: UInt64(min(16.0, pow(2.0, Double(attempt))) * 1_000_000_000))
-                guard !Task.isCancelled, self.activeConnectionId == connectionId else { return }
+                if attempt > 0 || !immediate {
+                    let base = min(30.0, pow(2.0, Double(min(attempt, 5))))
+                    try? await Task.sleep(nanoseconds: UInt64(base * Double.random(in: 0.8...1.2) * 1_000_000_000))
+                }
+                guard !Task.isCancelled, self.activeConnectionId == connectionId,
+                      self.liveSync.isForeground, self.liveSync.networkSatisfied else { return }
                 await self.connectToWorkstation(connectionId, silent: true)
                 if self.connections.first(where: { $0.id == connectionId })?.state == .connected {
                     self.liveSync.reconnectAttempts = 0
+                    self.clearLiveNotice()
                     return
                 }
             }
-            self.showToast("Disconnected from host. Tap the host header to reconnect.")
         }
+    }
+
+    private func handlePeerStatus(online: Bool) {
+        guard isLiveHostConnected, let connection = activeConnection else { return }
+        liveSync.peerResyncTask?.cancel()
+        if !online {
+            liveSync.workspaceSubs.removeAll()
+            liveSync.modelViewSubId = nil
+            liveSync.activeTaskSubId = nil
+            liveSync.activeTaskId = nil
+            setLiveNotice("ZCode on your computer is offline. Waiting for it to come back…")
+            return
+        }
+        liveSync.peerResyncTask = Task { @MainActor in
+            if await self.syncRemoteWorkspacesFromServer(for: connection) {
+                self.clearLiveNotice()
+            } else {
+                await self.rpcClient.dropDeadConnection()
+            }
+        }
+    }
+
+    private func handleTerminalError(code: String, message: String) {
+        guard let idx = connections.firstIndex(where: { $0.id == activeConnectionId }) else { return }
+        guard code == "KICKED" else {
+            showToast(message)
+            return
+        }
+        liveSync.kickedConnectionId = connections[idx].id
+        liveSync.reconnectTask?.cancel()
+        connections[idx].state = .disconnected
+        liveSync.reset()
+        setLiveNotice(message)
+        Task { await self.rpcClient.disconnect() }
+    }
+
+    /// An explicit user connect lifts a takeover block so auto-reconnect works again.
+    func clearReconnectBlock(for connectionId: String) {
+        if liveSync.kickedConnectionId == connectionId { liveSync.kickedConnectionId = nil }
+    }
+
+    // MARK: - App lifecycle & network
+
+    public func handleScenePhase(_ phase: ScenePhase) {
+        guard !isUITestSeededMode else { return }
+        switch phase {
+        case .active:
+            let wasBackground = !liveSync.isForeground
+            liveSync.isForeground = true
+            if wasBackground {
+                verifyLiveConnection()
+                scheduleHostSettingsRefresh()
+            }
+        case .background:
+            liveSync.isForeground = false
+            liveSync.backgroundedAt = Date()
+        default:
+            break
+        }
+    }
+
+    public func startNetworkMonitorIfNeeded() {
+        guard liveSync.pathMonitor == nil, !isUITestSeededMode else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            let signature = path.availableInterfaces.map { "\($0.type)" }.joined(separator: ",")
+            Task { @MainActor in
+                self?.handleNetworkPath(satisfied: satisfied, signature: signature)
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "ai.zcode.mobile.path-monitor"))
+        liveSync.pathMonitor = monitor
+    }
+
+    private func handleNetworkPath(satisfied: Bool, signature: String) {
+        let wasSatisfied = liveSync.networkSatisfied
+        let changedInterface = !liveSync.networkInterfaceSignature.isEmpty && liveSync.networkInterfaceSignature != signature
+        liveSync.networkSatisfied = satisfied
+        liveSync.networkInterfaceSignature = signature
+        guard satisfied, !wasSatisfied || changedInterface else { return }
+        verifyLiveConnection()
+    }
+
+    /// After resume or a network change: reconnect if the socket is dead, otherwise re-read host state that may
+    /// have changed while events could not be delivered.
+    func verifyLiveConnection() {
+        guard let connection = activeConnection, connection.transport != .enterpriseSandbox,
+              liveSync.kickedConnectionId != connection.id else { return }
+        liveSync.resumeCheckTask?.cancel()
+        liveSync.resumeCheckTask = Task { @MainActor in
+            switch connection.state {
+            case .connected:
+                if await self.rpcClient.probeLiveness(timeoutSec: 4.0) {
+                    await self.resyncAfterResume()
+                } else {
+                    await self.rpcClient.dropDeadConnection()
+                }
+            case .disconnected, .error:
+                if self.liveSync.syncedConnectionId == connection.id {
+                    self.startReconnectLoop(connectionId: connection.id, immediate: true)
+                }
+            case .connecting:
+                break
+            }
+        }
+    }
+
+    private func resyncAfterResume() async {
+        guard isLiveHostConnected else { return }
+        if await rpcClient.isRelay, await rpcClient.currentBridge() == nil {
+            rebootstrapRelay(reason: "resume-without-bridge")
+            return
+        }
+        await loadAllWorkspaceTasks(preferredActiveTaskId: nil)
+        if liveSync.activeTaskSubId == nil || liveSync.workspaceSubs.count < projects.count {
+            await resubscribeAll(handlersCleared: false)
+            return
+        }
+        await refreshLiveModelView()
+        await refreshHostSettings()
+        if let session = activeSession, v4Owns(session.id) {
+            v4Resync(force: false)
+        } else if let session = activeSession, !session.id.hasPrefix("task-") {
+            await hydrateTaskSnapshot(
+                sessionId: session.id,
+                workspacePath: session.workspacePath,
+                workspaceIdentity: workspaceIdentityByPath[session.workspacePath]
+            )
+        }
+    }
+
+    private func setLiveNotice(_ text: String) {
+        liveConnectionNotice = text
+    }
+
+    private func clearLiveNotice() {
+        liveConnectionNotice = nil
     }
 
     // MARK: - Snapshot parser (zcode-task getTaskSnapshot)
@@ -1196,7 +1474,8 @@ extension AppStore {
             durationMs: Int(number(t["durationMs"]) ?? 0),
             addedLines: added,
             removedLines: removed,
-            subagentSteps: []
+            subagentSteps: [],
+            toolName: toolName
         )
     }
 
@@ -1230,7 +1509,7 @@ extension AppStore {
         return [:]
     }
 
-    private static func splitPlan(_ text: String) -> (summary: String, steps: [String]) {
+    static func splitPlan(_ text: String) -> (summary: String, steps: [String]) {
         var summaryLines: [String] = []
         var steps: [String] = []
         for rawLine in text.components(separatedBy: "\n") {

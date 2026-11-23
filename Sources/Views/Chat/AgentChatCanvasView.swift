@@ -375,7 +375,8 @@ public struct AgentChatCanvasView: View {
                     Button {
                         showTelemetrySheet = true
                     } label: {
-                        Label("Checkpoints & Context (\(session.contextUsedPercent)%)", systemImage: "clock.arrow.circlepath")
+                        let contextPct = session.contextUsage.map { Int(($0.fraction * 100).rounded()) } ?? session.contextUsedPercent
+                        Label("Checkpoints & Context (\(contextPct)%)", systemImage: "clock.arrow.circlepath")
                     }
                 }
                 Divider()
@@ -804,12 +805,31 @@ public struct AgentChatCanvasView: View {
         NavigationStack {
             List {
                 if let session = store.activeSession {
+                    let usage = session.contextUsage
+                    let contextValue: String = {
+                        if let usage {
+                            let used = ContextWindowFormatting.tokens(usage.usedTokens)
+                            let maxT = ContextWindowFormatting.tokens(usage.maxTokens)
+                            let pct = ContextWindowFormatting.percent(usage.fraction * 100)
+                            return "\(used)/\(maxT) (\(pct))"
+                        }
+                        return "\(session.contextUsedPercent)%"
+                    }()
+                    let inputTokens = usage?.cumulativeInputTokens ?? session.totalTokensIn
+                    let outputTokens = usage?.cumulativeOutputTokens ?? session.totalTokensOut
+                    let cachedTokens = usage.map { $0.cumulativeCacheReadTokens + $0.cumulativeCacheWriteTokens } ?? session.cachedTokens
+
                     Section("Context Window & Token Usage") {
-                        LabeledContent("Context Used", value: "\(session.contextUsedPercent)%")
-                        LabeledContent("Input Tokens", value: "\(session.totalTokensIn.formatted())")
-                        LabeledContent("Output Tokens", value: "\(session.totalTokensOut.formatted())")
-                        LabeledContent("Cached Tokens", value: "\(session.cachedTokens.formatted())")
-                        LabeledContent("Estimated Cost", value: String(format: "$%.2f", session.costUSD))
+                        LabeledContent("Context Used", value: contextValue)
+                        LabeledContent("Input Tokens", value: inputTokens.formatted())
+                        LabeledContent("Output Tokens", value: outputTokens.formatted())
+                        LabeledContent("Cached Tokens", value: cachedTokens.formatted())
+                        if let hitRate = usage?.cacheHitRate {
+                            LabeledContent("Average Cache Hit Rate", value: ContextWindowFormatting.percent(hitRate * 100))
+                        }
+                        if session.costUSD > 0 || usage == nil {
+                            LabeledContent("Estimated Cost", value: String(format: "$%.2f", session.costUSD))
+                        }
                     }
 
                     Section("Git Checkpoints") {

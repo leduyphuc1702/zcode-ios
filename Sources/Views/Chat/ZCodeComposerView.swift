@@ -1,20 +1,27 @@
 import SwiftUI
 import PhotosUI
+import UniformTypeIdentifiers
 
 public struct ZCodeComposerView: View {
     @Bindable var store: AppStore
     var onTapContextGauge: (() -> Void)? = nil
     @Environment(\.zcodePalette) private var palette
     @FocusState private var isInputFocused: Bool
-    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var showPhotoLibraryPicker: Bool = false
+    @State private var showFileImporter: Bool = false
     @State private var showFileMentionPicker: Bool = false
+    @State private var selectedWorkspaceFileIds: Set<String> = []
     @State private var showPlusMenuPopover: Bool = false
+    @State private var showModelPickerPopover: Bool = false
+    @State private var showContextWindowPopover: Bool = false
     @State private var showAttachmentTypeDialog: Bool = false
 
     private enum ActivePopoverKind: Equatable {
         case none
         case plusMenu
+        case modelPicker
+        case contextWindow
         case slash(String)
         case mention(String)
         case skill(String)
@@ -51,11 +58,34 @@ public struct ZCodeComposerView: View {
             }
         }
 
+        if showModelPickerPopover {
+            return .modelPicker
+        }
+
+        if showContextWindowPopover {
+            return .contextWindow
+        }
+
         if showPlusMenuPopover {
             return .plusMenu
         }
 
         return .none
+    }
+
+    private var hasDismissableManualPopover: Bool {
+        switch activePopover {
+        case .plusMenu, .modelPicker, .contextWindow:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func dismissManualPopovers() {
+        showPlusMenuPopover = false
+        showModelPickerPopover = false
+        showContextWindowPopover = false
     }
 
     private var filteredCommands: [SlashCommandItem] {
@@ -141,32 +171,60 @@ public struct ZCodeComposerView: View {
     public var body: some View {
         composerShellRegion
             .overlay(alignment: .top) {
-                popoverOverlayRegion
-                    .alignmentGuide(.top) { d in
-                        d[.bottom] + 6
+                ZStack(alignment: .bottom) {
+                    if hasDismissableManualPopover {
+                        Color.clear
+                            .frame(height: 1200)
+                            .frame(maxWidth: .infinity)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                withAnimation(.easeOut(duration: 0.14)) {
+                                    dismissManualPopovers()
+                                }
+                            }
                     }
-                    .zIndex(50)
+
+                    popoverOverlayRegion
+                }
+                .alignmentGuide(.top) { d in
+                    d[.bottom] + 6
+                }
+                .zIndex(50)
             }
             .animation(.easeOut(duration: 0.14), value: activePopover)
         .onChange(of: store.composerText) { _, newValue in
-            if !newValue.isEmpty && showPlusMenuPopover {
-                showPlusMenuPopover = false
+            if !newValue.isEmpty && hasDismissableManualPopover {
+                dismissManualPopovers()
             }
         }
         .confirmationDialog("Add Attachment", isPresented: $showAttachmentTypeDialog, titleVisibility: .visible) {
             Button("Photo or Screenshot Library") { showPhotoLibraryPicker = true }
-            Button("Workspace File") { showFileMentionPicker = true }
+            Button("Files & Documents") { showFileImporter = true }
+            Button("Workspace File") {
+                selectedWorkspaceFileIds = []
+                showFileMentionPicker = true
+            }
             Button("Cancel", role: .cancel) {}
         }
-        .photosPicker(isPresented: $showPhotoLibraryPicker, selection: $selectedPhotoItem, matching: .images)
-        .onChange(of: selectedPhotoItem) { _, newValue in
-            guard let newValue else { return }
-            Task {
-                if let data = try? await newValue.loadTransferable(type: Data.self) {
+        .photosPicker(
+            isPresented: $showPhotoLibraryPicker,
+            selection: $selectedPhotoItems,
+            maxSelectionCount: 10,
+            matching: .images
+        )
+        .onChange(of: selectedPhotoItems) { _, newItems in
+            guard !newItems.isEmpty else { return }
+            let picked = newItems
+            selectedPhotoItems = []
+            Task { @MainActor in
+                for (index, item) in picked.enumerated() {
+                    guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+                    let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "png"
+                    let suffix = String(UUID().uuidString.prefix(4)).lowercased()
                     store.composerAttachments.append(
                         ComposerAttachment(
                             id: UUID().uuidString,
-                            name: "image-\(Int.random(in: 100...999)).png",
+                            name: "image-\(index + 1)-\(suffix).\(ext)",
                             kind: "image",
                             sizeBytes: data.count,
                             filePath: nil,
@@ -177,8 +235,61 @@ public struct ZCodeComposerView: View {
                 }
             }
         }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { result in
+            handleImportedFiles(result)
+        }
         .sheet(isPresented: $showFileMentionPicker) {
             workspaceFilePickerSheet
+        }
+    }
+
+    private func handleImportedFiles(_ result: Result<[URL], Error>) {
+        switch result {
+        case .failure(let error):
+            store.showToast("Couldn't import file: \(error.localizedDescription)")
+        case .success(let urls):
+            let tempDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("zcode-attachments", isDirectory: true)
+            try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+            for url in urls {
+                let didAccess = url.startAccessingSecurityScopedResource()
+                defer {
+                    if didAccess {
+                        url.stopAccessingSecurityScopedResource()
+                    }
+                }
+                guard let data = try? Data(contentsOf: url) else { continue }
+                let fileName = url.lastPathComponent.isEmpty ? "attachment" : url.lastPathComponent
+                let destURL = tempDir.appendingPathComponent("\(UUID().uuidString)-\(fileName)")
+                let savedPath: String? = (try? data.write(to: destURL, options: .atomic)) != nil ? destURL.path : nil
+
+                let ext = url.pathExtension.lowercased()
+                let isImage: Bool = {
+                    if let type = UTType(filenameExtension: ext) {
+                        return type.conforms(to: .image)
+                    }
+                    return ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tiff"].contains(ext)
+                }()
+                let isPDF = ext == "pdf" || UTType(filenameExtension: ext)?.conforms(to: .pdf) == true
+                let kind = isImage ? "image" : (isPDF ? "pdf" : "file")
+
+                store.composerAttachments.append(
+                    ComposerAttachment(
+                        id: UUID().uuidString,
+                        name: fileName,
+                        kind: kind,
+                        sizeBytes: data.count,
+                        filePath: savedPath,
+                        lineNote: nil,
+                        previewPNGData: isImage ? data : nil
+                    )
+                )
+            }
         }
     }
 
@@ -197,6 +308,20 @@ public struct ZCodeComposerView: View {
         case .plusMenu:
             plusAttachmentPopover
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
+        case .modelPicker:
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                modelPickerPopoverView
+                    .frame(maxWidth: 300)
+            }
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+        case .contextWindow:
+            ContextWindowPopover(
+                usage: store.activeSession?.contextUsage,
+                fallbackUsedPercent: store.activeSession?.contextUsedPercent ?? 0
+            )
+            .frame(maxWidth: 340)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
         case .none:
             EmptyView()
         }
@@ -334,7 +459,11 @@ public struct ZCodeComposerView: View {
     // MARK: - 2. Inner Rounded Composer Box
 
     private var innerComposerBox: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
+            if !store.composerQuotes.isEmpty {
+                stagedQuotesStrip
+            }
+
             if !store.composerAttachments.isEmpty {
                 stagedAttachmentsStrip
             }
@@ -362,25 +491,99 @@ public struct ZCodeComposerView: View {
         )
     }
 
+    private var stagedQuotesStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(store.composerQuotes) { quote in
+                    let firstLine = quoteFirstLine(quote.text)
+                    HStack(spacing: 5) {
+                        Image(systemName: "text.quote")
+                            .font(.system(size: 11))
+                            .foregroundStyle(palette.foregroundSubtle)
+
+                        Text(firstLine)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(palette.foreground)
+                            .lineLimit(1)
+                            .frame(maxWidth: 180, alignment: .leading)
+
+                        if let path = quote.path, !path.isEmpty {
+                            Text(shortQuotePath(path))
+                                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                .foregroundStyle(palette.foregroundMuted)
+                                .lineLimit(1)
+                                .frame(maxWidth: 96, alignment: .leading)
+                        }
+
+                        Button {
+                            store.playSelectionHaptic()
+                            store.removeComposerQuote(quote.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(palette.foregroundMuted)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove quote")
+                        .accessibilityIdentifier("removeComposerQuote_\(quote.id)")
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(palette.inputBackground, in: Capsule())
+                    .overlay(Capsule().strokeBorder(palette.border, lineWidth: 1))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("composerQuoteChip_\(quote.id)")
+                }
+            }
+        }
+        .accessibilityIdentifier("stagedQuotesStrip")
+    }
+
+    private func quoteFirstLine(_ text: String) -> String {
+        let lines = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return lines.first ?? text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func shortQuotePath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed as NSString).lastPathComponent.nilIfEmpty ?? trimmed
+    }
+
     private var stagedAttachmentsStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(store.composerAttachments) { att in
                     HStack(spacing: 5) {
-                        Image(systemName: att.kind == "image" ? "photo" : (att.kind == "comment" ? "text.quote" : "doc"))
-                            .font(.system(size: 11))
-                            .foregroundStyle(palette.foregroundSubtle)
+                        if att.kind == "image",
+                           let data = att.previewPNGData,
+                           let uiImage = UIImage(data: data) {
+                            Image(uiImage: uiImage)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 16, height: 16)
+                                .clipShape(RoundedRectangle(cornerRadius: 3.5, style: .continuous))
+                        } else {
+                            Image(systemName: attachmentIconName(for: att.kind))
+                                .font(.system(size: 11))
+                                .foregroundStyle(palette.foregroundSubtle)
+                        }
                         Text(att.name)
                             .font(.system(size: 12, weight: .medium, design: .monospaced))
                             .foregroundStyle(palette.foreground)
                             .lineLimit(1)
+                            .frame(maxWidth: 160, alignment: .leading)
                         Button {
+                            store.playSelectionHaptic()
                             store.composerAttachments.removeAll(where: { $0.id == att.id })
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 12))
                                 .foregroundStyle(palette.foregroundMuted)
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove \(att.name)")
                     }
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
@@ -388,6 +591,16 @@ public struct ZCodeComposerView: View {
                     .overlay(Capsule().strokeBorder(palette.border, lineWidth: 1))
                 }
             }
+        }
+        .accessibilityIdentifier("stagedAttachmentsStrip")
+    }
+
+    private func attachmentIconName(for kind: String) -> String {
+        switch kind {
+        case "image": return "photo"
+        case "pdf": return "doc.richtext"
+        case "comment": return "text.quote"
+        default: return "doc"
         }
     }
 
@@ -400,8 +613,7 @@ public struct ZCodeComposerView: View {
             }
             Spacer(minLength: 2)
             contextRingButton
-            modelSlugMenu
-            effortLevelMenu
+            modelPickerTriggerButton
             submitOrStopButton
         }
     }
@@ -411,6 +623,7 @@ public struct ZCodeComposerView: View {
         return Button {
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             withAnimation(.easeOut(duration: 0.16)) {
+                dismissManualPopovers()
                 store.showTaskStatusPanel.toggle()
             }
         } label: {
@@ -447,7 +660,9 @@ public struct ZCodeComposerView: View {
                     if case .mention = activePopover { store.composerText = "" }
                     if case .skill = activePopover { store.composerText = "" }
                 }
-                showPlusMenuPopover.toggle()
+                let nextState = !showPlusMenuPopover
+                dismissManualPopovers()
+                showPlusMenuPopover = nextState
             }
         } label: {
             Image(systemName: "plus")
@@ -495,26 +710,46 @@ public struct ZCodeComposerView: View {
         .accessibilityIdentifier("composerModePicker")
     }
 
+    private var contextRingFraction: Double {
+        if let usage = store.activeSession?.contextUsage {
+            return max(0, min(1, usage.fraction))
+        }
+        let pct = store.activeSession?.contextUsedPercent ?? 0
+        return max(0, min(1, Double(pct) / 100.0))
+    }
+
     private var contextRingButton: some View {
-        let pct = store.activeSession?.contextUsedPercent ?? 18
+        let fraction = contextRingFraction
+        let pct = Int((fraction * 100).rounded())
+        let isOpen = (activePopover == .contextWindow)
         return Button {
             store.playSelectionHaptic()
-            onTapContextGauge?()
+            withAnimation(.easeOut(duration: 0.14)) {
+                let nextState = !showContextWindowPopover
+                dismissManualPopovers()
+                showContextWindowPopover = nextState
+            }
         } label: {
             ZStack {
                 Circle()
                     .stroke(palette.borderStrong, lineWidth: 2.2)
                     .frame(width: 16, height: 16)
-                Circle()
-                    .trim(from: 0, to: CGFloat(max(8, pct)) / 100.0)
-                    .stroke(
-                        pct > 80 ? palette.warning : palette.foregroundSubtle,
-                        style: StrokeStyle(lineWidth: 2.2, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
-                    .frame(width: 16, height: 16)
+                if fraction > 0 {
+                    Circle()
+                        .trim(from: 0, to: CGFloat(max(0.04, fraction)))
+                        .stroke(
+                            fraction > 0.80 ? palette.warning : (isOpen ? palette.foreground : palette.foregroundSubtle),
+                            style: StrokeStyle(lineWidth: 2.2, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                        .frame(width: 16, height: 16)
+                }
             }
             .frame(width: 24, height: 30)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isOpen ? popoverRowHighlight : Color.clear)
+            )
             .contentShape(Rectangle().inset(by: -6))
         }
         .buttonStyle(.plain)
@@ -527,106 +762,181 @@ public struct ZCodeComposerView: View {
         return store.modelSelection(for: session)
     }
 
-    private var modelSlugMenu: some View {
+    private var currentTriggerModelLabel: String {
         let live = !store.isUITestSeededMode
         let currentModelId = live ? (currentLiveSelection?.modelId ?? "") : (store.activeSession?.modelId ?? "")
-        return Menu {
-            if live {
-                if store.liveModelGroups.isEmpty {
-                    Text("Loading models from host…")
-                }
-                ForEach(store.liveModelGroups) { group in
-                    Section(group.name) {
-                        ForEach(group.models) { model in
-                            Button {
-                                store.selectModel(model)
-                            } label: {
-                                let isCurrent = model.modelId == currentLiveSelection?.modelId && model.providerId == currentLiveSelection?.providerId
-                                if isCurrent {
-                                    Label(model.modelId, systemImage: "checkmark")
-                                } else {
-                                    Text(model.modelId)
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                ForEach(store.providers.filter(\.enabled)) { provider in
-                    Section(provider.name) {
-                        ForEach(provider.models) { model in
-                            Button {
-                                if var s = store.activeSession {
-                                    s.modelId = model.id
-                                    store.activeSession = s
-                                }
-                            } label: {
-                                Text("\(model.name) (\(model.contextWindowK)K)")
-                            }
-                        }
-                    }
-                }
+        return currentModelId.isEmpty ? "Select model" : modelSlug(for: currentModelId)
+    }
+
+    private var currentTriggerEffortLabel: String? {
+        if store.isUITestSeededMode {
+            let currentModelId = store.activeSession?.modelId ?? ""
+            let descriptor = store.providers.filter(\.enabled).flatMap(\.models).first(where: { $0.id == currentModelId })
+            guard descriptor?.supportsReasoning ?? true else { return nil }
+            return (store.activeSession?.effort ?? .high).fullTitle
+        }
+        let levels = store.reasoningLevels(for: store.activeSession)
+        guard !levels.isEmpty else { return nil }
+        let current = currentLiveSelection?.reasoningLevel ?? levels.last ?? ""
+        let title = Self.reasoningTitle(current)
+        return title.isEmpty ? nil : title
+    }
+
+    private var modelPickerTriggerButton: some View {
+        let isOpen = (activePopover == .modelPicker)
+        let modelLabel = currentTriggerModelLabel
+        let effortLabel = currentTriggerEffortLabel
+
+        return Button {
+            store.playSelectionHaptic()
+            withAnimation(.easeOut(duration: 0.14)) {
+                let nextState = !showModelPickerPopover
+                dismissManualPopovers()
+                showModelPickerPopover = nextState
             }
         } label: {
-            Text(currentModelId.isEmpty ? "Select model" : modelSlug(for: currentModelId))
-                .font(.system(size: 13, weight: .regular))
-                .foregroundStyle(palette.foregroundSubtle)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
+            HStack(spacing: 4) {
+                Text(modelLabel)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(isOpen ? palette.foreground : palette.foregroundSubtle)
+                    .lineLimit(1)
+
+                if let effortLabel {
+                    Text(effortLabel)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(palette.foregroundMuted)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(palette.foregroundMuted)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isOpen ? popoverRowHighlight : Color.clear)
+            )
+            .contentShape(Rectangle().inset(by: -4))
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel(effortLabel.map { "\(modelLabel) \($0)" } ?? modelLabel)
         .accessibilityIdentifier("composerModelPicker")
     }
 
     @ViewBuilder
-    private var effortLevelMenu: some View {
+    private var modelPickerPopoverView: some View {
         if store.isUITestSeededMode {
-            let effort = store.activeSession?.effort ?? .high
-            Menu {
-                ForEach(ReasoningEffortLevel.allCases) { level in
-                    Button {
-                        if var s = store.activeSession {
-                            s.effort = level
-                            store.activeSession = s
-                        }
-                    } label: {
-                        Text(level.fullTitle)
+            let enabledProviders = store.providers.filter(\.enabled)
+            let groups = enabledProviders.map { provider in
+                ModelPickerProviderGroup(
+                    id: provider.id,
+                    name: provider.name,
+                    badgeText: "API",
+                    models: provider.models.map { model in
+                        ModelPickerItem(
+                            id: "\(provider.id)/\(model.id)",
+                            providerId: provider.id,
+                            providerName: provider.name,
+                            modelId: model.id,
+                            displayName: model.name,
+                            supportsVision: model.supportsVision,
+                            reasoningLevels: model.supportsReasoning ? ReasoningEffortLevel.allCases.map(\.rawValue) : []
+                        )
                     }
-                }
-            } label: {
-                effortMenuLabel(effort.fullTitle)
+                )
             }
-            .accessibilityIdentifier("composerEffortPicker")
-        } else {
-            let levels = store.reasoningLevels(for: store.activeSession)
-            if !levels.isEmpty {
-                let current = currentLiveSelection?.reasoningLevel ?? levels.last ?? ""
-                Menu {
-                    Picker("Reasoning", selection: Binding(
-                        get: { current },
-                        set: { store.selectReasoningLevel($0) }
-                    )) {
-                        ForEach(levels, id: \.self) { level in
-                            Text(Self.reasoningTitle(level)).tag(level)
-                        }
-                    }
-                    .pickerStyle(.inline)
-                } label: {
-                    effortMenuLabel(Self.reasoningTitle(current))
-                }
-                .accessibilityIdentifier("composerEffortPicker")
-            }
-        }
-    }
+            let currentModelId = store.activeSession?.modelId ?? ""
+            let currentProviderId = enabledProviders.first(where: { p in
+                p.models.contains(where: { $0.id == currentModelId })
+            })?.id
+            let activeModelDescriptor = enabledProviders.flatMap(\.models).first(where: { $0.id == currentModelId })
+            let levels = (activeModelDescriptor?.supportsReasoning ?? true) ? ReasoningEffortLevel.allCases.map(\.rawValue) : []
+            let currentLevel = (store.activeSession?.effort ?? .high).rawValue
 
-    private func effortMenuLabel(_ title: String) -> some View {
-        HStack(spacing: 3) {
-            Text(title)
-                .font(.system(size: 13.5, weight: .regular))
-                .foregroundStyle(palette.foregroundMuted)
-                .fixedSize()
-            Image(systemName: "chevron.down")
-                .font(.system(size: 9.5, weight: .medium))
-                .foregroundStyle(palette.foregroundMuted)
+            ModelPickerPopover(
+                groups: groups,
+                activeProviderId: currentProviderId,
+                activeModelId: currentModelId,
+                activeReasoningLevels: levels,
+                activeReasoningLevel: currentLevel,
+                isLoading: false,
+                onSelectModel: { item in
+                    store.playSelectionHaptic()
+                    if var s = store.activeSession {
+                        s.modelId = item.modelId
+                        s.modelProviderId = item.providerId
+                        store.activeSession = s
+                    }
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        showModelPickerPopover = false
+                    }
+                },
+                onSelectReasoningLevel: { level in
+                    guard let parsed = ReasoningEffortLevel(rawValue: level) else { return }
+                    store.playSelectionHaptic()
+                    if var s = store.activeSession {
+                        s.effort = parsed
+                        store.activeSession = s
+                    }
+                },
+                onManageModels: {
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        showModelPickerPopover = false
+                    }
+                    store.showToast("Manage models on your computer")
+                }
+            )
+        } else {
+            let groups = store.liveModelGroups.map { group in
+                ModelPickerProviderGroup(
+                    id: group.id,
+                    name: group.name,
+                    badgeText: "API",
+                    models: group.models.map { option in
+                        ModelPickerItem(
+                            id: option.id,
+                            providerId: option.providerId,
+                            providerName: option.providerName,
+                            modelId: option.modelId,
+                            displayName: option.modelId,
+                            supportsVision: option.supportsImage,
+                            reasoningLevels: option.reasoningLevels
+                        )
+                    }
+                )
+            }
+            let selection = currentLiveSelection
+            let levels = store.reasoningLevels(for: store.activeSession)
+            let currentLevel = selection?.reasoningLevel ?? levels.last ?? ""
+
+            ModelPickerPopover(
+                groups: groups,
+                activeProviderId: selection?.providerId,
+                activeModelId: selection?.modelId ?? "",
+                activeReasoningLevels: levels,
+                activeReasoningLevel: currentLevel,
+                isLoading: store.liveModelGroups.isEmpty,
+                onSelectModel: { item in
+                    if let option = store.liveModel(providerId: item.providerId, modelId: item.modelId) {
+                        store.selectModel(option)
+                    }
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        showModelPickerPopover = false
+                    }
+                },
+                onSelectReasoningLevel: { level in
+                    store.selectReasoningLevel(level)
+                },
+                onManageModels: {
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        showModelPickerPopover = false
+                    }
+                    store.showToast("Manage models on your computer")
+                }
+            )
         }
     }
 
@@ -641,7 +951,9 @@ public struct ZCodeComposerView: View {
 
     @ViewBuilder
     private var submitOrStopButton: some View {
-        let hasDraft = !store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.composerAttachments.isEmpty
+        let hasDraft = !store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !store.composerAttachments.isEmpty
+            || !store.composerQuotes.isEmpty
         if store.activeSession?.status == .running && !hasDraft {
             Button {
                 store.stopGeneration()
@@ -665,7 +977,7 @@ public struct ZCodeComposerView: View {
         } else {
             Button {
                 store.playImpactHaptic(.medium)
-                showPlusMenuPopover = false
+                dismissManualPopovers()
                 store.sendPrompt()
             } label: {
                 Image(systemName: "arrow.up")
@@ -1143,39 +1455,69 @@ public struct ZCodeComposerView: View {
         }
     }
 
-    // MARK: - Workspace File Picker Sheet
+    // MARK: - Workspace File Picker Sheet (Multi-Select)
 
     private var workspaceFilePickerSheet: some View {
         NavigationStack {
             List(store.flattenedFiles) { file in
+                let isSelected = selectedWorkspaceFileIds.contains(file.id)
                 Button {
-                    store.composerAttachments.append(
-                        ComposerAttachment(
-                            id: UUID().uuidString,
-                            name: file.name,
-                            kind: file.kind == .image ? "image" : "file",
-                            sizeBytes: file.sizeBytes,
-                            filePath: file.path,
-                            lineNote: nil,
-                            previewPNGData: file.binaryData
-                        )
-                    )
-                    showFileMentionPicker = false
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(file.name)
-                            .font(.system(size: 14, weight: .medium))
-                        Text(file.path)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                    store.playSelectionHaptic()
+                    if isSelected {
+                        selectedWorkspaceFileIds.remove(file.id)
+                    } else {
+                        selectedWorkspaceFileIds.insert(file.id)
                     }
+                } label: {
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(file.name)
+                                .font(.system(size: 14, weight: .medium))
+                            Text(file.path)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 8)
+                        if isSelected {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(palette.accentBlue)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
             }
-            .navigationTitle("Attach Workspace File")
+            .navigationTitle("Attach Workspace Files")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") {
+                        selectedWorkspaceFileIds = []
+                        showFileMentionPicker = false
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Cancel") { showFileMentionPicker = false }
+                    Button("Attach\(selectedWorkspaceFileIds.isEmpty ? "" : " (\(selectedWorkspaceFileIds.count))")") {
+                        let picked = store.flattenedFiles.filter { selectedWorkspaceFileIds.contains($0.id) }
+                        for file in picked {
+                            let kind = file.kind == .image ? "image" : (file.kind == .pdf ? "pdf" : "file")
+                            store.composerAttachments.append(
+                                ComposerAttachment(
+                                    id: UUID().uuidString,
+                                    name: file.name,
+                                    kind: kind,
+                                    sizeBytes: file.sizeBytes,
+                                    filePath: file.path,
+                                    lineNote: nil,
+                                    previewPNGData: file.kind == .image ? file.binaryData : nil
+                                )
+                            )
+                        }
+                        selectedWorkspaceFileIds = []
+                        showFileMentionPicker = false
+                    }
+                    .fontWeight(.semibold)
+                    .disabled(selectedWorkspaceFileIds.isEmpty)
                 }
             }
         }

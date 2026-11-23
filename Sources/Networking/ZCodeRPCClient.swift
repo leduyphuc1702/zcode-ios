@@ -129,9 +129,22 @@ public actor ZCodeRPCClient {
     private var bridgeChangeHandler: (@Sendable (RelayBridgeIdentity) -> Void)?
     private var bridgeDegradedHandler: (@Sendable (String) -> Void)?
     private var connectionLostHandler: (@Sendable (String) -> Void)?
+    private var peerStatusHandler: (@Sendable (Bool) -> Void)?
+    private var terminalErrorHandler: (@Sendable (String, String) -> Void)?
     private var fragmentBuffers: [Int: [Int: Data]] = [:]
+    /// Inbound `messageSeq`s already handed to the channel; Desktop replays unACKed frames after a relay blip.
+    private var deliveredMessageSeqFloor = 0
+    private var deliveredMessageSeqs: Set<Int> = []
+    private var mobileTaskViewEpoch: String?
+    private var mobileTaskViewSeq = 0
+    private var mobileTaskViewTaskId: String?
+    private var bootstrapRequiredHandler: (@Sendable () -> Void)?
     private var receiveTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private var livenessTask: Task<Void, Never>?
+    private var lastInboundAt = Date()
+    private var missedPongs = 0
+    private var peerOffline = false
 
     private var currentDeviceSid: String = ""
     private var currentPassHash: String = ""
@@ -157,11 +170,109 @@ public actor ZCodeRPCClient {
         self.bridgeDegradedHandler = handler
     }
 
+    /// Desktop dropped this terminal as owner (`terminal-owner-ended`, or a bridge open rejected with "bootstrap is required").
+    public func setBootstrapRequiredHandler(_ handler: (@Sendable () -> Void)?) {
+        self.bootstrapRequiredHandler = handler
+    }
+
+    /// Re-establishes terminal ownership and a fresh bridge after Desktop ended the previous owner.
+    public func rebootstrap(preferredWorkspaceKey: String?, preferredTaskId: String?) async -> RelayBootstrapSnapshot {
+        activeBridgeIdentity = nil
+        return await bootstrapRelayWorkspaces(preferredWorkspaceKey: preferredWorkspaceKey, preferredTaskId: preferredTaskId)
+    }
+
+    public func sendMobileDiagnostic(event: String, detail: [String: Any]) async {
+        guard isRelayMode, let task = webSocketTask else { return }
+        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+        try? await sendJSONEnvelope([
+            "type": "data",
+            "payload": ["zcode_type": "mobile-diagnostic", "event": event, "at": nowMs, "detail": detail],
+            "client_ts": nowMs
+        ], on: task)
+    }
+
     public func setConnectionLostHandler(_ handler: (@Sendable (String) -> Void)?) {
         self.connectionLostHandler = handler
     }
 
+    /// Relay `pair_status` transitions after the first match: `false` when ZCode Desktop drops off the relay, `true` when it rejoins.
+    public func setPeerStatusHandler(_ handler: (@Sendable (Bool) -> Void)?) {
+        self.peerStatusHandler = handler
+    }
+
+    /// Relay errors received after pairing (code, readable message), e.g. `KICKED`.
+    public func setTerminalErrorHandler(_ handler: (@Sendable (String, String) -> Void)?) {
+        self.terminalErrorHandler = handler
+    }
+
     public var isRelay: Bool { isRelayMode }
+
+    public var isSocketOpen: Bool { webSocketTask != nil }
+
+    /// Round-trips a WebSocket ping; `false` means the socket is dead even if URLSession has not noticed yet.
+    public func probeLiveness(timeoutSec: Double = 5.0) async -> Bool {
+        guard let task = webSocketTask else { return false }
+        if await Self.ping(task, timeoutSec: timeoutSec) {
+            lastInboundAt = Date()
+            missedPongs = 0
+            return true
+        }
+        return false
+    }
+
+    /// Cancels the socket so the receive loop reports the loss through `connectionLostHandler`.
+    public func dropDeadConnection() {
+        webSocketTask?.cancel(with: .abnormalClosure, reason: nil)
+    }
+
+    private static func ping(_ task: URLSessionWebSocketTask, timeoutSec: Double) async -> Bool {
+        final class Once: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func claim() -> Bool {
+                lock.lock(); defer { lock.unlock() }
+                if done { return false }
+                done = true
+                return true
+            }
+        }
+        let once = Once()
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            task.sendPing { error in
+                if once.claim() { cont.resume(returning: error == nil) }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(timeoutSec * 1_000_000_000))
+                if once.claim() { cont.resume(returning: false) }
+            }
+        }
+    }
+
+    private func startLivenessWatchdog(task: URLSessionWebSocketTask) {
+        livenessTask?.cancel()
+        lastInboundAt = Date()
+        missedPongs = 0
+        livenessTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                guard !Task.isCancelled, self.webSocketTask === task else { return }
+                let alive = await Self.ping(task, timeoutSec: 8)
+                await self.recordLivenessProbe(alive, task: task)
+            }
+        }
+    }
+
+    private func recordLivenessProbe(_ alive: Bool, task: URLSessionWebSocketTask) {
+        guard webSocketTask === task else { return }
+        if alive {
+            missedPongs = 0
+            return
+        }
+        missedPongs += 1
+        if missedPongs >= 2, Date().timeIntervalSince(lastInboundAt) > 25 {
+            task.cancel(with: .abnormalClosure, reason: nil)
+        }
+    }
 
     public func currentBridge() -> RelayBridgeIdentity? {
         activeBridgeIdentity
@@ -513,7 +624,7 @@ public actor ZCodeRPCClient {
             payload: payload,
             requestId: reqId,
             expectedType: "bootstrap-response",
-            timeoutSec: 3.5
+            timeoutSec: 8.0
         ),
               let result = resp["result"] as? [String: Any] else {
             return RelayBootstrapSnapshot(
@@ -555,7 +666,7 @@ public actor ZCodeRPCClient {
             openedBridge = try? await openWorkspaceBridge(
                 workspaceKey: targetWorkspace.workspaceKey,
                 taskId: taskForTarget,
-                timeoutSec: 3.5
+                timeoutSec: 6.0
             )
         }
 
@@ -583,6 +694,7 @@ public actor ZCodeRPCClient {
         let generation = nextBridgeGeneration
         let bridgeSessionId = "bridge-\(UUID().uuidString.lowercased())"
         let requestId = "workspace-bridge-\(UUID().uuidString.lowercased())"
+        let recoveryId: String? = forceReopen ? "rec-\(UUID().uuidString.lowercased())" : nil
 
         resetChannelStateForNewBridge()
 
@@ -597,6 +709,9 @@ public actor ZCodeRPCClient {
         if let taskId, !taskId.isEmpty {
             openPayload["taskId"] = taskId
         }
+        if let recoveryId {
+            openPayload["recoveryId"] = recoveryId
+        }
 
         let resp = try await sendAppRequest(
             payload: openPayload,
@@ -609,7 +724,8 @@ public actor ZCodeRPCClient {
             from: resp,
             fallbackBridgeId: bridgeSessionId,
             fallbackGeneration: generation,
-            fallbackWorkspaceKey: workspaceKey
+            fallbackWorkspaceKey: workspaceKey,
+            fallbackRecoveryId: recoveryId
         )
         self.activeBridgeIdentity = identity
         if !isInitialized {
@@ -623,6 +739,8 @@ public actor ZCodeRPCClient {
 
     public func sendMobileViewStateUpdate(workspaceKey: String, taskId: String? = nil) async {
         guard isRelayMode, let task = webSocketTask else { return }
+        mobileTaskViewTaskId = taskId
+        await sendMobileTaskViewUpdate()
         let nowMs = Int(Date().timeIntervalSince1970 * 1000)
         var viewState: [String: Any] = [
             "activeWorkspaceKey": workspaceKey,
@@ -650,11 +768,38 @@ public actor ZCodeRPCClient {
         ], on: task)
     }
 
+    /// Answers Desktop's `mobile-task-view-request` (and follows task switches) so it knows which task the phone shows.
+    private func sendMobileTaskViewUpdate() async {
+        guard isRelayMode, let task = webSocketTask, let epoch = mobileTaskViewEpoch,
+              let identity = activeBridgeIdentity else { return }
+        mobileTaskViewSeq += 1
+        var payload: [String: Any] = [
+            "zcode_type": "mobile-task-view-update",
+            "epoch": epoch,
+            "seq": mobileTaskViewSeq,
+            "bridgeSessionId": identity.bridgeSessionId
+        ]
+        if let gen = identity.bridgeGeneration { payload["bridgeGeneration"] = gen }
+        if let taskId = mobileTaskViewTaskId, !taskId.isEmpty, !taskId.hasPrefix("task-") {
+            var view: [String: Any] = ["workspacePath": identity.workspacePath, "taskId": taskId]
+            if let wsIdentity = identity.workspaceIdentity, !wsIdentity.isEmpty { view["workspaceIdentity"] = wsIdentity }
+            payload["view"] = view
+        } else {
+            payload["view"] = NSNull()
+        }
+        try? await sendJSONEnvelope([
+            "type": "data",
+            "payload": payload,
+            "client_ts": Int(Date().timeIntervalSince1970 * 1000)
+        ], on: task)
+    }
+
     private static func parseBridgeIdentity(
         from payload: [String: Any],
         fallbackBridgeId: String,
         fallbackGeneration: Int?,
-        fallbackWorkspaceKey: String
+        fallbackWorkspaceKey: String,
+        fallbackRecoveryId: String? = nil
     ) -> RelayBridgeIdentity {
         let bridgeDict = (payload["bridge"] as? [String: Any]) ?? [:]
         let bridgeId = (bridgeDict["bridgeSessionId"] as? String)
@@ -668,7 +813,7 @@ public actor ZCodeRPCClient {
         } else {
             gen = fallbackGeneration
         }
-        let recoveryId = (bridgeDict["recoveryId"] as? String) ?? (payload["recoveryId"] as? String)
+        let recoveryId = (bridgeDict["recoveryId"] as? String) ?? (payload["recoveryId"] as? String) ?? fallbackRecoveryId
         let wsKey = (bridgeDict["workspaceKey"] as? String) ?? fallbackWorkspaceKey
         let wsPath = (bridgeDict["workspacePath"] as? String) ?? wsKey
         let wsIdentity = bridgeDict["workspaceIdentity"] as? String
@@ -689,11 +834,24 @@ public actor ZCodeRPCClient {
         )
     }
 
+    private func markMessageDelivered(_ seq: Int) {
+        deliveredMessageSeqs.insert(seq)
+        while deliveredMessageSeqs.remove(deliveredMessageSeqFloor + 1) != nil {
+            deliveredMessageSeqFloor += 1
+        }
+        if deliveredMessageSeqs.count > 512, let lowest = deliveredMessageSeqs.min() {
+            deliveredMessageSeqFloor = lowest
+            deliveredMessageSeqs.remove(lowest)
+        }
+    }
+
     private func resetChannelStateForNewBridge() {
         isInitialized = false
         nextPhysicalSeq = 1
         nextMessageSeq = 1
         fragmentBuffers.removeAll()
+        deliveredMessageSeqFloor = 0
+        deliveredMessageSeqs.removeAll()
         eventHandlers.removeAll()
         let oldReplies = pendingReplies
         pendingReplies.removeAll()
@@ -926,6 +1084,8 @@ public actor ZCodeRPCClient {
         receiveTask = nil
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        livenessTask?.cancel()
+        livenessTask = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         isInitialized = false
@@ -999,10 +1159,13 @@ public actor ZCodeRPCClient {
 
     private func startReceiveLoop(task: URLSessionWebSocketTask, isRelayV2: Bool) {
         receiveTask?.cancel()
+        peerOffline = false
+        startLivenessWatchdog(task: task)
         receiveTask = Task {
             while !Task.isCancelled {
                 do {
                     let message = try await task.receive()
+                    self.lastInboundAt = Date()
                     switch message {
                     case .data(let raw):
                         if isRelayV2, let text = String(data: raw, encoding: .utf8), text.first == "{" {
@@ -1033,6 +1196,12 @@ public actor ZCodeRPCClient {
 
     private func handleSocketClosed(_ error: Error) {
         let wasPaired = pairingAlreadyMatched || !isRelayMode
+        livenessTask?.cancel()
+        livenessTask = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        webSocketTask = nil
+        pairingAlreadyMatched = false
         activeBridgeIdentity = nil
         isInitialized = false
         let replies = pendingReplies
@@ -1123,12 +1292,28 @@ public actor ZCodeRPCClient {
                 try? await sendJSONEnvelope(resp, on: task)
             }
 
-        case "auth_ack", "pair_status_ack":
-            let pairStatus = (json["pair_status"] as? String) ?? ""
+        case "auth_ack", "pair_status_ack", "pair_status":
+            let pairStatus = (json["pair_status"] as? String) ?? (json["status"] as? String) ?? ""
             if pairStatus == "waiting" {
+                if pairingAlreadyMatched {
+                    if !peerOffline {
+                        peerOffline = true
+                        activeBridgeIdentity = nil
+                        peerStatusHandler?(false)
+                    }
+                    if heartbeatTask == nil { startRelayHeartbeat(task: task) }
+                    return
+                }
                 phaseCallback?(.waitingPairing)
                 startRelayHeartbeat(task: task)
             } else if pairStatus == "matched" {
+                if pairingAlreadyMatched {
+                    if peerOffline {
+                        peerOffline = false
+                        peerStatusHandler?(true)
+                    }
+                    return
+                }
                 pairingAlreadyMatched = true
                 phaseCallback?(.pairedSyncing)
                 startRelayHeartbeat(task: task)
@@ -1153,6 +1338,10 @@ public actor ZCodeRPCClient {
                 readable = "Another remote controller took over this ZCode session."
             default:
                 readable = rawMsg.isEmpty ? "Relay error (\(code))." : rawMsg
+            }
+            if pairingAlreadyMatched {
+                terminalErrorHandler?(code, readable)
+                return
             }
             phaseCallback?(.failed(readable))
             if let cont = pairingContinuation {
@@ -1180,6 +1369,17 @@ public actor ZCodeRPCClient {
                       let fragmentCount = (payload["fragmentCount"] as? Int) ?? (payload["fragmentCount"] as? NSNumber)?.intValue,
                       let b64 = payload["dataBase64"] as? String,
                       let chunk = Data(base64Encoded: b64) else {
+                    return
+                }
+
+                if messageSeq <= deliveredMessageSeqFloor || deliveredMessageSeqs.contains(messageSeq) {
+                    if fragmentIndex == fragmentCount - 1 {
+                        try? await sendJSONEnvelope([
+                            "type": "data",
+                            "payload": Self.buildRPCFrameAckPayload(identity: identity, ackMessageSeq: messageSeq),
+                            "client_ts": Int(Date().timeIntervalSince1970 * 1000)
+                        ], on: task)
+                    }
                     return
                 }
 
@@ -1212,7 +1412,17 @@ public actor ZCodeRPCClient {
                         "client_ts": Int(Date().timeIntervalSince1970 * 1000)
                     ], on: task)
 
+                    markMessageDelivered(messageSeq)
                     handleRawVQLChannelMessage(assembled)
+                }
+                return
+            }
+
+            if zcodeType == "mobile-task-view-request" {
+                if let epoch = payload["epoch"] as? String {
+                    if epoch != mobileTaskViewEpoch { mobileTaskViewSeq = 0 }
+                    mobileTaskViewEpoch = epoch
+                    await sendMobileTaskViewUpdate()
                 }
                 return
             }
@@ -1229,7 +1439,13 @@ public actor ZCodeRPCClient {
 
             if zcodeType == "bridge-degraded" {
                 if let identity = activeBridgeIdentity, identity.matchesTransportPayload(payload) {
-                    bridgeDegradedHandler?((payload["reason"] as? String) ?? "rpc-transport-fault")
+                    let reason = (payload["reason"] as? String) ?? "rpc-transport-fault"
+                    if reason == "terminal-owner-ended" {
+                        activeBridgeIdentity = nil
+                        bootstrapRequiredHandler?()
+                    } else {
+                        bridgeDegradedHandler?(reason)
+                    }
                 }
                 return
             }
@@ -1237,6 +1453,9 @@ public actor ZCodeRPCClient {
             if zcodeType == "app-error" || zcodeType == "workspace-bridge-error" {
                 let errMsg = (payload["error"] as? String) ?? (payload["reason"] as? String) ?? "Remote bridge error"
                 let err = NSError(domain: "ZCodeRelay", code: 422, userInfo: [NSLocalizedDescriptionKey: errMsg])
+                let needsBootstrap = errMsg.localizedCaseInsensitiveContains("bootstrap is required")
+                if needsBootstrap { activeBridgeIdentity = nil }
+                defer { if needsBootstrap { bootstrapRequiredHandler?() } }
                 if let reqId = payload["requestId"] as? String {
                     for (key, cont) in pendingAppRequests where key.hasSuffix(":\(reqId)") {
                         pendingAppRequests.removeValue(forKey: key)

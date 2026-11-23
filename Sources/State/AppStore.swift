@@ -77,6 +77,8 @@ public final class AppStore {
     public var showConnectionsSheet: Bool = false
     public var showCommandCenter: Bool = false
     public var toastMessage: String? = nil
+    /// Persistent connection banner (host offline, reconnecting, taken over); `nil` when the live link is healthy.
+    public var liveConnectionNotice: String? = nil
 
     // MARK: - Connections, Workspaces & Sessions
     public var connections: [RemoteConnection] { didSet { persistConnections() } }
@@ -124,6 +126,25 @@ public final class AppStore {
     // MARK: - Composer State
     public var composerText: String = ""
     public var composerAttachments: [ComposerAttachment] = []
+    /// Quoted excerpts sent with the next prompt as host `conversationQuotes` (max 8, 16k chars total).
+    public var composerQuotes: [ConversationQuote] = []
+
+    public func addComposerQuote(_ quote: ConversationQuote) {
+        let text = quote.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, composerQuotes.count < 8 else {
+            if composerQuotes.count >= 8 { showToast("You can quote up to 8 excerpts per message") }
+            return
+        }
+        let used = composerQuotes.reduce(0) { $0 + $1.text.count }
+        var trimmed = quote
+        trimmed.text = String(text.prefix(max(0, 16_000 - used)))
+        guard !trimmed.text.isEmpty else { return }
+        composerQuotes.append(trimmed)
+    }
+
+    public func removeComposerQuote(_ id: String) {
+        composerQuotes.removeAll { $0.id == id }
+    }
     var activeStreamTask: Task<Void, Never>?
     private var activeConnectTask: Task<Void, Never>?
     var activeHydrationTask: Task<Void, Never>?
@@ -135,6 +156,8 @@ public final class AppStore {
     public var liveModelGroups: [LiveModelProviderGroup] = []
     public var preferredModelSelection: LiveModelSelection? = nil
     @ObservationIgnored let liveSync = LiveSyncState()
+    @ObservationIgnored let v4Sync = V4SyncState()
+    @ObservationIgnored let hostSettings = HostSettingsSyncState()
 
     private let prefsKey = "zcode_mobile_enterprise_prefs_v2"
     private let connectionsKey = "zcode_saved_connections_v2"
@@ -471,8 +494,11 @@ public final class AppStore {
     public func refreshWorkspaceAndSessions() async {
         playImpactHaptic(.soft)
         if let conn = activeConnection, conn.transport != .enterpriseSandbox {
-            await syncRemoteWorkspacesFromServer(for: conn)
-            showToast("Synced with \(conn.name)")
+            if await syncRemoteWorkspacesFromServer(for: conn) {
+                showToast("Synced with \(conn.name)")
+            } else {
+                showToast("\(conn.name) didn't respond. Try again in a moment.")
+            }
         } else {
             try? await Task.sleep(nanoseconds: 220_000_000)
             showToast("Workspace synced")
@@ -656,6 +682,7 @@ public final class AppStore {
         guard var session = activeSession,
               let mIdx = session.messages.firstIndex(where: { $0.id == messageId }) else { return }
         session.messages[mIdx].feedback = (session.messages[mIdx].feedback == rating) ? 0 : rating
+        _ = v4SetFeedback(messageId: messageId, rating: session.messages[mIdx].feedback, session: session)
         activeSession = session
     }
 
@@ -728,6 +755,11 @@ public final class AppStore {
 
         if trimmed == "/compact" {
             composerText = ""
+            if v4Owns(session.id) {
+                v4Fire("compact", payload: [:], session: session, cas: false, failure: "Couldn't compact")
+                showToast("Requested context compaction")
+                return
+            }
             session.contextUsedPercent = max(0, session.contextUsedPercent / 3)
             activeSession = session
             if let conn = activeConnection, conn.transport != .enterpriseSandbox, conn.state == .connected {
@@ -753,6 +785,22 @@ public final class AppStore {
             return
         }
 
+        let outgoingQuotes = composerQuotes
+        // Host-side queue: the agent drains it in order after the current turn.
+        if session.status == .running, v4Owns(session.id) {
+            let text = trimmed.isEmpty ? "Inspect attached files" : trimmed
+            let attachments = composerAttachments
+            composerText = ""
+            composerAttachments = []
+            composerQuotes = []
+            let sid = session.id
+            Task { @MainActor in
+                _ = await self.v4SendPrompt(sessionId: sid, text: text, attachments: attachments, quotes: outgoingQuotes, queue: true)
+            }
+            showToast("Queued follow-up prompt")
+            return
+        }
+
         // If already running, enqueue prompt + attachments just like ZCode Desktop & Remote
         if session.status == .running {
             let queuedItem = QueuedPromptItem(
@@ -772,6 +820,7 @@ public final class AppStore {
         let outgoingAttachments = composerAttachments
         composerText = ""
         composerAttachments = []
+        composerQuotes = []
 
         if session.messages.isEmpty && (session.title == "New Coding Session" || session.title == "New task") {
             session.title = String(trimmed.prefix(48))
@@ -790,7 +839,8 @@ public final class AppStore {
             tokensIn: max(12, trimmed.count / 3),
             tokensOut: 0,
             durationMs: 0,
-            feedback: 0
+            feedback: 0,
+            quotes: outgoingQuotes.isEmpty ? nil : outgoingQuotes
         )
         session.messages.append(userMsg)
         session.status = .running
@@ -806,6 +856,9 @@ public final class AppStore {
         if !isUITestSeededMode {
             let userMessageId = userMsg.id
             let promptText = trimmed.isEmpty ? "Inspect attached files" : trimmed
+            let legacyPromptText = outgoingQuotes.isEmpty ? promptText : outgoingQuotes
+                .map { quote in quote.text.split(separator: "\n", omittingEmptySubsequences: false).map { "> \($0)" }.joined(separator: "\n") }
+                .joined(separator: "\n\n") + "\n\n" + promptText
             activeStreamTask?.cancel()
             activeStreamTask = Task { @MainActor in
                 guard let conn = activeConnection, conn.state == .connected else {
@@ -814,6 +867,18 @@ public final class AppStore {
                         sessions[idx].statusNoticeText = "Remote workstation is disconnected. Reconnect to send prompts to your ZCode computer."
                     }
                     return
+                }
+
+                if v4Sync.available != false {
+                    let wsKey = ZCodeRPCClient.resolveWorkspaceKey(workspacePath: session.workspacePath, workspaceIdentity: workspaceIdentityByPath[session.workspacePath])
+                    if conn.transport == .cloudRelayV2 {
+                        _ = try? await rpcClient.openWorkspaceBridge(workspaceKey: wsKey, taskId: sessionId.hasPrefix("task-") ? nil : sessionId, timeoutSec: 6.0)
+                    }
+                    v4Sync.optimistic.append((userMsg, Date()))
+                    if await v4SendPrompt(sessionId: sessionId, text: promptText, attachments: outgoingAttachments, quotes: outgoingQuotes, queue: false) {
+                        return
+                    }
+                    v4Sync.optimistic.removeAll { $0.message.id == userMessageId }
                 }
 
                 var targetSessionId = sessionId
@@ -870,7 +935,7 @@ public final class AppStore {
                         "traceId": sessions.first(where: { $0.id == targetSessionId })?.traceId ?? UUID().uuidString.lowercased(),
                         "queryId": UUID().uuidString.lowercased(),
                         "messageId": userMessageId,
-                        "content": promptText,
+                        "content": legacyPromptText,
                         "attachments": [Any](),
                         "clientId": Self.remoteClientId,
                         "clientMode": "web-remote-replayable"
@@ -1046,6 +1111,11 @@ public final class AppStore {
         activeStreamTask?.cancel()
         activeStreamTask = nil
         guard var session = activeSession else { return }
+        if v4Owns(session.id) {
+            v4Stop(sessionId: session.id, workspacePath: session.workspacePath)
+            showToast("Stopping…")
+            return
+        }
         session.status = .idle
         activeSession = session
         if let conn = activeConnection, conn.transport != .enterpriseSandbox, conn.state == .connected {
@@ -1074,6 +1144,11 @@ public final class AppStore {
     public func steerQueuedPrompt(_ itemId: String) {
         guard var session = activeSession,
               let qIdx = session.queuedPrompts.firstIndex(where: { $0.id == itemId }) else { return }
+        if v4Owns(session.id) {
+            v4Fire("sendQueuedNow", payload: ["queueItemId": itemId], session: session, failure: "Couldn't send queued prompt")
+            showToast("Sending queued prompt now")
+            return
+        }
         let item = session.queuedPrompts.remove(at: qIdx)
         activeStreamTask?.cancel()
         activeStreamTask = nil
@@ -1089,6 +1164,9 @@ public final class AppStore {
     public func editQueuedPrompt(_ itemId: String) {
         guard var session = activeSession,
               let qIdx = session.queuedPrompts.firstIndex(where: { $0.id == itemId }) else { return }
+        if v4Owns(session.id) {
+            v4Fire("deleteQueueItem", payload: ["queueItemId": itemId], session: session, failure: "Couldn't edit queued prompt")
+        }
         let item = session.queuedPrompts.remove(at: qIdx)
         activeSession = session
         composerText = item.content
@@ -1097,6 +1175,9 @@ public final class AppStore {
 
     public func deleteQueuedPrompt(_ itemId: String) {
         guard var session = activeSession else { return }
+        if v4Owns(session.id) {
+            v4Fire("deleteQueueItem", payload: ["queueItemId": itemId], session: session, failure: "Couldn't remove queued prompt")
+        }
         session.queuedPrompts.removeAll(where: { $0.id == itemId })
         activeSession = session
     }
@@ -1555,6 +1636,7 @@ public final class AppStore {
 
     public func connectToWorkstation(_ connectionId: String, silent: Bool = false) async {
         guard let idx = connections.firstIndex(where: { $0.id == connectionId }) else { return }
+        if !silent { clearReconnectBlock(for: connectionId) }
         for i in connections.indices where connections[i].id != connectionId && connections[i].transport != .enterpriseSandbox {
             connections[i].state = .disconnected
         }
@@ -1630,7 +1712,13 @@ public final class AppStore {
             await installLiveConnectionHandlers()
 
             pairingPhase = .pairedSyncing
-            await syncRemoteWorkspacesFromServer(for: target)
+            guard await syncRemoteWorkspacesFromServer(for: target) else {
+                throw NSError(
+                    domain: "ZCodeRelay",
+                    code: 504,
+                    userInfo: [NSLocalizedDescriptionKey: "ZCode Desktop didn't return its workspaces. Keep ZCode open on your computer and try again."]
+                )
+            }
 
             let ms = max(4, Int(Date().timeIntervalSince(start) * 1000))
             if let cIdx = connections.firstIndex(where: { $0.id == connectionId }) {
@@ -1652,16 +1740,24 @@ public final class AppStore {
             if let cIdx = connections.firstIndex(where: { $0.id == connectionId }) {
                 connections[cIdx].state = .error
             }
-            pairingPhase = .failed(error.localizedDescription)
+            pairingPhase = silent ? .idle : .failed(error.localizedDescription)
             if !silent { playNotificationHaptic(.error) }
         }
     }
 
-    private func syncRemoteWorkspacesFromServer(for connection: RemoteConnection) async {
-        guard !isUITestSeededMode else { return }
+    /// Returns `false` when the host could not be read; on a resync the current workspace state is kept untouched.
+    @discardableResult
+    func syncRemoteWorkspacesFromServer(for connection: RemoteConnection) async -> Bool {
+        guard !isUITestSeededMode else { return true }
+
+        let isResync = liveSync.syncedConnectionId == connection.id && !projects.isEmpty
+        let previousSessions = isResync ? sessions : []
+        let previousActiveSessionId = activeSessionId
+        let previousActiveProjectId = activeProjectId
+        let previousExpanded = expandedProjectIds
+        let previousIdentities = workspaceIdentityByPath
 
         activeHydrationTask?.cancel()
-        workspaceIdentityByPath.removeAll()
         liveSync.reset()
         liveSync.suppressBridgeResubscribe = true
         defer { liveSync.suppressBridgeResubscribe = false }
@@ -1672,7 +1768,25 @@ public final class AppStore {
         var preferredActiveTaskId: String?
 
         if connection.transport == .cloudRelayV2 {
-            let snapshot = await rpcClient.bootstrapRelayWorkspaces()
+            var resumeKey: String?
+            var resumeTaskId: String?
+            if isResync, let project = activeProject {
+                resumeKey = ZCodeRPCClient.resolveWorkspaceKey(
+                    workspacePath: project.rootPath,
+                    workspaceIdentity: previousIdentities[project.rootPath]
+                )
+                if !previousActiveSessionId.hasPrefix("task-"), !previousActiveSessionId.isEmpty {
+                    resumeTaskId = previousActiveSessionId
+                }
+            }
+            let snapshot = await rpcClient.bootstrapRelayWorkspaces(
+                preferredWorkspaceKey: resumeKey,
+                preferredTaskId: resumeTaskId
+            )
+            if snapshot.desktopAppVersion == nil, snapshot.workspaces.isEmpty {
+                return false
+            }
+            workspaceIdentityByPath.removeAll()
             if let desktopVer = snapshot.desktopAppVersion,
                !desktopVer.isEmpty,
                let cIdx = connections.firstIndex(where: { $0.id == connection.id }) {
@@ -1705,10 +1819,26 @@ public final class AppStore {
             }
         }
 
+        if isResync {
+            let previousById = Dictionary(previousSessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            nextSessions = nextSessions.map { Self.carryingLiveState(into: $0, from: previousById[$0.id]) }
+            let nextIds = Set(nextSessions.map(\.id))
+            nextSessions.append(contentsOf: previousSessions.filter { $0.id.hasPrefix("task-") && !nextIds.contains($0.id) })
+        }
+
         self.isBulkSyncingWorkspaces = true
         self.projects = nextProjects
-        self.expandedProjectIds = Set(nextProjects.map(\.id))
-        if let activeKey = preferredActiveWorkspaceKey {
+        let nextProjectIds = Set(nextProjects.map(\.id))
+        if isResync {
+            let known = Set(previousSessions.map(\.projectId))
+            self.expandedProjectIds = previousExpanded.intersection(nextProjectIds)
+                .union(nextProjectIds.filter { !known.contains($0) })
+        } else {
+            self.expandedProjectIds = nextProjectIds
+        }
+        if isResync, nextProjectIds.contains(previousActiveProjectId) {
+            self.activeProjectId = previousActiveProjectId
+        } else if let activeKey = preferredActiveWorkspaceKey {
             let targetProjId = Self.stableProjectId(for: activeKey)
             self.activeProjectId = nextProjects.first(where: { $0.id == targetProjId })?.id ?? nextProjects.first?.id ?? ""
         } else {
@@ -1716,14 +1846,22 @@ public final class AppStore {
         }
         self.isBulkSyncingWorkspaces = false
         self.sessions = nextSessions
-        self.activeSessionId = preferredActiveTaskId ?? nextSessions.first?.id ?? ""
-        self.fileTree = []
-        self.openFileIds = []
-        self.selectedFileId = ""
-        self.gitChanges = []
-        self.gitCommits = []
-        self.terminalTabs = []
-        self.activeTerminalTabId = ""
+        if isResync, nextSessions.contains(where: { $0.id == previousActiveSessionId }) {
+            preferredActiveTaskId = previousActiveSessionId
+            self.activeSessionId = previousActiveSessionId
+        } else {
+            self.activeSessionId = preferredActiveTaskId ?? nextSessions.first?.id ?? ""
+        }
+        if !isResync || self.activeProjectId != previousActiveProjectId {
+            self.fileTree = []
+            self.openFileIds = []
+            self.selectedFileId = ""
+            self.gitChanges = []
+            self.gitCommits = []
+            self.terminalTabs = []
+            self.activeTerminalTabId = ""
+        }
+        liveSync.syncedConnectionId = connection.id
 
         if connection.transport == .directServer, self.projects.isEmpty,
            let resolved = try? await self.rpcClient.call(channel: "file", method: "resolvePath", args: [.fromJSONObject(["path": "."])], timeoutSec: 3.0),
@@ -1760,6 +1898,20 @@ public final class AppStore {
                 await self.hydrateWorkspaceFilesAndGit(workspacePath: primaryProject.rootPath, projectId: primaryProject.id)
             }
         }
+        return true
+    }
+
+    static func carryingLiveState(into fresh: AgentTaskSession, from existing: AgentTaskSession?) -> AgentTaskSession {
+        guard let existing else { return fresh }
+        var task = fresh
+        task.messages = existing.messages
+        task.todos = existing.todos
+        task.contextUsedPercent = existing.contextUsedPercent
+        task.pendingPermission = existing.pendingPermission
+        task.pendingQuestion = existing.pendingQuestion
+        task.pendingPlan = existing.pendingPlan
+        task.queuedPrompts = existing.queuedPrompts
+        return task
     }
 
     static func stableProjectId(for workspaceKey: String) -> String {
@@ -1908,6 +2060,7 @@ public final class AppStore {
         workspacePath: String,
         workspaceIdentity: String?
     ) async -> Bool {
+        if v4Owns(sessionId) { return true }
         var req: [String: Any] = [
             "taskId": sessionId,
             "workspacePath": workspacePath,
@@ -1943,16 +2096,20 @@ public final class AppStore {
         )
         async let gitCall = try? rpcClient.call(
             channel: "git",
-            method: "getStatus",
-            args: [.string(workspacePath)],
-            timeoutSec: 4.0
+            method: "refresh",
+            args: [.fromJSONObject([
+                "workspacePath": workspacePath,
+                "includeIdentity": false,
+                "includeBranchComparison": false
+            ])],
+            timeoutSec: 6.0
         )
 
         let (dirVal, gitVal) = await (dirCall, gitCall)
 
         if let dirVal, case .array(let entries) = dirVal {
             var nodes: [WorkspaceFileNode] = []
-            for entry in entries.prefix(120) {
+            for entry in entries.prefix(200) {
                 guard let d = entry.decodeJSONDictionary(),
                       let name = d["name"] as? String,
                       let fullPath = d["path"] as? String else { continue }
@@ -1978,8 +2135,8 @@ public final class AppStore {
         if let gitVal, let gitDict = gitVal.decodeJSONDictionary() {
             if let summary = gitDict["summary"] as? [String: Any] {
                 let branch = (summary["branchName"] as? String) ?? "main"
-                let ahead = (summary["ahead"] as? Int) ?? 0
-                let behind = (summary["behind"] as? Int) ?? 0
+                let ahead = Self.jsonInt(summary["ahead"]) ?? 0
+                let behind = Self.jsonInt(summary["behind"]) ?? 0
                 let dirty = (summary["isDirty"] as? Bool) ?? false
                 self.activeGitBranch = branch
                 if let pIdx = projects.firstIndex(where: { $0.id == projectId }) {
@@ -1989,27 +2146,24 @@ public final class AppStore {
                     projects[pIdx].isDirty = dirty
                 }
             }
-            if let rawEntries = gitDict["entries"] as? [[String: Any]] {
-                var changes: [GitChangedFile] = []
-                for (i, e) in rawEntries.prefix(100).enumerated() {
-                    guard let relPath = (e["path"] as? String) ?? (e["repoRelativePath"] as? String) else { continue }
-                    let rawStatus = ((e["worktreeStatus"] as? String) ?? (e["indexStatus"] as? String) ?? (e["status"] as? String) ?? "M")
-                    let staged = ((e["indexStatus"] as? String) ?? " ").trimmingCharacters(in: .whitespaces) != "" && ((e["indexStatus"] as? String) != "?")
-                    changes.append(
-                        GitChangedFile(
-                            id: "git-live-\(i)-\(relPath)",
-                            path: relPath,
-                            status: String(rawStatus.prefix(1)).uppercased(),
-                            isStaged: staged,
-                            added: 0,
-                            removed: 0,
-                            patch: "",
-                            beforeContent: "",
-                            afterContent: ""
-                        )
-                    )
+            let stagedRaw = (gitDict["stagedChanges"] as? [[String: Any]]) ?? []
+            let unstagedRaw = (gitDict["unstagedChanges"] as? [[String: Any]]) ?? []
+            let existingById = Dictionary(uniqueKeysWithValues: gitChanges.map { ($0.id, $0) })
+            var changes: [GitChangedFile] = []
+            for entry in stagedRaw {
+                if let item = Self.parseHostGitChangedFile(entry, forceStaged: true, preserving: existingById) {
+                    changes.append(item)
                 }
-                self.gitChanges = changes
+            }
+            for entry in unstagedRaw {
+                if let item = Self.parseHostGitChangedFile(entry, forceStaged: false, preserving: existingById) {
+                    changes.append(item)
+                }
+            }
+            self.gitChanges = changes
+            if let cur = selectedDiffFileId, changes.contains(where: { $0.id == cur }) {
+                // preserve selection
+            } else {
                 self.selectedDiffFileId = changes.first?.id
             }
         }
@@ -2228,6 +2382,7 @@ public final class AppStore {
     }
 
     private func persistPreferences() {
+        pushHostSettingsIfNeeded()
         let snap = PersistedPrefs(
             language: language,
             themeMode: themeMode,

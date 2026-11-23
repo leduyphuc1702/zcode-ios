@@ -449,6 +449,8 @@ public struct ToolCallItem: Identifiable, Codable, Equatable {
     public var removedLines: Int
     public var subagentSteps: [String]
     public var subagentRunId: String?
+    /// Raw host tool name (e.g. "Read", "Edit", "Bash", "Grep", "mcp__x__y") for 1:1 labels and grouping.
+    public var toolName: String? = nil
 
     public init(
         id: String,
@@ -465,8 +467,10 @@ public struct ToolCallItem: Identifiable, Codable, Equatable {
         addedLines: Int,
         removedLines: Int,
         subagentSteps: [String],
-        subagentRunId: String? = nil
+        subagentRunId: String? = nil,
+        toolName: String? = nil
     ) {
+        self.toolName = toolName
         self.id = id
         self.kind = kind
         self.title = title
@@ -567,6 +571,76 @@ public struct ChatTurnMessage: Identifiable, Codable, Equatable {
     public var tokensOut: Int
     public var durationMs: Int
     public var feedback: Int // 0 none, 1 up, -1 down
+    public var quotes: [ConversationQuote]? = nil
+}
+
+/// Host `snapshot.usage.contextWindow` (+ cumulative totals). Breakdown fractions sum to ~1.
+public struct ContextUsageSnapshot: Codable, Equatable {
+    public struct Slice: Codable, Equatable, Identifiable {
+        /// Host source key: messages, mcp_tool_schemas, system_tool_schemas, tool_prompt, skills, system_prompt, meta_user_context.
+        public var source: String
+        public var label: String
+        public var fraction: Double
+        public var id: String { source }
+
+        public init(source: String, label: String, fraction: Double) {
+            self.source = source
+            self.label = label
+            self.fraction = fraction
+        }
+    }
+
+    public var usedTokens: Int
+    public var maxTokens: Int
+    public var autoCompactThresholdTokens: Int?
+    public var breakdown: [Slice]
+    /// 0...1, nil when the host has no cache statistics yet.
+    public var cacheHitRate: Double?
+    public var cumulativeInputTokens: Int
+    public var cumulativeOutputTokens: Int
+    public var cumulativeCacheReadTokens: Int
+    public var cumulativeCacheWriteTokens: Int
+
+    public init(
+        usedTokens: Int,
+        maxTokens: Int,
+        autoCompactThresholdTokens: Int? = nil,
+        breakdown: [Slice] = [],
+        cacheHitRate: Double? = nil,
+        cumulativeInputTokens: Int = 0,
+        cumulativeOutputTokens: Int = 0,
+        cumulativeCacheReadTokens: Int = 0,
+        cumulativeCacheWriteTokens: Int = 0
+    ) {
+        self.usedTokens = usedTokens
+        self.maxTokens = maxTokens
+        self.autoCompactThresholdTokens = autoCompactThresholdTokens
+        self.breakdown = breakdown
+        self.cacheHitRate = cacheHitRate
+        self.cumulativeInputTokens = cumulativeInputTokens
+        self.cumulativeOutputTokens = cumulativeOutputTokens
+        self.cumulativeCacheReadTokens = cumulativeCacheReadTokens
+        self.cumulativeCacheWriteTokens = cumulativeCacheWriteTokens
+    }
+
+    public var fraction: Double { maxTokens > 0 ? min(1, Double(usedTokens) / Double(maxTokens)) : 0 }
+}
+
+/// A quoted excerpt attached to a prompt (host `conversationQuotes`, max 8 per prompt, 16k chars total).
+public struct ConversationQuote: Codable, Equatable, Identifiable {
+    public var id: String
+    public var text: String
+    public var path: String?
+    public var senderName: String?
+    public var messageId: String?
+
+    public init(id: String = UUID().uuidString, text: String, path: String? = nil, senderName: String? = nil, messageId: String? = nil) {
+        self.id = id
+        self.text = text
+        self.path = path
+        self.senderName = senderName
+        self.messageId = messageId
+    }
 }
 
 public struct QueuedPromptItem: Identifiable, Codable, Equatable {
@@ -663,6 +737,8 @@ public struct AgentTaskSession: Identifiable, Codable, Equatable {
     public var modelProviderId: String?
     /// Host reasoning level string (values come from the model's option specs).
     public var reasoningLevel: String?
+    /// Live context window usage from the host (`snapshot.usage`); nil until the host reports it.
+    public var contextUsage: ContextUsageSnapshot? = nil
 
     public init(
         id: String,

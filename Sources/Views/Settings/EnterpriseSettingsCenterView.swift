@@ -122,6 +122,10 @@ public struct EnterpriseSettingsCenterView: View {
             .navigationDestination(for: SettingsSectionKind.self) { section in
                 SettingsDetailDestinationView(store: store, section: section)
             }
+            .task {
+                await store.refreshHostSettings()
+                await store.refreshLiveModelView()
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
@@ -150,13 +154,69 @@ struct SettingsDetailDestinationView: View {
     @Environment(\.zcodePalette) private var palette
 
     @State private var showPatternSetup = false
-    @State private var newProviderName = ""
-    @State private var newProviderURL = ""
-    @State private var newProviderKey = ""
     @State private var newMCPName = ""
     @State private var newMCPCommand = ""
     @State private var newMemorySlug = ""
     @State private var newMemoryBody = ""
+
+    @ViewBuilder
+    private var liveModelsSection: some View {
+        if store.liveModelGroups.isEmpty {
+            Section {
+                Text(store.isLiveHostConnected
+                     ? "Loading models from your computer…"
+                     : "Connect to ZCode Desktop to see the providers and models configured there.")
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            ForEach(store.liveModelGroups) { group in
+                Section(group.name) {
+                    ForEach(group.models) { model in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(model.modelId)
+                                    .font(.system(size: 14.5, weight: .medium))
+                                if let window = model.contextWindow, window > 0 {
+                                    Text("\(window / 1000)K context")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            if model.supportsImage {
+                                Image(systemName: "photo").foregroundStyle(.secondary)
+                            }
+                            if !model.reasoningLevels.isEmpty {
+                                Image(systemName: "brain").foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+            Section {
+                Text("Providers and API keys are managed in ZCode Desktop. Changes there appear here automatically.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var seededModelsSection: some View {
+        Section("Configured Providers") {
+            ForEach($store.providers) { $provider in
+                Toggle(isOn: $provider.enabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(provider.name)
+                            .font(.system(size: 14.5, weight: .semibold))
+                        Text("\(provider.baseURL) • \(provider.models.count) models")
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
 
     var body: some View {
         Form {
@@ -221,63 +281,10 @@ struct SettingsDetailDestinationView: View {
                 }
 
             case .models:
-                Section("Configured Providers") {
-                    ForEach($store.providers) { $provider in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Toggle(isOn: $provider.enabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(provider.name)
-                                        .font(.system(size: 14.5, weight: .semibold))
-                                    Text("\(provider.baseURL) • \(provider.statusText)")
-                                        .font(.system(size: 11.5, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            HStack {
-                                Text("\(provider.models.count) models")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                                Button("Test Connectivity") {
-                                    store.showToast("\(provider.name) verified (200 OK • 42ms)")
-                                }
-                                .font(.system(size: 12, weight: .semibold))
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-                Section("Add Custom OpenAI / Anthropic Provider") {
-                    TextField("Provider Name (e.g. vLLM Internal)", text: $newProviderName)
-                    TextField("https://llm.internal.corp/v1", text: $newProviderURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("API Key (Saved in Keychain)", text: $newProviderKey)
-                    Button("Add Provider") {
-                        let id = "custom-\(UUID().uuidString.prefix(5))"
-                        if !newProviderKey.isEmpty {
-                            KeychainStore.save(newProviderKey, for: "provider_key_\(id)")
-                        }
-                        store.providers.append(
-                            ModelProviderConfig(
-                                id: id,
-                                name: newProviderName,
-                                baseURL: newProviderURL,
-                                protocolKind: "openai",
-                                enabled: true,
-                                isBuiltin: false,
-                                statusText: "Custom Endpoint",
-                                models: [
-                                    ModelDescriptor(id: "\(id)/default", name: "\(newProviderName) Default", providerId: id, providerName: newProviderName, contextWindowK: 128, supportsVision: true, supportsReasoning: true, badge: "Custom")
-                                ]
-                            )
-                        )
-                        newProviderName = ""
-                        newProviderURL = ""
-                        newProviderKey = ""
-                        store.showToast("Custom provider added")
-                    }
-                    .disabled(newProviderName.isEmpty || newProviderURL.isEmpty)
+                if !store.isUITestSeededMode {
+                    liveModelsSection
+                } else {
+                    seededModelsSection
                 }
 
             case .remoteDevices:
