@@ -25,6 +25,7 @@ final class V4SyncState {
     var lifecycleRetry: Task<Void, Never>?
     var lifecycleAttempt = 0
     var publishTask: Task<Void, Never>?
+    var cacheSaveTask: Task<Void, Never>?
     var rowTargets: [String: [String: Any]] = [:]
     /// Raw attachment refs of user rows keyed by message id, replayed by `editUserQuery`.
     var userAttachmentRefs: [String: [[String: Any]]] = [:]
@@ -172,8 +173,9 @@ extension AppStore {
         }
     }
 
+    /// Keeps the current snapshot so the new subscription resumes from it (`base`) instead of downloading it again.
     private func v4Resubscribe(sessionId: String) async {
-        v4Sync.conversation = nil
+        if v4Sync.conversation?.sessionId != sessionId { v4Sync.conversation = nil }
         if let session = sessions.first(where: { $0.id == sessionId }) {
             _ = await v4SubscribeConversation(session)
         }
@@ -263,7 +265,17 @@ extension AppStore {
         }
         guard await v4EnsureFrameListener(path: path, identity: identity, event: "onDynamicConversationFrame") else { return false }
 
-        let conv = V4ConversationState(sessionId: session.id)
+        var conv: V4ConversationState
+        if let current = v4Sync.conversation, current.sessionId == session.id, current.hasSnapshot {
+            conv = current
+        } else {
+            if let previous = v4Sync.conversation { v4SaveConversationCache(previous) }
+            v4Sync.subscribeInFlight = session.id
+            let cached = await V4LocalCache.loadConversation(key: v4ConversationCacheKey(sessionId: session.id, path: path, identity: identity))
+            guard v4Sync.subscribeInFlight == session.id else { return true }
+            conv = cached.flatMap { V4ConversationState(cachePayload: $0, sessionId: session.id) } ?? V4ConversationState(sessionId: session.id)
+        }
+        conv.subscriptionId = nil
         v4Sync.conversation = conv
         v4Sync.conversationWorkspacePath = path
         v4Sync.conversationWorkspaceIdentity = identity
@@ -274,11 +286,21 @@ extension AppStore {
         v4Sync.userAttachmentRefs.removeAll()
         v4Sync.assembler.reset(topic: conv.topic)
         defer { if v4Sync.subscribeInFlight == session.id { v4Sync.subscribeInFlight = nil } }
+        if conv.hasSnapshot { v4Publish() }
 
         var arg = v4WorkspaceArg(path, identity)
         arg["sessionId"] = session.id
+        if let base = conv.base { arg["base"] = base }
         do {
-            let value = try await rpcClient.call(channel: "zcode-agent", method: "subscribeConversationV4", args: [.fromJSONObject(arg)], timeoutSec: 25)
+            let value: VQLValue
+            do {
+                value = try await rpcClient.call(channel: "zcode-agent", method: "subscribeConversationV4", args: [.fromJSONObject(arg)], timeoutSec: 25)
+            } catch where arg["base"] != nil && !Self.isUnsupportedMethod(error) && !(error is URLError)
+                && !error.localizedDescription.localizedCaseInsensitiveContains("timed out") {
+                arg.removeValue(forKey: "base")
+                v4Sync.staged.removeAll()
+                value = try await rpcClient.call(channel: "zcode-agent", method: "subscribeConversationV4", args: [.fromJSONObject(arg)], timeoutSec: 25)
+            }
             guard v4Sync.conversation?.sessionId == session.id else { return true }
             let dict = value.decodeJSONDictionary() ?? [:]
             let ack = (dict["ack"] as? [String: Any]) ?? dict
@@ -286,6 +308,9 @@ extension AppStore {
                 throw V4CommandError(status: "failed", reasonCode: nil, message: "Host returned no subscription id.")
             }
             v4Sync.conversation?.subscriptionId = subscriptionId
+            let resumed = (ack["mode"] as? String) == "resume" && arg["base"] != nil
+                && (ack["logEpoch"] as? String) == v4Sync.conversation?.logEpoch
+            if !resumed, v4Sync.conversation?.hasSnapshot == true { v4Sync.conversation?.awaitFreshSnapshot() }
             v4Sync.awaitingAck = false
             liveSync.activeTaskId = session.id
             let staged = v4Sync.staged
@@ -425,6 +450,34 @@ extension AppStore {
         v4Sync.userAttachmentRefs = projection.userAttachmentRefs
         v4Sync.foregroundExecutionId = projection.foregroundExecutionId
         if session != sessions[idx] { sessions[idx] = session }
+        v4ScheduleCacheSave()
+    }
+
+    // MARK: - Local cache
+
+    func v4ConversationCacheKey(sessionId: String, path: String, identity: String?) -> String {
+        V4LocalCache.key("conversation", activeConnectionId, ZCodeRPCClient.resolveWorkspaceKey(workspacePath: path, workspaceIdentity: identity), sessionId)
+    }
+
+    private func v4AttachmentCacheKey(ref: String) -> String {
+        V4LocalCache.key("attachment", activeConnectionId, ZCodeRPCClient.resolveWorkspaceKey(workspacePath: v4Sync.conversationWorkspacePath, workspaceIdentity: v4Sync.conversationWorkspaceIdentity), ref)
+    }
+
+    private func v4ScheduleCacheSave() {
+        guard !isUITestSeededMode, v4Sync.cacheSaveTask == nil else { return }
+        v4Sync.cacheSaveTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            self.v4Sync.cacheSaveTask = nil
+            guard !Task.isCancelled, let conv = self.v4Sync.conversation else { return }
+            self.v4SaveConversationCache(conv)
+        }
+    }
+
+    /// Persists the window the user is looking at; the next open renders it at once and resumes from its `seq`.
+    func v4SaveConversationCache(_ conv: V4ConversationState) {
+        guard !isUITestSeededMode, let payload = conv.cachePayload(maxRows: V4LocalCache.conversationRowLimit) else { return }
+        let key = v4ConversationCacheKey(sessionId: conv.sessionId, path: v4Sync.conversationWorkspacePath, identity: v4Sync.conversationWorkspaceIdentity)
+        V4LocalCache.saveConversation(payload, key: key)
     }
 
     // MARK: - Commands
@@ -841,6 +894,11 @@ extension AppStore {
             throw V4CommandError(status: "unavailable", reasonCode: nil, message: "This attachment isn't available from the host.")
         }
         if let cached = v4Sync.attachmentData[ref] { return cached }
+        let diskKey = v4AttachmentCacheKey(ref: ref)
+        if let stored = await V4LocalCache.loadAttachment(key: diskKey) {
+            v4Sync.attachmentData[ref] = stored
+            return stored
+        }
         var mimeType = (refs[index]["mime"] as? String) ?? "application/octet-stream"
         var arg = v4WorkspaceArg(v4Sync.conversationWorkspacePath, v4Sync.conversationWorkspaceIdentity)
         arg["sessionId"] = conv.sessionId
@@ -864,6 +922,7 @@ extension AppStore {
         }
         if v4Sync.attachmentData.count >= Self.attachmentCacheLimit { v4Sync.attachmentData.removeAll() }
         v4Sync.attachmentData[ref] = (data, mimeType)
+        V4LocalCache.saveAttachment(data, mimeType: mimeType, key: diskKey)
         return (data, mimeType)
     }
 

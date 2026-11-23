@@ -11,6 +11,7 @@
 		048D2243671ECFBB35144768 /* ZaiAuthAndRemoteService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D257ED9C5A7AFD5E503DB6C /* ZaiAuthAndRemoteService.swift */; };
 		0ECA3EA0CD209BE6C3D7BB73 /* ZCodeModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78029FC612DF7ACCAFC3A918 /* ZCodeModels.swift */; };
 		0F908D9779A328BFD2F64DD7 /* ZCodeRPCClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC0D314D4EB315D1FE682433 /* ZCodeRPCClient.swift */; };
+		129FFCB3363744D743FB4630 /* V4LocalCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86BFDD9DFE01B136CC6A3069 /* V4LocalCache.swift */; };
 		1636649924905FA1722B314B /* SyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EF5C5479CF1065EF2D6BFC4 /* SyntaxHighlighter.swift */; };
 		16DA12BB2D613A83BA8E8241 /* AppStore+Inspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D2F70C50DC1875B9476E22D /* AppStore+Inspector.swift */; };
 		1873203F0DAEA3DF88D5CF95 /* AppStore+ComposerCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B3A5C708941170C81CB0711 /* AppStore+ComposerCatalog.swift */; };
@@ -121,6 +122,7 @@
 		7627E9AA18A7E1A3D5DFCE5D /* ZCodeOnboardingAndHubView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeOnboardingAndHubView.swift; sourceTree = "<group>"; };
 		78029FC612DF7ACCAFC3A918 /* ZCodeModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeModels.swift; sourceTree = "<group>"; };
 		7BECCF783A3E0AA64E59421D /* AppStore+ProjectTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppStore+ProjectTree.swift"; sourceTree = "<group>"; };
+		86BFDD9DFE01B136CC6A3069 /* V4LocalCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V4LocalCache.swift; sourceTree = "<group>"; };
 		87C2CF3895B3F2F9D5AB9B39 /* ZCodeV4Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeV4Protocol.swift; sourceTree = "<group>"; };
 		97855C4C145655E375AEB0CB /* ZCodeMobileUnitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeMobileUnitTests.swift; sourceTree = "<group>"; };
 		9D414E304EA1890084AE0718 /* CommandCenterSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCenterSheetView.swift; sourceTree = "<group>"; };
@@ -161,6 +163,7 @@
 				0FB486095FF73380919FDD44 /* AppStore+V4.swift */,
 				08937AF5D7EA3C6AF718FA72 /* SeedWorkspaceFactory.swift */,
 				279FFBDA4D7E5E1C3C640985 /* V4ConversationMapper.swift */,
+				86BFDD9DFE01B136CC6A3069 /* V4LocalCache.swift */,
 			);
 			path = State;
 			sourceTree = "<group>";
@@ -514,6 +517,7 @@
 				1636649924905FA1722B314B /* SyntaxHighlighter.swift in Sources */,
 				573ECAD4B418BD6C3F0C6827 /* ToolCallRowView.swift in Sources */,
 				DDA7FEFD17C09C3E2B48E45A /* V4ConversationMapper.swift in Sources */,
+				129FFCB3363744D743FB4630 /* V4LocalCache.swift in Sources */,
 				3B55A12F1767B35708842E70 /* WorkspaceSidebarView.swift in Sources */,
 				B71E562C886D85E72BA7C204 /* ZCodeComposerView.swift in Sources */,
 				BFE1CB04C43BAEBF8C0F0CEB /* ZCodeMobileApp.swift in Sources */,
@@ -598,7 +602,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 31613;
+				CURRENT_PROJECT_VERSION = 31614;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -707,7 +711,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 31613;
+				CURRENT_PROJECT_VERSION = 31614;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

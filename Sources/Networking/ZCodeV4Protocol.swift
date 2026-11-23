@@ -322,6 +322,52 @@ public struct V4ConversationState {
 
 // MARK: - Sessions index reducer
 
+// MARK: - Local cache
+
+extension V4ConversationState {
+    static let cacheFormat = 1
+
+    /// JSON-safe copy of the snapshot keeping only the newest `maxRows` rows; older rows stay reachable through
+    /// `conversationRowsRangeV4` because `firstRowId` is preserved. Nil until a snapshot has been applied.
+    public func cachePayload(maxRows: Int) -> [String: Any]? {
+        guard hasSnapshot, !logEpoch.isEmpty else { return nil }
+        var payload: [String: Any] = [
+            "format": Self.cacheFormat,
+            "sessionId": sessionId,
+            "state": state,
+            "rows": Array(rows.suffix(maxRows)),
+            "totalCount": totalCount,
+            "seq": seq,
+            "logEpoch": logEpoch
+        ]
+        if let firstRowId { payload["firstRowId"] = firstRowId }
+        return payload
+    }
+
+    /// Rebuilds a snapshot saved by `cachePayload`; it renders immediately and becomes the `base` of the next subscribe.
+    public init?(cachePayload payload: [String: Any], sessionId: String) {
+        guard ZCodeV4.int(payload["format"]) == Self.cacheFormat, (payload["sessionId"] as? String) == sessionId,
+              let logEpoch = payload["logEpoch"] as? String, !logEpoch.isEmpty,
+              let seq = ZCodeV4.int(payload["seq"]),
+              let state = payload["state"] as? [String: Any],
+              let rows = payload["rows"] as? [[String: Any]] else { return nil }
+        self.init(sessionId: sessionId)
+        self.state = state
+        self.rows = rows
+        self.totalCount = ZCodeV4.int(payload["totalCount"]) ?? rows.count
+        self.firstRowId = ZCodeV4.int(payload["firstRowId"])
+        self.seq = seq
+        self.logEpoch = logEpoch
+        self.hasSnapshot = true
+    }
+
+    /// The host answered a subscribe with a full snapshot instead of resuming from `base`: keep the rows on screen but
+    /// treat deltas as gaps until that snapshot frame replaces them.
+    public mutating func awaitFreshSnapshot() {
+        hasSnapshot = false
+    }
+}
+
 public struct V4SessionsIndexState {
     public let workspaceKey: String
     public var subscriptionId: String?

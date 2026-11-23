@@ -409,3 +409,78 @@ final class EditAttachmentRefsTests: XCTestCase {
         XCTAssertEqual((payload["attachments"] as? [[String: Any]])?.compactMap { $0["ref"] as? String }, ["b"])
     }
 }
+
+final class V4ConversationCacheTests: XCTestCase {
+    private func snapshot(rows: Int, seq: Int = 9) -> [String: Any] {
+        [
+            "toSeq": seq,
+            "payload": [
+                "kind": "snapshot",
+                "snapshot": [
+                    "revision": 3, "seq": seq, "logEpoch": "E1", "phase": "idle",
+                    "rows": ["window": (1...rows).map { ["rowId": $0, "kind": "assistantText", "text": "t\($0)"] as [String: Any] },
+                             "totalCount": rows, "firstRowId": 1]
+                ]
+            ]
+        ]
+    }
+
+    private func roundTrip(_ conv: V4ConversationState, maxRows: Int) throws -> V4ConversationState? {
+        let payload = try XCTUnwrap(conv.cachePayload(maxRows: maxRows))
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return V4ConversationState(cachePayload: decoded, sessionId: conv.sessionId)
+    }
+
+    func testNoPayloadBeforeSnapshot() {
+        XCTAssertNil(V4ConversationState(sessionId: "s1").cachePayload(maxRows: 10))
+    }
+
+    func testRestoredSnapshotKeepsTailAndResumeBase() throws {
+        var conv = V4ConversationState(sessionId: "s1")
+        _ = conv.apply(frame: snapshot(rows: 6))
+        let restored = try XCTUnwrap(roundTrip(conv, maxRows: 4))
+        XCTAssertTrue(restored.hasSnapshot)
+        XCTAssertNil(restored.subscriptionId)
+        XCTAssertEqual(restored.rows.compactMap { ZCodeV4.int($0["rowId"]) }, [3, 4, 5, 6])
+        XCTAssertTrue(restored.hasOlderRows)
+        XCTAssertEqual(restored.base?["logEpoch"] as? String, "E1")
+        XCTAssertEqual(restored.base?["seq"] as? Int, 9)
+        XCTAssertEqual(restored.state["phase"] as? String, "idle")
+    }
+
+    func testResumeDeltasContinueFromCachedSeq() throws {
+        var conv = V4ConversationState(sessionId: "s1")
+        _ = conv.apply(frame: snapshot(rows: 2))
+        var restored = try XCTUnwrap(roundTrip(conv, maxRows: 300))
+        let next: [String: Any] = ["fromSeq": 9, "toSeq": 10, "payload": ["kind": "deltas", "deltas": [
+            ["op": "row.appended", "row": ["rowId": 3, "kind": "assistantText", "text": "new"]]
+        ]]]
+        XCTAssertEqual(restored.apply(frame: next), .applied)
+        XCTAssertEqual(restored.rows.count, 3)
+    }
+
+    func testRejectedResumeTreatsDeltasAsGapUntilSnapshot() throws {
+        var conv = V4ConversationState(sessionId: "s1")
+        _ = conv.apply(frame: snapshot(rows: 2))
+        var restored = try XCTUnwrap(roundTrip(conv, maxRows: 300))
+        restored.awaitFreshSnapshot()
+        XCTAssertEqual(restored.rows.count, 2)
+        XCTAssertEqual(restored.apply(frame: ["fromSeq": 9, "toSeq": 10, "payload": ["kind": "deltas", "deltas": []]]), .gap)
+        XCTAssertEqual(restored.apply(frame: snapshot(rows: 5, seq: 20)), .applied)
+        XCTAssertTrue(restored.hasSnapshot)
+        XCTAssertEqual(restored.rows.count, 5)
+    }
+
+    func testPayloadForAnotherSessionIsRejected() throws {
+        var conv = V4ConversationState(sessionId: "s1")
+        _ = conv.apply(frame: snapshot(rows: 2))
+        let payload = try XCTUnwrap(conv.cachePayload(maxRows: 10))
+        XCTAssertNil(V4ConversationState(cachePayload: payload, sessionId: "s2"))
+    }
+
+    func testCacheKeySeparatesConnections() {
+        XCTAssertNotEqual(V4LocalCache.key("conversation", "connA", "ws", "s1"), V4LocalCache.key("conversation", "connB", "ws", "s1"))
+        XCTAssertEqual(V4LocalCache.key("a", "b"), V4LocalCache.key("a", "b"))
+    }
+}
