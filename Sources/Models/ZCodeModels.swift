@@ -1011,6 +1011,25 @@ public struct ChatTurnMessage: Identifiable, Codable, Equatable {
     public var canEdit: Bool? = nil
     /// Turn-level file rewind availability: "available" | "noFiles" | "reverted" | "running" | "unavailable".
     public var editRewindAvailability: String? = nil
+    /// Set only on the last assistant segment of a turn whose latest assistant text is complete (desktop `Nfn` turn footer).
+    public var turnActions: TurnActionBar? = nil
+}
+
+/// Desktop turn footer: Copy (all assistant text of the turn), Like / Dislike on the latest text row, Fork when the
+/// host allows it. One per turn, never per segment.
+public struct TurnActionBar: Codable, Equatable {
+    public var copyText: String
+    /// Message holding the latest assistant text row; feedback and fork target its row.
+    public var targetMessageId: String
+    public var canFork: Bool
+    public var feedback: Int
+
+    public init(copyText: String, targetMessageId: String, canFork: Bool, feedback: Int) {
+        self.copyText = copyText
+        self.targetMessageId = targetMessageId
+        self.canFork = canFork
+        self.feedback = feedback
+    }
 }
 
 /// Host `snapshot.usage.contextWindow` (+ cumulative totals). Breakdown fractions sum to ~1.

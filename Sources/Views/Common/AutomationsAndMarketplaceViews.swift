@@ -1184,8 +1184,9 @@ public struct ZCodeSubagentSlideOverDrawerView: View {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: true) {
                         LazyVStack(alignment: .leading, spacing: 16) {
+                            let bars = AppStore.turnActionBars(pane.messages, fromHost: true, running: pane.status == .running)
                             ForEach(pane.messages) { message in
-                                ChatTurnCardView(store: store, message: message, readOnly: true)
+                                ChatTurnCardView(store: store, message: message, readOnly: true, actionBar: bars[message.id])
                                     .id(message.id)
                             }
                             if let notice = pane.statusNotice, !notice.isEmpty {

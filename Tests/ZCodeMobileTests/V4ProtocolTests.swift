@@ -338,3 +338,44 @@ final class SelectableMessageTextTests: XCTestCase {
         XCTAssertNotNil(rendered.attribute(.link, at: (rendered.string as NSString).range(of: "docs").location, effectiveRange: nil))
     }
 }
+
+@MainActor
+final class TurnFooterTests: XCTestCase {
+    func testOneFooterPerTurnOnLastSegmentWhenLatestTextComplete() {
+        var targets: [String: [String: Any]] = [:]
+        let rows: [[String: Any]] = [
+            ["rowId": 1, "turnId": "t1", "kind": "userInput", "origin": "realUser", "text": "Go"],
+            ["rowId": 2, "turnId": "t1", "kind": "assistantText", "text": "Looking", "state": "complete", "entityId": "e2"],
+            ["rowId": 3, "turnId": "t1", "kind": "toolCall", "toolName": "Read", "toolCallId": "c1", "status": "success"],
+            ["rowId": 4, "turnId": "t1", "kind": "assistantText", "text": "Done", "state": "complete", "entityId": "e4",
+             "feedback": "like", "actions": ["canFork": true]],
+            ["rowId": 5, "turnId": "t1", "kind": "toolCall", "toolName": "Bash", "toolCallId": "c2", "status": "success"],
+            ["rowId": 6, "turnId": "t2", "kind": "userInput", "origin": "realUser", "text": "More"],
+            ["rowId": 7, "turnId": "t2", "kind": "assistantText", "text": "Work", "state": "streaming", "entityId": "e7"]
+        ]
+        let messages = V4ConversationMapper.messages(rows, rowTargets: &targets)
+        let footers = messages.compactMap(\.turnActions)
+        XCTAssertEqual(footers.count, 1, "streaming turn has no footer; finished turn has exactly one")
+        XCTAssertEqual(messages.last(where: { $0.role == "assistant" && $0.id != "r7" })?.turnActions, footers.first)
+        XCTAssertEqual(footers[0].copyText, "Looking\n\nDone")
+        XCTAssertEqual(footers[0].targetMessageId, "r3")
+        XCTAssertEqual(ZCodeV4.int(targets["r3"]?["rowId"]), 4)
+        XCTAssertTrue(footers[0].canFork)
+        XCTAssertEqual(footers[0].feedback, 1)
+        let bars = AppStore.turnActionBars(messages, fromHost: true, running: true)
+        XCTAssertEqual(bars.count, 1)
+    }
+
+    func testLegacyTranscriptGetsFooterOnlyOnFinishedTurnsWithText() {
+        func msg(_ id: String, _ role: String, _ content: String) -> ChatTurnMessage {
+            ChatTurnMessage(id: id, role: role, content: content, thought: nil, thoughtDurationMs: 0, tools: [], attachments: [],
+                            timestamp: Date(), modelLabel: nil, tokensIn: 0, tokensOut: 0, durationMs: 0, feedback: 0)
+        }
+        let messages = [msg("u1", "user", "a"), msg("a1", "assistant", "x"), msg("a2", "assistant", ""),
+                        msg("u2", "user", "b"), msg("a3", "assistant", "y")]
+        let running = AppStore.turnActionBars(messages, fromHost: false, running: true)
+        XCTAssertEqual(Array(running.keys), ["a2"])
+        XCTAssertEqual(running["a2"]?.targetMessageId, "a1")
+        XCTAssertEqual(Set(AppStore.turnActionBars(messages, fromHost: false, running: false).keys), ["a2", "a3"])
+    }
+}

@@ -55,8 +55,9 @@ public struct AgentChatCanvasView: View {
                                         if session.messages.isEmpty {
                                             emptySessionHero
                                         } else {
+                                            let bars = AppStore.turnActionBars(session.messages, fromHost: store.v4Owns(session.id), running: session.status == .running)
                                             ForEach(session.messages) { message in
-                                                ChatTurnCardView(store: store, message: message)
+                                                ChatTurnCardView(store: store, message: message, actionBar: bars[message.id])
                                                     .id(message.id)
                                             }
                                         }

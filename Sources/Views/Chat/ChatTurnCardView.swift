@@ -5,6 +5,8 @@ public struct ChatTurnCardView: View {
     let message: ChatTurnMessage
     /// Subagent transcripts are read-only: no feedback, fork, or quote actions.
     var readOnly: Bool = false
+    /// Turn footer, present only on the last assistant segment of a finished turn.
+    var actionBar: TurnActionBar? = nil
     @Environment(\.zcodePalette) private var palette
     @State private var isThoughtExpanded: Bool = false
     @State private var showEditMessageSheet: Bool = false
@@ -347,88 +349,59 @@ public struct ChatTurnCardView: View {
                 }
             }
 
-            // Official ZCode Turn Action Row: Copy • Thumbs Up • Thumbs Down • Fork • Quote (HIG 34pt touch areas)
-            HStack(spacing: 4) {
-                Button {
-                    UIPasteboard.general.string = message.content
-                    store.showToast("Copied message")
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundStyle(palette.foregroundSubtle)
-                        .frame(width: 32, height: 34)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Copy message")
-
-                if !readOnly, store.v4CanTarget(messageId: message.id) {
-                Button {
-                    store.toggleMessageFeedback(messageId: message.id, rating: 1)
-                } label: {
-                    Image(systemName: message.feedback == 1 ? "hand.thumbsup.fill" : "hand.thumbsup")
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundStyle(message.feedback == 1 ? palette.foreground : palette.foregroundSubtle)
-                        .frame(width: 32, height: 34)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Mark helpful")
-
-                Button {
-                    store.toggleMessageFeedback(messageId: message.id, rating: -1)
-                } label: {
-                    Image(systemName: message.feedback == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown")
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundStyle(message.feedback == -1 ? palette.destructive : palette.foregroundSubtle)
-                        .frame(width: 32, height: 34)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Mark unhelpful")
-                } else if message.feedback != 0 {
-                    Image(systemName: message.feedback == 1 ? "hand.thumbsup.fill" : "hand.thumbsdown.fill")
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundStyle(palette.foregroundMuted)
-                        .frame(width: 32, height: 34)
-                        .accessibilityLabel(message.feedback == 1 ? "Marked helpful" : "Marked unhelpful")
-                }
-
-                if !readOnly, store.v4CanTarget(messageId: message.id) {
-                    Button {
-                        store.v4ForkAssistant(messageId: message.id)
-                    } label: {
-                        Image(systemName: "arrow.triangle.branch")
-                            .font(.system(size: 13.5, weight: .regular))
-                            .foregroundStyle(palette.foregroundSubtle)
-                            .frame(width: 32, height: 34)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Fork from this turn")
-                }
-
-                if !readOnly, hasQuotableContent {
-                    Button {
-                        quoteText(message.content)
-                    } label: {
-                        Image(systemName: "text.quote")
-                            .font(.system(size: 13.5, weight: .regular))
-                            .foregroundStyle(palette.foregroundSubtle)
-                            .frame(width: 32, height: 34)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Quote message")
-                    .accessibilityIdentifier("quoteMessageButton_\(message.id)")
-                }
-
-                Spacer()
+            if let bar = actionBar {
+                turnFooter(bar)
             }
-            .padding(.leading, -6)
-            .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Turn Footer (desktop `Nfn`: Copy · Like · Dislike · Fork)
+
+    private func turnFooter(_ bar: TurnActionBar) -> some View {
+        let canTarget = !readOnly && store.v4CanTarget(messageId: bar.targetMessageId)
+        return HStack(spacing: 2) {
+            footerButton("doc.on.doc", label: "Copy", id: "turnCopyButton") {
+                UIPasteboard.general.string = bar.copyText
+                store.showToast("Copied")
+            }
+            if canTarget {
+                footerButton(bar.feedback == 1 ? "hand.thumbsup.fill" : "hand.thumbsup",
+                             label: bar.feedback == 1 ? "Liked" : "Like",
+                             id: "turnLikeButton",
+                             tint: bar.feedback == 1 ? palette.success : nil) {
+                    store.toggleMessageFeedback(messageId: bar.targetMessageId, rating: 1)
+                }
+                footerButton(bar.feedback == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown",
+                             label: bar.feedback == -1 ? "Disliked" : "Dislike",
+                             id: "turnDislikeButton",
+                             tint: bar.feedback == -1 ? palette.warning : nil) {
+                    store.toggleMessageFeedback(messageId: bar.targetMessageId, rating: -1)
+                }
+                if bar.canFork {
+                    footerButton("arrow.triangle.branch", label: "Fork", id: "turnForkButton") {
+                        store.v4ForkAssistant(messageId: bar.targetMessageId)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, -8)
+        .accessibilityIdentifier("turnFooter_\(message.id)")
+    }
+
+    private func footerButton(_ icon: String, label: String, id: String, tint: Color? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(tint ?? palette.foregroundSubtle)
+                .frame(width: 32, height: 32)
+                .background(tint.map { $0.opacity(0.1) } ?? .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier("\(id)_\(message.id)")
     }
 
     // MARK: - Native Markdown Block Parser

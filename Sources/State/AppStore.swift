@@ -787,6 +787,9 @@ public final class AppStore {
                 if let idx = self.sessions.firstIndex(where: { $0.id == session.id }),
                    let m = self.sessions[idx].messages.firstIndex(where: { $0.id == messageId }) {
                     self.sessions[idx].messages[m].feedback = newRating
+                    for i in self.sessions[idx].messages.indices where self.sessions[idx].messages[i].turnActions?.targetMessageId == messageId {
+                        self.sessions[idx].messages[i].turnActions?.feedback = newRating
+                    }
                 }
             } catch {
                 self.showToast("Couldn't save feedback: \(error.localizedDescription)")

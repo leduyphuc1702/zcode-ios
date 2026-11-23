@@ -317,6 +317,10 @@ enum V4ConversationMapper {
             if let turn = row["turnId"] as? String { turnHeaders[turn] = row }
         }
         let pairing = pairSubagents(rows)
+        var lastSegmentByTurn: [String: String] = [:]
+        var latestTextByTurn: [String: (messageId: String, row: [String: Any])] = [:]
+        var turnTexts: [String: [String]] = [:]
+        var turnOrder: [String] = []
 
         func flush() {
             if let msg = current { result.append(msg) }
@@ -368,6 +372,9 @@ enum V4ConversationMapper {
                     current = blank(id: "r\(rowId)", role: "assistant", timestamp: timestamp)
                 }
                 currentRank = max(currentRank, rank.rawValue)
+                let turnKey = turnId ?? ""
+                if lastSegmentByTurn[turnKey] == nil { turnOrder.append(turnKey) }
+                lastSegmentByTurn[turnKey] = current!.id
                 switch kind {
                 case "reasoning":
                     let text = (row["text"] as? String) ?? ""
@@ -388,6 +395,8 @@ enum V4ConversationMapper {
                         current!.content = "_Interrupted_"
                     }
                     rowTargets[current!.id] = target
+                    latestTextByTurn[turnKey] = (current!.id, row)
+                    if !text.isEmpty { turnTexts[turnKey, default: []].append(text) }
                 case "toolCall":
                     let key = "\(turnId ?? "")|\((row["toolCallId"] as? String) ?? "")"
                     current!.tools.append(tool(row, subagent: pairing.byToolCall[key]))
@@ -400,6 +409,16 @@ enum V4ConversationMapper {
             }
         }
         flush()
+
+        for turn in turnOrder {
+            guard let latest = latestTextByTurn[turn], (latest.row["state"] as? String) == "complete",
+                  let copyText = turnTexts[turn]?.joined(separator: "\n\n"), !copyText.isEmpty,
+                  let lastId = lastSegmentByTurn[turn],
+                  let idx = result.firstIndex(where: { $0.id == lastId }) else { continue }
+            let feedback = result.first(where: { $0.id == latest.messageId })?.feedback ?? 0
+            let canFork = ((latest.row["actions"] as? [String: Any])?["canFork"] as? Bool) == true
+            result[idx].turnActions = TurnActionBar(copyText: copyText, targetMessageId: latest.messageId, canFork: canFork, feedback: feedback)
+        }
 
         // Turn timing / token totals belong on the last assistant segment of each turn.
         var seenTurns = Set<String>()
@@ -769,5 +788,30 @@ enum V4ConversationMapper {
     private static func date(_ raw: Any?) -> Date {
         guard let ms = ZCodeV4.double(raw) else { return Date() }
         return Date(timeIntervalSince1970: ms > 9_999_999_999 ? ms / 1000 : ms)
+    }
+}
+
+extension AppStore {
+    /// Turn footers keyed by message id. V4 transcripts carry them from the mapper; legacy transcripts (no row
+    /// states) get one on the last assistant segment of each finished turn that has text.
+    static func turnActionBars(_ messages: [ChatTurnMessage], fromHost: Bool, running: Bool) -> [String: TurnActionBar] {
+        var bars: [String: TurnActionBar] = [:]
+        if fromHost {
+            for message in messages { if let bar = message.turnActions { bars[message.id] = bar } }
+            return bars
+        }
+        var group: [ChatTurnMessage] = []
+        func close(isLast: Bool) {
+            defer { group.removeAll() }
+            guard let last = group.last, !(isLast && running) else { return }
+            let texts = group.map(\.content).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            guard !texts.isEmpty, let target = group.last(where: { !$0.content.isEmpty }) else { return }
+            bars[last.id] = TurnActionBar(copyText: texts.joined(separator: "\n\n"), targetMessageId: target.id, canFork: false, feedback: target.feedback)
+        }
+        for message in messages {
+            if message.role == "user" { close(isLast: false) } else { group.append(message) }
+        }
+        close(isLast: true)
+        return bars
     }
 }
