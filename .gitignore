@@ -1,0 +1,31 @@
+# Xcode & Swift build artifacts
+DerivedData/
+build/
+.build/
+.swiftpm/
+*.xcresult
+*.xcuserdata
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Signing & local secrets (never commit)
+*.p12
+*.pfx
+*.pem
+*.cer
+*.key
+*.mobileprovision
+*.provisionprofile
+*.zsigncert
+.env
+.env.*
+
+# macOS & Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*~

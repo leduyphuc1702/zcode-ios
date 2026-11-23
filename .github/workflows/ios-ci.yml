@@ -1,0 +1,52 @@
+name: iOS Native Build & Zero-WebKit Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-verify:
+    name: Build SwiftUI Target & Verify Zero WebView
+    runs-on: macos-15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Enforce Zero WebKit / WebView Policy
+        run: |
+          if grep -rnE "import WebKit|WKWebView|UIWebView|SFSafariViewController" Sources/ | grep -v "^[^:]*:[0-9]*:\s*//"; then
+            echo "Error: WebKit / WebView usage is strictly prohibited."
+            exit 1
+          fi
+          echo "Verified 0 WebKit imports in Sources/."
+
+      - name: Build Release arm64 Binary (Unsigned)
+        run: |
+          xcodebuild \
+            -project ZCodeMobile.xcodeproj \
+            -scheme ZCode \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath /tmp/zcode_ci_build \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Audit Mach-O Linked Frameworks (otool -L)
+        run: |
+          otool -L /tmp/zcode_ci_build/Build/Products/Release-iphoneos/ZCode.app/ZCode
+          if otool -L /tmp/zcode_ci_build/Build/Products/Release-iphoneos/ZCode.app/ZCode | grep -i "WebKit"; then
+            echo "Error: Binary links against WebKit.framework!"
+            exit 1
+          fi
+          echo "Verified 100% Native SwiftUI Mach-O binary (0 WebKit linkage)."

@@ -1,0 +1,1016 @@
+import SwiftUI
+
+public struct AutomationsWorkspacePageView: View {
+    @Bindable var store: AppStore
+    let isWideLayout: Bool
+    @Environment(\.zcodePalette) private var palette
+    @State private var showCreateSheet = false
+    @State private var draftTitle = ""
+    @State private var draftCron = "0 9 * * 1-5"
+    @State private var draftPrompt = ""
+
+    public init(store: AppStore, isWideLayout: Bool) {
+        self.store = store
+        self.isWideLayout = isWideLayout
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            // Official ZCode Sub-page Header
+            HStack(spacing: 10) {
+                if !isWideLayout {
+                    Button {
+                        store.mobilePage = .home
+                    } label: {
+                        Image(systemName: "arrow.left")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(palette.foreground)
+                            .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("backFromAutomationsButton")
+                }
+
+                Text(L10n.text("Automations", vi: "Tự động hóa", zh: "自动化", lang: store.language))
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(palette.foreground)
+
+                Spacer()
+
+                Button {
+                    showCreateSheet = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("New")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(palette.brandForeground)
+                    .padding(.horizontal, 12)
+                    .frame(height: 32)
+                    .background(palette.brand, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("createAutomationButton")
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 46)
+            .background(palette.header)
+
+            Rectangle().fill(palette.border).frame(height: 1)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Schedule recurring ZCode tasks across workspaces or off-peak windows.")
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(palette.foregroundSubtle)
+
+                    ForEach($store.automations) { $auto in
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(auto.name)
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .foregroundStyle(palette.foreground)
+                                    Text("\(auto.cronExpression) • \(auto.workspacePath)")
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundStyle(palette.accentBlue)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Toggle(isOn: $auto.enabled) { EmptyView() }
+                                    .labelsHidden()
+                            }
+
+                            Text(auto.prompt)
+                                .font(.system(size: 13))
+                                .foregroundStyle(palette.foregroundSubtle)
+
+                            HStack {
+                                Text(auto.lastRunStatus)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(palette.foregroundMuted)
+                                Spacer()
+                                Button {
+                                    store.createNewSession(initialPrompt: auto.prompt)
+                                } label: {
+                                    Label("Run Now", systemImage: "play.fill")
+                                        .font(.system(size: 12.5, weight: .semibold))
+                                        .foregroundStyle(palette.foreground)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 7))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(14)
+                        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.border, lineWidth: 1))
+                    }
+                }
+                .padding(16)
+            }
+        }
+        .background(palette.background)
+        .sheet(isPresented: $showCreateSheet) {
+            NavigationStack {
+                Form {
+                    TextField("Automation Title", text: $draftTitle)
+                    TextField("Cron Expression", text: $draftCron)
+                        .textInputAutocapitalization(.never)
+                    TextField("Task Prompt", text: $draftPrompt, axis: .vertical)
+                        .lineLimit(3...6)
+                }
+                .navigationTitle("New Automation")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showCreateSheet = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Create") {
+                            guard !draftTitle.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+                            store.automations.insert(
+                                AutomationScheduleItem(
+                                    id: UUID().uuidString,
+                                    name: draftTitle,
+                                    cronExpression: draftCron,
+                                    workspacePath: store.activeProject?.rootPath ?? "/Users/macos/workspace",
+                                    prompt: draftPrompt.isEmpty ? "Run scheduled workspace audit" : draftPrompt,
+                                    enabled: true,
+                                    lastRunStatus: "Ready",
+                                    lastRunAt: nil
+                                ),
+                                at: 0
+                            )
+                            draftTitle = ""
+                            draftPrompt = ""
+                            showCreateSheet = false
+                        }
+                    }
+                }
+            }
+            .presentationDetents([.medium])
+        }
+    }
+}
+
+public struct PluginMarketplacePageView: View {
+    @Bindable var store: AppStore
+    let isWideLayout: Bool
+    @Environment(\.zcodePalette) private var palette
+    @State private var query = ""
+
+    public init(store: AppStore, isWideLayout: Bool) {
+        self.store = store
+        self.isWideLayout = isWideLayout
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                if !isWideLayout {
+                    Button {
+                        store.mobilePage = .home
+                    } label: {
+                        Image(systemName: "arrow.left")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(palette.foreground)
+                            .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("backFromMarketplaceButton")
+                }
+
+                Text(L10n.text("Plugin Marketplace", vi: "Kho Plugin", zh: "插件市场", lang: store.language))
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(palette.foreground)
+
+                Spacer()
+
+                Button {
+                    store.showToast("Refreshed zcode-plugins-official catalog")
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(width: 32, height: 32)
+                        .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 46)
+            .background(palette.header)
+
+            Rectangle().fill(palette.border).frame(height: 1)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(palette.foregroundSubtle)
+                        TextField("Search official ZCode plugins...", text: $query)
+                            .font(.system(size: 14))
+                            .foregroundStyle(palette.foreground)
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 38)
+                    .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(palette.border, lineWidth: 1))
+
+                    ForEach($store.plugins) { $plugin in
+                        if query.isEmpty || plugin.name.localizedCaseInsensitiveContains(query) || plugin.summary.localizedCaseInsensitiveContains(query) {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "puzzlepiece.extension.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(palette.accentBlue)
+                                    .frame(width: 36, height: 36)
+                                    .background(palette.accentBlue.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(spacing: 6) {
+                                        Text(plugin.name)
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundStyle(palette.foreground)
+                                        Text("v\(plugin.version)")
+                                            .font(.system(size: 11.5, design: .monospaced))
+                                            .foregroundStyle(palette.foregroundMuted)
+                                    }
+                                    Text(plugin.summary)
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(palette.foregroundSubtle)
+                                    Text(plugin.marketplace)
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .foregroundStyle(palette.foregroundMuted)
+                                }
+
+                                Spacer()
+
+                                Toggle(isOn: $plugin.enabled) { EmptyView() }
+                                    .labelsHidden()
+                            }
+                            .padding(14)
+                            .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+                            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.border, lineWidth: 1))
+                        }
+                    }
+                }
+                .padding(16)
+            }
+        }
+        .background(palette.background)
+    }
+}
+
+// MARK: - 1:1 Official ZCode Custom Vector Icons (Robot SubAgent, Git Commit Node)
+
+public struct ZCodeRobotIconView: View {
+    public var size: CGFloat = 15
+    public var color: Color
+
+    public init(size: CGFloat = 15, color: Color) {
+        self.size = size
+        self.color = color
+    }
+
+    public var body: some View {
+        Canvas { context, canvasSize in
+            let w = canvasSize.width
+            let h = canvasSize.height
+            let stroke = max(1.35, w * 0.10)
+
+            // Antenna stem + tip
+            var antenna = Path()
+            antenna.move(to: CGPoint(x: w * 0.5, y: h * 0.08))
+            antenna.addLine(to: CGPoint(x: w * 0.5, y: h * 0.27))
+            context.stroke(antenna, with: .color(color), style: StrokeStyle(lineWidth: stroke, lineCap: .round))
+
+            let tipRect = CGRect(x: w * 0.42, y: h * 0.02, width: w * 0.16, height: w * 0.16)
+            context.fill(Path(ellipseIn: tipRect), with: .color(color))
+
+            // Rounded robot head
+            let headRect = CGRect(x: w * 0.14, y: h * 0.27, width: w * 0.72, height: h * 0.58)
+            let headPath = Path(roundedRect: headRect, cornerRadius: w * 0.18)
+            context.stroke(headPath, with: .color(color), lineWidth: stroke)
+
+            // Side ear ticks
+            var ears = Path()
+            ears.move(to: CGPoint(x: w * 0.04, y: h * 0.56))
+            ears.addLine(to: CGPoint(x: w * 0.14, y: h * 0.56))
+            ears.move(to: CGPoint(x: w * 0.86, y: h * 0.56))
+            ears.addLine(to: CGPoint(x: w * 0.96, y: h * 0.56))
+            context.stroke(ears, with: .color(color), style: StrokeStyle(lineWidth: stroke, lineCap: .round))
+
+            // Eyes
+            let eyeR = w * 0.085
+            let leftEye = CGRect(x: w * 0.34 - eyeR, y: h * 0.55 - eyeR, width: eyeR * 2, height: eyeR * 2)
+            let rightEye = CGRect(x: w * 0.66 - eyeR, y: h * 0.55 - eyeR, width: eyeR * 2, height: eyeR * 2)
+            context.fill(Path(ellipseIn: leftEye), with: .color(color))
+            context.fill(Path(ellipseIn: rightEye), with: .color(color))
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+public struct ZCodeCommitNodeIconView: View {
+    public var size: CGFloat = 15
+    public var color: Color
+
+    public init(size: CGFloat = 15, color: Color) {
+        self.size = size
+        self.color = color
+    }
+
+    public var body: some View {
+        Canvas { context, canvasSize in
+            let w = canvasSize.width
+            let h = canvasSize.height
+            let stroke = max(1.35, w * 0.10)
+            let r = w * 0.22
+
+            var topLine = Path()
+            topLine.move(to: CGPoint(x: w * 0.5, y: h * 0.06))
+            topLine.addLine(to: CGPoint(x: w * 0.5, y: h * 0.5 - r))
+            context.stroke(topLine, with: .color(color), style: StrokeStyle(lineWidth: stroke, lineCap: .round))
+
+            var bottomLine = Path()
+            bottomLine.move(to: CGPoint(x: w * 0.5, y: h * 0.5 + r))
+            bottomLine.addLine(to: CGPoint(x: w * 0.5, y: h * 0.94))
+            context.stroke(bottomLine, with: .color(color), style: StrokeStyle(lineWidth: stroke, lineCap: .round))
+
+            let circleRect = CGRect(x: w * 0.5 - r, y: h * 0.5 - r, width: r * 2, height: r * 2)
+            context.stroke(Path(ellipseIn: circleRect), with: .color(color), lineWidth: stroke)
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+// MARK: - 1:1 Official ZCode Unified Floating Task / Status Panel ("Thanh task")
+
+public struct ZCodeUnifiedTaskStatusPanelView: View {
+    @Bindable var store: AppStore
+    let session: AgentTaskSession
+    let totalAdded: Int
+    let totalRemoved: Int
+    @Environment(\.zcodePalette) private var palette
+
+    public init(store: AppStore, session: AgentTaskSession, totalAdded: Int, totalRemoved: Int) {
+        self.store = store
+        self.session = session
+        self.totalAdded = totalAdded
+        self.totalRemoved = totalRemoved
+    }
+
+    private var completedTodoCount: Int {
+        session.todos.filter { $0.status == "completed" }.count
+    }
+
+    private var visibleTodos: [TodoChecklistItem] {
+        if store.hideCompletedTodosInStatusPanel {
+            return session.todos.filter { $0.status != "completed" }
+        }
+        return session.todos
+    }
+
+    private var runningSubagentCount: Int {
+        session.subagentRuns.filter(\.isRunning).count
+    }
+
+    public var body: some View {
+        ZStack(alignment: .topTrailing) {
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 18) {
+                    gitToolsSection
+                    if !session.todos.isEmpty {
+                        progressSection
+                    }
+                    if !session.goals.isEmpty {
+                        goalSection
+                    }
+                    if !session.subagentRuns.isEmpty {
+                        agentsSection
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 15)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 336)
+
+            topRightControls
+                .padding(.top, 10)
+                .padding(.trailing, 12)
+        }
+        .background(store.themeMode == .light ? palette.card : Color(hex: 0x232323))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(store.themeMode == .light ? palette.border : Color(hex: 0x363636), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.42), radius: 18, y: 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("unifiedTaskStatusPanel")
+    }
+
+    private var topRightControls: some View {
+        HStack(spacing: 10) {
+            Menu {
+                if completedTodoCount > 0 {
+                    Button {
+                        store.hideCompletedTodosInStatusPanel.toggle()
+                    } label: {
+                        Label(
+                            store.hideCompletedTodosInStatusPanel ? "Show all" : "Hide \(completedTodoCount) completed",
+                            systemImage: store.hideCompletedTodosInStatusPanel ? "eye" : "eye.slash"
+                        )
+                    }
+                }
+                Button {
+                    store.showTaskStatusPanel = false
+                    store.openSubagentInspector(nil)
+                } label: {
+                    Label("Open SubAgent View", systemImage: "rectangle.righthalf.inset.filled.arrow.right")
+                }
+                Button {
+                    store.showTaskStatusPanel = false
+                    store.activeInspectorTab = .gitDiff
+                    store.showInspectorSheet = true
+                } label: {
+                    Label("Open Git Changes", systemImage: "arrow.triangle.branch")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 32, height: 32)
+                    .background(
+                        (store.themeMode == .light ? palette.surfaceHover : Color(hex: 0x2C2C2E)).opacity(0.92),
+                        in: RoundedRectangle(cornerRadius: 7)
+                    )
+                    .contentShape(Rectangle())
+                    .accessibilityLabel("Status panel options")
+            }
+            .accessibilityIdentifier("statusPanelMoreMenu")
+
+            Button {
+                store.playImpactHaptic(.light)
+                withAnimation(.easeOut(duration: 0.16)) {
+                    store.showTaskStatusPanel = false
+                }
+            } label: {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 32, height: 32)
+                    .background(
+                        (store.themeMode == .light ? palette.surfaceHover : Color(hex: 0x2C2C2E)).opacity(0.92),
+                        in: RoundedRectangle(cornerRadius: 7)
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Collapse status panel")
+            .accessibilityIdentifier("collapseTaskStatusPanelButton")
+        }
+    }
+
+    private var gitToolsSection: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Text("Git tools")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(palette.foreground)
+                .padding(.trailing, 72)
+
+            Button {
+                store.showTaskStatusPanel = false
+                store.activeInspectorTab = .gitDiff
+                store.showInspectorSheet = true
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "doc.badge.plus")
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(width: 18)
+                    Text("Changes")
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(palette.foreground)
+                    Text("+\(totalAdded)")
+                        .font(.system(size: 13.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(palette.success)
+                    Text("-\(totalRemoved)")
+                        .font(.system(size: 13.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(palette.destructive)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("statusPanelChangesRow")
+
+            Menu {
+                ForEach(store.gitBranches, id: \.self) { branch in
+                    Button {
+                        store.switchGitBranch(branch)
+                    } label: {
+                        HStack {
+                            Text(branch)
+                            if branch == store.activeGitBranch {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 13.5, weight: .regular))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(width: 18)
+                    Text(store.activeGitBranch)
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(palette.foreground)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(palette.foregroundSubtle)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("statusPanelBranchPicker")
+
+            Button {
+                store.showTaskStatusPanel = false
+                store.activeInspectorTab = .gitDiff
+                store.showInspectorSheet = true
+            } label: {
+                HStack(spacing: 10) {
+                    ZCodeCommitNodeIconView(size: 16, color: palette.foregroundSubtle)
+                        .frame(width: 18)
+                    Text("Commit or push")
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(palette.foreground)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("statusPanelCommitRow")
+        }
+    }
+
+    private var progressSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Text("Progress")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(palette.foreground)
+                Text("\(completedTodoCount)/\(session.todos.count)")
+                    .font(.system(size: 13.5, weight: .regular))
+                    .foregroundStyle(palette.foregroundSubtle)
+                Spacer()
+            }
+
+            ForEach(visibleTodos) { item in
+                let isDone = item.status == "completed"
+                let isActive = item.status == "in_progress"
+                Button {
+                    toggleTodoStatus(item.id)
+                } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Group {
+                            if isDone {
+                                Image(systemName: "checkmark.circle")
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundStyle(palette.success)
+                            } else if isActive {
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 13.5, weight: .semibold))
+                                    .foregroundStyle(palette.foreground)
+                            } else {
+                                Image(systemName: "circle")
+                                    .font(.system(size: 15, weight: .regular))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                            }
+                        }
+                        .frame(width: 18, height: 20)
+
+                        Text(item.content)
+                            .font(.system(size: 14, weight: .regular))
+                            .foregroundStyle(isDone ? palette.foregroundSubtle : palette.foreground)
+                            .strikethrough(isDone, color: palette.foregroundSubtle)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("statusTodoRow_\(item.id)")
+            }
+        }
+    }
+
+    private var goalSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text("Goal")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(palette.foreground)
+                if let elapsed = session.goalElapsedText {
+                    Text(elapsed)
+                        .font(.system(size: 13.5, weight: .regular))
+                        .foregroundStyle(palette.foregroundSubtle)
+                    Text("·")
+                        .font(.system(size: 13.5, weight: .bold))
+                        .foregroundStyle(palette.foregroundSubtle)
+                }
+                Button {
+                    store.toggleGoalPaused()
+                } label: {
+                    Image(systemName: session.goalPaused ? "play.fill" : "pause")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("goalPauseResumeButton")
+                Spacer()
+            }
+
+            ForEach(session.goals) { goal in
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "target")
+                        .font(.system(size: 14.5, weight: .regular))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(width: 18, height: 20)
+                    Text(goal.title)
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(palette.foreground)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    private var agentsSection: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 7) {
+                Text("Agents")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(palette.foreground)
+                Text("\(runningSubagentCount) running")
+                    .font(.system(size: 13.5, weight: .regular))
+                    .foregroundStyle(palette.foregroundSubtle)
+                Spacer()
+            }
+
+            ForEach(session.subagentRuns) { run in
+                Button {
+                    store.showTaskStatusPanel = false
+                    store.openSubagentInspector(run.id)
+                } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        ZCodeRobotIconView(size: 16, color: palette.foregroundSubtle)
+                            .frame(width: 18, height: 20)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(run.title)
+                                .font(.system(size: 14, weight: .regular))
+                                .foregroundStyle(palette.foreground)
+                                .lineLimit(1)
+                            Text(run.elapsedText)
+                                .font(.system(size: 12.5, weight: .regular))
+                                .foregroundStyle(palette.foregroundSubtle)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("statusSubagentRow_\(run.id)")
+            }
+        }
+    }
+
+    private func toggleTodoStatus(_ todoId: String) {
+        store.playSelectionHaptic()
+        guard var updated = store.activeSession,
+              let idx = updated.todos.firstIndex(where: { $0.id == todoId }) else { return }
+        updated.todos[idx].status = (updated.todos[idx].status == "completed") ? "pending" : "completed"
+        store.activeSession = updated
+    }
+}
+
+// MARK: - 1:1 Official ZCode Slide-Over SubAgent Multi-Tab Transcript View
+
+public struct ZCodeSubagentSlideOverDrawerView: View {
+    @Bindable var store: AppStore
+    @Environment(\.zcodePalette) private var palette
+
+    public init(store: AppStore) {
+        self.store = store
+    }
+
+    private var openRuns: [SubagentSessionRun] {
+        let all = store.currentSubagentRuns
+        let filtered = store.openSubagentTabIds.compactMap { id in
+            all.first(where: { $0.id == id })
+        }
+        return filtered.isEmpty ? all : filtered
+    }
+
+    private var activeRun: SubagentSessionRun? {
+        let runs = openRuns
+        return runs.first(where: { $0.id == store.activeSubagentId }) ?? runs.first
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            subagentTopTabStrip
+
+            Rectangle()
+                .fill(palette.border)
+                .frame(height: 1)
+
+            if let run = activeRun {
+                subagentTranscriptScrollView(run)
+            } else {
+                VStack(spacing: 12) {
+                    Spacer()
+                    ZCodeRobotIconView(size: 32, color: palette.foregroundMuted)
+                    Text("No active SubAgent transcript")
+                        .font(.system(size: 14))
+                        .foregroundStyle(palette.foregroundSubtle)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(palette.background)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("subagentSlideOverDrawer")
+    }
+
+    private var subagentTopTabStrip: some View {
+        HStack(spacing: 8) {
+            Menu {
+                ForEach(store.currentSubagentRuns) { run in
+                    Button {
+                        if !store.openSubagentTabIds.contains(run.id) {
+                            store.openSubagentTabIds.append(run.id)
+                        }
+                        store.activeSubagentId = run.id
+                    } label: {
+                        HStack {
+                            Text(run.title)
+                            if run.id == activeRun?.id {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button(role: .destructive) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        store.showSubagentDrawer = false
+                    }
+                } label: {
+                    Label("Close SubAgent View", systemImage: "xmark")
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 34, height: 36)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel("Switch or close SubAgent")
+            }
+            .accessibilityIdentifier("subagentSwitcherMenuButton")
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(openRuns) { run in
+                        subagentTabPill(run, isSelected: run.id == activeRun?.id)
+                    }
+
+                    Button {
+                        store.playImpactHaptic(.light)
+                        store.spawnInteractiveSubagentTab()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(palette.foregroundSubtle)
+                            .frame(width: 34, height: 34)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("New SubAgent tab")
+                    .accessibilityIdentifier("newSubagentTabButton")
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 46)
+        .background(palette.header)
+    }
+
+    private func subagentTabPill(_ run: SubagentSessionRun, isSelected: Bool) -> some View {
+        HStack(spacing: 7) {
+            Button {
+                store.activeSubagentId = run.id
+            } label: {
+                HStack(spacing: 7) {
+                    ZCodeRobotIconView(
+                        size: 14,
+                        color: isSelected ? palette.foreground : palette.foregroundSubtle
+                    )
+                    Text(run.title)
+                        .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                        .foregroundStyle(isSelected ? palette.foreground : palette.foregroundSubtle)
+                        .lineLimit(1)
+                        .frame(maxWidth: 148, alignment: .leading)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("subagentTab_\(run.id)")
+
+            Button {
+                store.closeSubagentTab(run.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("closeSubagentTab_\(run.id)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            isSelected
+                ? (store.themeMode == .light ? palette.card : Color(hex: 0x2B2B2D))
+                : Color.clear,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(
+                    isSelected ? (store.themeMode == .light ? palette.border : Color(hex: 0x3D3D40)) : Color.clear,
+                    lineWidth: 1
+                )
+        )
+    }
+
+    private func subagentTranscriptScrollView(_ run: SubagentSessionRun) -> some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 14) {
+                // Status pill for live running / completed SubAgent
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(run.isRunning ? palette.accentBlue : palette.success)
+                        .frame(width: 7, height: 7)
+                    Text("\(run.agentType) SubAgent")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(palette.foreground)
+                    Text("·")
+                        .foregroundStyle(palette.foregroundMuted)
+                    Text(run.elapsedText)
+                        .font(.system(size: 12))
+                        .foregroundStyle(palette.foregroundSubtle)
+                    Spacer()
+                }
+                .padding(.bottom, 2)
+
+                // Structured markdown paragraphs & bullet items with 1:1 inline code pills
+                ForEach(Array(parsedTranscriptBlocks(run.transcriptMarkdown).enumerated()), id: \.offset) { _, block in
+                    if block.isBullet {
+                        HStack(alignment: .top, spacing: 9) {
+                            Text("•")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .padding(.top, 1)
+                            Text(styledInlineCode(block.text))
+                                .font(.system(size: 14.5))
+                                .lineSpacing(4)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else {
+                        Text(styledInlineCode(block.text))
+                            .font(.system(size: 14.5))
+                            .lineSpacing(4)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                // Embedded artifact image preview (matching User Screenshot 1)
+                if let imagePath = run.artifactImagePath,
+                   let data = store.binaryData(forPath: imagePath),
+                   let uiImage = UIImage(data: data) {
+                    Button {
+                        store.showSubagentDrawer = false
+                        store.openFileInInspector(pathOrId: imagePath, preferPreview: true)
+                    } label: {
+                        Image(uiImage: uiImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 260)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .strokeBorder(palette.border, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("subagentArtifactPreviewButton")
+                }
+
+                // Footer: Copy + MM/dd, hh:mm a timestamp (matching User Screenshot 1)
+                HStack(spacing: 12) {
+                    Button {
+                        UIPasteboard.general.string = run.transcriptMarkdown
+                        store.showToast("Copied SubAgent output")
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 11.5))
+                            Text("Copy")
+                                .font(.system(size: 12.5))
+                        }
+                        .foregroundStyle(palette.foregroundMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("copySubagentTranscriptButton")
+
+                    Text(Self.timestampFormatter.string(from: run.timestamp))
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(palette.foregroundMuted)
+
+                    Spacer()
+                }
+                .padding(.top, 4)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private struct TranscriptBlock {
+        let isBullet: Bool
+        let text: String
+    }
+
+    private func parsedTranscriptBlocks(_ raw: String) -> [TranscriptBlock] {
+        raw.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { line in
+                if line.hasPrefix("- ") {
+                    return TranscriptBlock(isBullet: true, text: String(line.dropFirst(2)))
+                }
+                return TranscriptBlock(isBullet: false, text: line)
+            }
+    }
+
+    private func styledInlineCode(_ text: String) -> AttributedString {
+        if var parsed = try? AttributedString(
+            markdown: text,
+            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) {
+            let codeBg = store.themeMode == .light ? Color.black.opacity(0.07) : Color(hex: 0x2C2C2E)
+            for run in parsed.runs {
+                if run.inlinePresentationIntent?.contains(.code) == true {
+                    parsed[run.range].font = .system(size: 13, weight: .medium, design: .monospaced)
+                    parsed[run.range].foregroundColor = palette.foreground
+                    parsed[run.range].backgroundColor = codeBg
+                } else {
+                    parsed[run.range].foregroundColor = palette.foreground
+                }
+            }
+            return parsed
+        }
+        var fallback = AttributedString(text)
+        fallback.foregroundColor = palette.foreground
+        return fallback
+    }
+
+    private static let timestampFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "MM/dd, hh:mm a"
+        return df
+    }()
+}
+

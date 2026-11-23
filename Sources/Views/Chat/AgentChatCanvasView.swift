@@ -1,0 +1,811 @@
+import SwiftUI
+
+public struct AgentChatCanvasView: View {
+    @Bindable var store: AppStore
+    let isWideLayout: Bool
+    @Environment(\.zcodePalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showTodoExpanded: Bool = false
+    @State private var showTelemetrySheet: Bool = false
+    @State private var showRenameTaskAlert: Bool = false
+    @State private var renameDraft: String = ""
+
+    public init(store: AppStore, isWideLayout: Bool) {
+        self.store = store
+        self.isWideLayout = isWideLayout
+    }
+
+    public var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .trailing) {
+                VStack(spacing: 0) {
+                    // Bar 1: Official ZCode Mobile Shell Header ("← Task chat" + Palette)
+                    if !isWideLayout {
+                        mobileShellTopBar
+                        Rectangle()
+                            .fill(palette.border)
+                            .frame(height: 1)
+                    }
+
+                    // Bar 2: Workspace / Task Context Sub-header ("📁 Task... •••" + Side-Pane Toggle)
+                    workspaceSubHeaderBar
+                    Rectangle()
+                        .fill(palette.border)
+                        .frame(height: 1)
+
+                    // Main Chat Stream + Floating "Changes +add -del" Pill
+                    if let session = store.activeSession {
+                        ZStack(alignment: .topTrailing) {
+                            ScrollViewReader { proxy in
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 18) {
+                                        if session.messages.isEmpty {
+                                            emptySessionHero
+                                        } else {
+                                            ForEach(session.messages) { message in
+                                                ChatTurnCardView(store: store, message: message)
+                                                    .id(message.id)
+                                            }
+                                        }
+
+                                        if let perm = session.pendingPermission {
+                                            permissionCard(perm)
+                                                .id("pending-permission")
+                                        }
+
+                                        if let question = session.pendingQuestion {
+                                            questionCard(question)
+                                                .id("pending-question")
+                                        }
+
+                                        if let plan = session.pendingPlan {
+                                            planCard(plan)
+                                                .id("pending-plan")
+                                        }
+
+                                        Color.clear
+                                            .frame(height: 8)
+                                            .id("chat-bottom-anchor")
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.top, store.gitChanges.isEmpty ? 14 : 46)
+                                    .padding(.bottom, (store.showTodoTracker && session.todos.contains(where: { $0.status != "completed" })) ? 46 : 12)
+                                    .frame(maxWidth: 820)
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .scrollDismissesKeyboard(.interactively)
+                                .onChange(of: session.messages.count) { _, _ in
+                                    withAnimation(.easeOut(duration: 0.2)) {
+                                        proxy.scrollTo("chat-bottom-anchor", anchor: .bottom)
+                                    }
+                                }
+                            }
+
+                            // Official ZCode Floating "Changes +add -del" Pill (Top-Right when unified StatusPanel is collapsed)
+                            if !store.gitChanges.isEmpty && !store.showTaskStatusPanel {
+                                floatingChangesPill
+                                    .padding(.top, 8)
+                                    .padding(.trailing, 12)
+                            }
+
+                            // Official ZCode Unified Floating Task / Status Panel ("Thanh task") OR Compact Active Todo Pill
+                            if store.showTaskStatusPanel {
+                                VStack(spacing: 0) {
+                                    Spacer()
+                                    ZCodeUnifiedTaskStatusPanelView(
+                                        store: store,
+                                        session: session,
+                                        totalAdded: store.gitTotalAddedLines,
+                                        totalRemoved: store.gitTotalRemovedLines
+                                    )
+                                    .padding(.horizontal, 12)
+                                    .padding(.top, 4)
+                                    .padding(.bottom, 6)
+                                    .background(palette.background)
+                                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                }
+                            } else if store.showTodoTracker && !session.todos.isEmpty {
+                                VStack {
+                                    Spacer()
+                                    HStack {
+                                        floatingTodoPill(session.todos)
+                                        Spacer(minLength: 12)
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.bottom, 6)
+                                }
+                            }
+                        }
+                        .zIndex(1)
+                    }
+
+                    // Official ZCode Rounded Composer (with Nested Prompt Queue & Floating /, @, $, + Popovers)
+                    ZCodeComposerView(store: store, onTapContextGauge: {
+                        showTelemetrySheet = true
+                    })
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+                    .background(palette.background)
+                    .zIndex(15)
+                }
+                .background(palette.background)
+
+                // Official ZCode Mobile Side-Pane Overlay (`w-[min(88vw,28rem)]` or Full Width)
+                if !isWideLayout && store.showInspectorSheet {
+                    Color.black.opacity(0.56)
+                        .ignoresSafeArea()
+                        .accessibilityIdentifier("inspectorBackdrop")
+                        .onTapGesture {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                store.showInspectorSheet = false
+                            }
+                        }
+                        .transition(.opacity)
+                        .zIndex(20)
+
+                    CodingInspectorWindowView(store: store, isDockedPane: true)
+                        .frame(width: store.isInspectorExpandedFull ? geo.size.width : min(geo.size.width * 0.92, 448))
+                        .frame(maxHeight: .infinity)
+                        .background(palette.background)
+                        .overlay(alignment: .leading) {
+                            if !store.isInspectorExpandedFull {
+                                Rectangle()
+                                    .fill(palette.border)
+                                    .frame(width: 1)
+                            }
+                        }
+                        .shadow(color: .black.opacity(0.42), radius: 18, x: -6, y: 0)
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 28, coordinateSpace: .local)
+                                .onEnded { value in
+                                    if value.translation.width > 76 && abs(value.translation.height) < 64 {
+                                        store.playImpactHaptic(.light)
+                                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+                                            store.showInspectorSheet = false
+                                        }
+                                    }
+                                }
+                        )
+                        .transition(reduceMotion ? .opacity : .move(edge: .trailing))
+                        .zIndex(25)
+                }
+
+                // Official ZCode 1:1 Slide-Over SubAgent Multi-Tab Transcript View
+                if store.showSubagentDrawer {
+                    Color.black.opacity(0.52)
+                        .ignoresSafeArea()
+                        .accessibilityIdentifier("subagentDrawerBackdrop")
+                        .onTapGesture {
+                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+                                store.showSubagentDrawer = false
+                            }
+                        }
+                        .transition(.opacity)
+                        .zIndex(26)
+
+                    ZCodeSubagentSlideOverDrawerView(store: store)
+                        .frame(width: min(geo.size.width * 0.88, 432))
+                        .frame(maxHeight: .infinity)
+                        .background(palette.background)
+                        .overlay(alignment: .leading) {
+                            Rectangle()
+                                .fill(palette.border)
+                                .frame(width: 1)
+                        }
+                        .shadow(color: .black.opacity(0.44), radius: 18, x: -6, y: 0)
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 28, coordinateSpace: .local)
+                                .onEnded { value in
+                                    if value.translation.width > 76 && abs(value.translation.height) < 64 {
+                                        store.playImpactHaptic(.light)
+                                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+                                            store.showSubagentDrawer = false
+                                        }
+                                    }
+                                }
+                        )
+                        .transition(reduceMotion ? .opacity : .move(edge: .trailing))
+                        .zIndex(28)
+                }
+            }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: store.showInspectorSheet)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: store.isInspectorExpandedFull)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: store.showSubagentDrawer)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: store.showTaskStatusPanel)
+        }
+        .sheet(isPresented: $showTelemetrySheet) {
+            sessionTelemetryAndCheckpointsSheet
+                .environment(\.zcodePalette, palette)
+        }
+        .alert("Rename task", isPresented: $showRenameTaskAlert) {
+            TextField("Task name", text: $renameDraft)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                if let s = store.activeSession {
+                    store.renameSession(s.id, newTitle: renameDraft)
+                }
+            }
+        }
+    }
+
+    // MARK: - Bar 1: Mobile Shell Top Bar ("← Task chat" + Theme Palette)
+
+    private var mobileShellTopBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                store.playImpactHaptic(.light)
+                store.showInspectorSheet = false
+                store.mobilePage = .home
+            } label: {
+                Image(systemName: "arrow.left")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Back to task list")
+            .accessibilityIdentifier("backToTaskHomeButton")
+
+            Text(L10n.text("Task chat", vi: "Phiên tác vụ", zh: "任务会话", lang: store.language))
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(palette.foreground)
+                .lineLimit(1)
+
+            Spacer()
+
+            Menu {
+                Section("Theme") {
+                    ForEach(ZCodeThemeMode.allCases) { mode in
+                        Button {
+                            store.themeMode = mode
+                        } label: {
+                            HStack {
+                                Text(mode.displayName)
+                                if store.themeMode == mode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+                Section("Code Syntax Palette") {
+                    ForEach(ZCodeSyntaxTheme.allCases) { st in
+                        Button {
+                            store.syntaxTheme = st
+                        } label: {
+                            HStack {
+                                Text(st.displayName)
+                                if store.syntaxTheme == st {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button {
+                    store.showSettingsSheet = true
+                } label: {
+                    Label("All Appearance & Settings…", systemImage: "gearshape")
+                }
+            } label: {
+                Image(systemName: "paintpalette")
+                    .font(.system(size: 16.5, weight: .regular))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel("Appearance and theme")
+            }
+            .accessibilityIdentifier("chatThemeMenuButton")
+        }
+        .padding(.horizontal, 6)
+        .frame(height: 44)
+        .background(palette.header)
+    }
+
+    // MARK: - Bar 2: Workspace / Session Sub-header + Side-Pane Toggle
+
+    private var workspaceSubHeaderBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder")
+                .font(.system(size: 14, weight: .regular))
+                .foregroundStyle(palette.foregroundSubtle)
+                .padding(.leading, 4)
+
+            Text(store.activeSession?.title ?? store.activeProject?.name ?? "Workspace")
+                .font(.system(size: 14.5, weight: .medium))
+                .foregroundStyle(palette.foreground)
+                .lineLimit(1)
+                .frame(maxWidth: 210, alignment: .leading)
+
+            Menu {
+                if let session = store.activeSession {
+                    Button {
+                        renameDraft = session.title
+                        showRenameTaskAlert = true
+                    } label: {
+                        Label("Rename task", systemImage: "pencil")
+                    }
+                    Button {
+                        store.togglePinSession(session.id)
+                    } label: {
+                        Label(session.pinned ? "Unpin task" : "Pin task", systemImage: session.pinned ? "pin.slash" : "pin")
+                    }
+                    Button {
+                        store.forkSession(session.id)
+                    } label: {
+                        Label("Fork session", systemImage: "arrow.triangle.branch")
+                    }
+                    Button {
+                        showTelemetrySheet = true
+                    } label: {
+                        Label("Checkpoints & Context (\(session.contextUsedPercent)%)", systemImage: "clock.arrow.circlepath")
+                    }
+                }
+                Divider()
+                Button {
+                    store.createNewSession()
+                } label: {
+                    Label("New task", systemImage: "plus.bubble")
+                }
+                Button {
+                    store.showConnectionsSheet = true
+                } label: {
+                    Label("Switch device / Scan QR", systemImage: "qrcode.viewfinder")
+                }
+                Button {
+                    store.showSettingsSheet = true
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(palette.foregroundSubtle)
+                    .frame(width: 38, height: 40)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel("Task options")
+            }
+            .accessibilityIdentifier("headerMoreMenuButton")
+
+            Spacer()
+
+            // Official ZCode Right Side-Pane Toggle Icon (`[<|]`)
+            Button {
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                store.playImpactHaptic(.light)
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+                    store.showInspectorSheet.toggle()
+                }
+            } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(store.showInspectorSheet ? palette.foreground : palette.foregroundSubtle, lineWidth: 1.3)
+                        .frame(width: 17, height: 15)
+
+                    HStack(spacing: 0) {
+                        Image(systemName: store.showInspectorSheet ? "chevron.right" : "chevron.left")
+                            .font(.system(size: 6.5, weight: .bold))
+                            .foregroundStyle(store.showInspectorSheet ? palette.foreground : palette.foregroundSubtle)
+                            .frame(width: 10)
+                        Rectangle()
+                            .fill(store.showInspectorSheet ? palette.foreground : palette.foregroundSubtle)
+                            .frame(width: 1.2, height: 15)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(width: 17, height: 15)
+                }
+                .frame(width: 42, height: 38)
+                .background(store.showInspectorSheet ? palette.surfaceHover : Color.clear, in: RoundedRectangle(cornerRadius: 7))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(store.showInspectorSheet ? "Hide workspace inspector" : "Show workspace inspector")
+            .accessibilityIdentifier("openInspectorButton")
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 40)
+        .background(palette.background)
+    }
+
+    // MARK: - Official ZCode Floating "Changes +add -del" Pill
+
+    private var floatingChangesPill: some View {
+        Button {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            store.activeInspectorTab = .gitDiff
+            withAnimation(.easeOut(duration: 0.2)) {
+                store.showInspectorSheet = true
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.badge.plus")
+                    .font(.system(size: 12.5, weight: .regular))
+                    .foregroundStyle(palette.foregroundSubtle)
+
+                Text(L10n.text("Changes", vi: "Thay đổi", zh: "变更", lang: store.language))
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(palette.foreground)
+
+                Text("+\(store.gitTotalAddedLines)")
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(palette.success)
+
+                Text("-\(store.gitTotalRemovedLines)")
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(palette.destructive)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 32)
+            .background(
+                Capsule()
+                    .fill(palette.card.opacity(0.96))
+                    .shadow(color: .black.opacity(0.32), radius: 8, y: 2)
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(palette.borderStrong, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("floatingChangesPill")
+    }
+
+    // MARK: - Clean ZCode Empty Task State
+
+    private var emptySessionHero: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Spacer(minLength: 36)
+            HStack(spacing: 10) {
+                Image(systemName: "folder")
+                    .font(.system(size: 16))
+                    .foregroundStyle(palette.foregroundSubtle)
+                Text(store.activeProject?.name ?? "workspace")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(palette.foreground)
+                Text("• \(store.activeProject?.gitBranch ?? "main")")
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(palette.foregroundMuted)
+            }
+
+            Text("Ask ZCode anything, mention files with @, or use / for commands and skills.")
+                .font(.system(size: 14.5))
+                .foregroundStyle(palette.foregroundSubtle)
+                .lineSpacing(3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 24)
+    }
+
+    // MARK: - Interactive Cards (Permission, Question, Plan)
+
+    private func permissionCard(_ perm: PermissionPrompt) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .foregroundStyle(palette.warning)
+                Text("Permission Required • \(perm.toolName)")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(palette.foreground)
+                Spacer()
+                Text(perm.riskLevel)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(palette.warning, in: Capsule())
+            }
+
+            Text(perm.summary)
+                .font(.system(size: 13.5))
+                .foregroundStyle(palette.foreground)
+
+            Text(perm.previewDiffOrCommand)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(palette.foreground)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(palette.border, lineWidth: 1))
+
+            HStack(spacing: 8) {
+                Button {
+                    store.respondToPermission(allow: true, rememberForSession: false)
+                } label: {
+                    Text("Allow Once")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(palette.brandForeground)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 36)
+                        .background(palette.brand, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("allowOncePermissionButton")
+
+                Button {
+                    store.respondToPermission(allow: true, rememberForSession: true)
+                } label: {
+                    Text("Allow Session")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(palette.foreground)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 36)
+                        .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(palette.borderStrong, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    store.respondToPermission(allow: false)
+                } label: {
+                    Text("Deny")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(palette.destructive)
+                        .padding(.horizontal, 14)
+                        .frame(height: 36)
+                        .background(palette.destructive.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("denyPermissionButton")
+            }
+        }
+        .padding(14)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.warning.opacity(0.6), lineWidth: 1))
+    }
+
+    private func questionCard(_ q: QuestionPrompt) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(q.header.uppercased())
+                .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                .foregroundStyle(palette.accentBlue)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(palette.accentBlue.opacity(0.15), in: Capsule())
+
+            Text(q.question)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(palette.foreground)
+
+            ForEach(q.options) { opt in
+                Button {
+                    store.respondToQuestion(selectedLabel: opt.label)
+                } label: {
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text(opt.label)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(palette.foreground)
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(palette.foregroundSubtle)
+                        }
+                        Text(opt.detail)
+                            .font(.system(size: 12))
+                            .foregroundStyle(palette.foregroundSubtle)
+                    }
+                    .padding(11)
+                    .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 9))
+                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(palette.borderStrong, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.borderStrong, lineWidth: 1))
+    }
+
+    private func planCard(_ plan: PlanReviewPrompt) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack {
+                Image(systemName: "map")
+                    .foregroundStyle(palette.accentBlue)
+                Text(plan.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(palette.foreground)
+                Spacer()
+            }
+            Text(plan.summary)
+                .font(.system(size: 13))
+                .foregroundStyle(palette.foregroundSubtle)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(plan.steps.enumerated()), id: \.offset) { idx, step in
+                    HStack(alignment: .top, spacing: 8) {
+                        Text("\(idx + 1).")
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(palette.foregroundSubtle)
+                        Text(step)
+                            .font(.system(size: 13))
+                            .foregroundStyle(palette.foreground)
+                    }
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 8))
+
+            HStack(spacing: 8) {
+                Button {
+                    store.respondToPlan(approved: true)
+                } label: {
+                    Text("Approve Plan")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(palette.brandForeground)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 36)
+                        .background(palette.brand, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    store.respondToPlan(approved: false)
+                } label: {
+                    Text("Revise")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(palette.foreground)
+                        .padding(.horizontal, 16)
+                        .frame(height: 36)
+                        .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(palette.borderStrong, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.borderStrong, lineWidth: 1))
+    }
+
+    // MARK: - Official ZCode Floating Active Todo Pill ("→ ...")
+
+    private func floatingTodoPill(_ todos: [TodoChecklistItem]) -> some View {
+        let doneCount = todos.filter { $0.status == "completed" }.count
+        let activeItem = todos.first(where: { $0.status == "in_progress" }) ?? todos.last
+        let allCompleted = doneCount == todos.count
+
+        return VStack(alignment: .leading, spacing: 6) {
+            if showTodoExpanded {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Text("Tasks (\(doneCount)/\(todos.count))")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(palette.foregroundMuted)
+                        Spacer()
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                showTodoExpanded = false
+                            }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(palette.foregroundMuted)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    ForEach(todos) { item in
+                        HStack(spacing: 8) {
+                            if item.status == "completed" {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(palette.success)
+                            } else if item.status == "in_progress" {
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(palette.foregroundSubtle)
+                            } else {
+                                Image(systemName: "circle")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(palette.foregroundMuted)
+                            }
+                            Text(item.content)
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(item.status == "completed" ? palette.foregroundMuted : palette.foreground)
+                                .lineLimit(2)
+                        }
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: 320, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(palette.menuBackground.opacity(0.98))
+                        .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(palette.borderStrong, lineWidth: 1)
+                )
+            }
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    store.showTaskStatusPanel = true
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: allCompleted ? "checkmark" : "arrow.right")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(allCompleted ? palette.success : palette.foregroundSubtle)
+
+                    Text(activeItem?.content ?? "\(doneCount)/\(todos.count) tasks")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .background(
+                    Capsule()
+                        .fill(palette.card.opacity(0.96))
+                        .shadow(color: .black.opacity(0.32), radius: 8, y: 2)
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(palette.borderStrong, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("floatingTodoPillButton")
+        }
+    }
+
+    private var sessionTelemetryAndCheckpointsSheet: some View {
+        NavigationStack {
+            List {
+                if let session = store.activeSession {
+                    Section("Context Window & Token Usage") {
+                        LabeledContent("Context Used", value: "\(session.contextUsedPercent)%")
+                        LabeledContent("Input Tokens", value: "\(session.totalTokensIn.formatted())")
+                        LabeledContent("Output Tokens", value: "\(session.totalTokensOut.formatted())")
+                        LabeledContent("Cached Tokens", value: "\(session.cachedTokens.formatted())")
+                        LabeledContent("Estimated Cost", value: String(format: "$%.2f", session.costUSD))
+                    }
+
+                    Section("Git Checkpoints") {
+                        if session.checkpoints.isEmpty {
+                            Text("Checkpoints are recorded automatically after file edits.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(palette.foregroundSubtle)
+                        } else {
+                            ForEach(session.checkpoints) { cp in
+                                Button {
+                                    store.rewindToCheckpoint(cp)
+                                    showTelemetrySheet = false
+                                } label: {
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(cp.label)
+                                                .font(.system(size: 13.5, weight: .medium))
+                                                .foregroundStyle(palette.foreground)
+                                            Text("\(cp.commitShortHash) • \(cp.filesChanged) files")
+                                                .font(.system(size: 11.5, design: .monospaced))
+                                                .foregroundStyle(palette.foregroundSubtle)
+                                        }
+                                        Spacer()
+                                        Text("Rewind")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(palette.accentBlue)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Context & Checkpoints")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { showTelemetrySheet = false }
+                }
+            }
+        }
+    }
+}
