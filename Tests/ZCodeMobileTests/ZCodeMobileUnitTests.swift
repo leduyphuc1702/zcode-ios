@@ -110,7 +110,8 @@ final class ZCodeMobileUnitTests: XCTestCase {
         // Requirement 5: Default app language must be English
         XCTAssertEqual(store.language, .english)
         XCTAssertEqual(store.themeMode, .dark)
-        XCTAssertEqual(SettingsSectionKind.allCases.count, 19)
+        XCTAssertEqual(SettingsGroupKind.allCases.count, 3)
+        XCTAssertEqual(SettingsSectionKind.allCases.count, 16)
 
         // Inline code comment workflow
         store.addInlineCodeComment(filePath: "src/rpc/SocketProtocol.swift", startLine: 18, endLine: 22, comment: "Verify endianness", snippet: "buffer.appendBigEndian")
@@ -256,5 +257,92 @@ final class ZCodeMobileUnitTests: XCTestCase {
         XCTAssertEqual(summaries[1].name, "offline-ssh")
         XCTAssertEqual(summaries[1].workspaceKey, "ws-remote-1")
         XCTAssertFalse(summaries[1].canBridge)
+    }
+
+    @MainActor
+    func testZCodeSettingsModelProviderAndSubagentStudioParity() async {
+        let store = AppStore(seedDemoWorkspace: true)
+
+        // 1. Official 17 Provider Templates from zcode-builtin.json
+        XCTAssertEqual(ProviderTemplateDescriptor.officialCatalog.count, 17)
+        let openRouterTpl = ProviderTemplateDescriptor.officialCatalog.first(where: { $0.id == "openrouter" })
+        XCTAssertNotNil(openRouterTpl)
+
+        let createdProviderId = store.createProvider(
+            template: openRouterTpl,
+            customName: "OpenRouter Enterprise",
+            baseURL: "https://openrouter.ai/api",
+            apiFormat: .anthropicMessages,
+            apiKey: "sk-or-test-unit-key"
+        )
+        let createdProvider = store.providers.first(where: { $0.id == createdProviderId })
+        XCTAssertNotNil(createdProvider)
+        XCTAssertTrue(createdProvider?.hasConfiguredAPIKey == true)
+        XCTAssertGreaterThanOrEqual(createdProvider?.models.count ?? 0, 5)
+
+        // Upsert custom model & test connectivity
+        let customModel = ModelDescriptor(
+            id: "\(createdProviderId)/anthropic/claude-opus-5-custom",
+            modelId: "anthropic/claude-opus-5-custom",
+            name: "Claude Opus 5 Custom",
+            providerId: createdProviderId,
+            providerName: "OpenRouter Enterprise",
+            enabled: true,
+            builtin: false,
+            useRecommendedConfig: false,
+            contextWindowTokens: 1_000_000,
+            maxOutputTokens: 65_536,
+            supportsVision: true,
+            supportsPdf: true,
+            reasoningLevels: ["low", "medium", "high", "max"]
+        )
+        store.upsertModel(providerId: createdProviderId, originalModelId: nil, draft: customModel)
+        XCTAssertTrue(store.allModels.contains(where: { $0.modelId == "anthropic/claude-opus-5-custom" }))
+
+        store.setModelEnabled(providerId: createdProviderId, modelId: "anthropic/claude-opus-5-custom", enabled: false)
+        XCTAssertFalse(store.allModels.contains(where: { $0.modelId == "anthropic/claude-opus-5-custom" }))
+
+        store.setModelEnabled(providerId: createdProviderId, modelId: "anthropic/claude-opus-5-custom", enabled: true)
+        await store.testModelConnectivity(providerId: createdProviderId, modelId: "anthropic/claude-opus-5-custom")
+        let tested = store.providers.first(where: { $0.id == createdProviderId })?.models.first(where: { $0.modelId == "anthropic/claude-opus-5-custom" })
+        XCTAssertEqual(tested?.connectivityState, .connected)
+
+        // Cleanup keychain entry created in unit test
+        store.deleteProvider(createdProviderId)
+
+        // 2. Subagent Name Validation & Studio CRUD / Overrides
+        XCTAssertNotNil(AppStore.validateSubagentName("ab")) // too short
+        XCTAssertNotNil(AppStore.validateSubagentName("bad_underscore")) // invalid char
+        XCTAssertNotNil(AppStore.validateSubagentName("Explore")) // reserved built-in
+        XCTAssertNotNil(AppStore.validateSubagentName("general-purpose")) // reserved built-in
+        XCTAssertNil(AppStore.validateSubagentName("security-reviewer-v2"))
+
+        let newSubagent = SubagentDefinitionItem(
+            id: "user:user:security-reviewer-v2",
+            name: "security-reviewer-v2",
+            description: "Audits authentication and IPC boundaries.",
+            systemPrompt: "Audit every untrusted input boundary.",
+            color: .red,
+            scope: "user",
+            source: "user",
+            readOnly: false,
+            enabled: true,
+            modelOverride: "anthropic/claude-opus-4-7",
+            reasoningOverride: "max",
+            allowedTools: ["Read", "Grep", "Glob"],
+            permissionMode: .plan,
+            injectAgentsMd: true,
+            runInBackground: true
+        )
+        store.saveSubagent(newSubagent, isNew: true)
+        XCTAssertTrue(store.subagents.contains(where: { $0.name == "security-reviewer-v2" }))
+
+        // Built-in Explore inline model override
+        if let explore = store.subagents.first(where: { $0.name == "Explore" && $0.source == "built-in" }) {
+            store.setSubagentModelAndEffortOverride(id: explore.id, modelOverride: "openai/gpt-5.4", reasoningOverride: "high")
+            let updatedExplore = store.subagents.first(where: { $0.id == explore.id })
+            XCTAssertEqual(updatedExplore?.modelOverride, "openai/gpt-5.4")
+            XCTAssertEqual(updatedExplore?.reasoningOverride, "high")
+        }
     }
 }

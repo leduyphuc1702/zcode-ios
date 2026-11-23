@@ -10,6 +10,10 @@ public enum VQLValue: Equatable {
     case objectJSON(String)
     case int32(Int32)
 
+    public static func bool(_ value: Bool) -> VQLValue {
+        .objectJSON(value ? "true" : "false")
+    }
+
     public static func fromJSONObject(_ dict: [String: Any]) -> VQLValue {
         guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
               let str = String(data: data, encoding: .utf8) else {

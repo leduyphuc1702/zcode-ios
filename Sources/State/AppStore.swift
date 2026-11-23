@@ -25,18 +25,43 @@ public final class AppStore {
 
     // MARK: - Appearance & Localization (Strictly English Default)
     public var language: AppLanguage = .english { didSet { persistPreferences() } }
+    public var interfaceMode: String = "coding" { didSet { persistPreferences() } } // "coding" | "office"
     public var themeMode: ZCodeThemeMode = .dark { didSet { persistPreferences() } }
+    public var uiFontSizePx: Double = 14.0 { didSet { persistPreferences() } }
     public var syntaxTheme: ZCodeSyntaxTheme = .githubDark { didSet { persistPreferences() } }
+    public var lightSyntaxTheme: ZCodeSyntaxTheme = .githubLight { didSet { persistPreferences() } }
     public var codeFontSize: Double = 13.0 { didSet { persistPreferences() } }
     public var showLineNumbers: Bool = true { didSet { persistPreferences() } }
     public var wrapCodeLines: Bool = false { didSet { persistPreferences() } }
     public var showReasoningBlocks: Bool = true { didSet { persistPreferences() } }
     public var showTodoTracker: Bool = true { didSet { persistPreferences() } }
     public var compactToolCards: Bool = false { didSet { persistPreferences() } }
+    public var toolGroupingExploreEnabled: Bool = true { didSet { persistPreferences() } }
+    public var toolGroupingTerminalEnabled: Bool = true { didSet { persistPreferences() } }
+    public var toolGroupingChangesEnabled: Bool = true { didSet { persistPreferences() } }
     public var hapticsEnabled: Bool = true { didSet { persistPreferences() } }
+
+    // MARK: - ZCode v3.16.3 General, Terminal, Search, Interaction & Archive Settings
+    public var terminalInheritSystemProfile: Bool = true { didSet { persistPreferences() } }
+    public var terminalFontFamily: String = "SF Mono, Menlo, monospace" { didSet { persistPreferences() } }
+    public var toolSearchMode: String = "auto" { didSet { persistPreferences() } } // "off" | "auto" | "on"
+    public var nativeSearchEnhancementsEnabled: Bool = true { didSet { persistPreferences() } }
+    public var zcodeInteractionBehavior: String = "queue" { didSet { persistPreferences() } } // "queue" | "guide"
+    public var askUserQuestionAutoResolutionEnabled: Bool = false { didSet { persistPreferences() } }
+    public var dynamicWorkflowMode: String = "auto" { didSet { persistPreferences() } } // "disabled" | "auto" | "manual"
+    public var modelIoFullRetentionEnabled: Bool = false { didSet { persistPreferences() } }
+    public var keepAwakeWhileRunning: Bool = true { didSet { persistPreferences() } }
+    public var receivePreviewUpdates: Bool = false { didSet { persistPreferences() } }
+    public var autoDownloadAndInstallUpdates: Bool = true { didSet { persistPreferences() } }
+    public var dataBaseDir: String = "~/.zcode/v2" { didSet { persistPreferences() } }
+    public var memoryEnabled: Bool = true { didSet { persistPreferences() } }
+    public var userMemoryMarkdown: String = "" { didSet { persistPreferences() } }
+    public var taskAutoArchiveEnabled: Bool = false { didSet { persistPreferences() } }
+    public var taskAutoArchiveOlderThanDays: Int = 14 { didSet { persistPreferences() } } // 3 | 7 | 14 | 30
 
     // MARK: - Notifications & Enterprise Security Settings
     public var notificationsEnabled: Bool = true { didSet { persistPreferences() } }
+    public var notificationSoundEnabled: Bool = true { didSet { persistPreferences() } }
     public var notifyApprovals: Bool = true { didSet { persistPreferences() } }
     public var notifyQuestions: Bool = true { didSet { persistPreferences() } }
     public var notifyCompletions: Bool = true { didSet { persistPreferences() } }
@@ -50,11 +75,22 @@ public final class AppStore {
     public var lockoutUntil: Date? = nil
 
     public var httpProxyURL: String = "" { didSet { persistPreferences() } }
+    public var httpProxyNoProxy: String = "localhost, 127.0.0.1" { didSet { persistPreferences() } }
+    public var httpProxyCaCertPath: String = "" { didSet { persistPreferences() } }
     public var workspaceHookTrustGranted: Bool = true { didSet { persistPreferences() } }
     public var offPeakWindowSchedule: String = "00:00 – 07:00 UTC" { didSet { persistPreferences() } }
     public var browserAllowedDomains: String = "localhost, 127.0.0.1, zcode.z.ai" { didSet { persistPreferences() } }
+    public var embeddedBrowserAllowInsecureCertificates: Bool = false { didSet { persistPreferences() } }
     public var fileSearchIgnorePatterns: String = "node_modules/\n.git/\nDerivedData/\nbuild/\n*.ipa" { didSet { persistPreferences() } }
     public var cuaHelperEnabled: Bool = true { didSet { persistPreferences() } }
+    public var computerUseComposerEntryHidden: Bool = false { didSet { persistPreferences() } }
+    public var cuaAccessibilityStatus: String = "granted"
+    public var cuaScreenRecordingStatus: String = "granted"
+    public var remoteStartupAutoReconnectEnabled: Bool = true { didSet { persistPreferences() } }
+    public var shortcutBindings: [ShortcutBindingItem] = ShortcutBindingItem.officialDefaults
+    public var pluginMarketplaces: [String] = ["zcode-plugins-official"]
+    public var isSyncingSettings: Bool = false
+    public var lastSettingsSyncedAt: Date? = nil
 
     // MARK: - ZCode Remote Mobile Shell Navigation & Sheet State
     public var mobilePage: MobileShellPage = .home
@@ -127,9 +163,9 @@ public final class AppStore {
     private var activeStreamTask: Task<Void, Never>?
     private var activeConnectTask: Task<Void, Never>?
     private var activeHydrationTask: Task<Void, Never>?
-    private var isBulkSyncingWorkspaces: Bool = false
-    private var workspaceIdentityByPath: [String: String] = [:]
-    private let rpcClient = ZCodeRPCClient()
+    internal var isBulkSyncingWorkspaces: Bool = false
+    internal var workspaceIdentityByPath: [String: String] = [:]
+    internal let rpcClient = ZCodeRPCClient()
 
     private let prefsKey = "zcode_mobile_enterprise_prefs_v2"
     private let connectionsKey = "zcode_saved_connections_v2"
@@ -144,6 +180,7 @@ public final class AppStore {
             UserDefaults.standard.removeObject(forKey: prefsKey)
             UserDefaults.standard.removeObject(forKey: connectionsKey)
             UserDefaults.standard.removeObject(forKey: accountKey)
+            UserDefaults.standard.removeObject(forKey: "zcode_custom_catalogs_v3")
             KeychainStore.delete(zaiJwtKeychainKey)
             KeychainStore.delete(zaiAccessKeychainKey)
         }
@@ -217,6 +254,7 @@ public final class AppStore {
         }
 
         loadPreferences()
+        loadPersistedCatalogsIfAvailable()
         loadAccountMetadata()
 
         if let acct = zaiAccount {
@@ -258,7 +296,7 @@ public final class AppStore {
     }
 
     public var allModels: [ModelDescriptor] {
-        providers.filter(\.enabled).flatMap(\.models)
+        providers.filter(\.enabled).flatMap { $0.models.filter(\.enabled) }
     }
 
     public var flattenedFiles: [WorkspaceFileNode] {
@@ -1760,6 +1798,7 @@ public final class AppStore {
                         workspaceIdentity: wsIdentity
                     )
                 }
+                await self.syncAllSettingsFromRemoteDesktop()
             } else if connection.transport == .directServer {
                 // Direct server fallback when workspace path was not pre-announced
                 if let resolved = try? await self.rpcClient.call(channel: "file", method: "resolvePath", args: [.fromJSONObject(["path": "."])], timeoutSec: 3.0),

@@ -346,26 +346,405 @@ public enum ReasoningEffortLevel: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+public enum ProviderAPIFormat: String, Codable, CaseIterable, Identifiable {
+    case anthropicMessages = "anthropic-messages"
+    case openaiChatCompletions = "openai-chat-completions"
+    case openaiResponses = "openai-responses"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .anthropicMessages: return "Anthropic Messages"
+        case .openaiChatCompletions: return "OpenAI Chat Completions"
+        case .openaiResponses: return "OpenAI Responses"
+        }
+    }
+
+    public var shortBadge: String {
+        switch self {
+        case .anthropicMessages: return "Anthropic API"
+        case .openaiChatCompletions: return "Chat Completions"
+        case .openaiResponses: return "Responses API"
+        }
+    }
+}
+
+public enum ModelConnectivityState: String, Codable, Equatable {
+    case untested
+    case testing
+    case connected
+    case failed
+}
+
 public struct ModelDescriptor: Identifiable, Codable, Equatable {
     public var id: String
+    public var modelId: String
     public var name: String
     public var providerId: String
     public var providerName: String
-    public var contextWindowK: Int
+    public var enabled: Bool
+    public var builtin: Bool
+    public var useRecommendedConfig: Bool
+    public var contextWindowTokens: Int
+    public var maxOutputTokens: Int
     public var supportsVision: Bool
+    public var supportsVideo: Bool
+    public var supportsAudio: Bool
+    public var supportsPdf: Bool
+    public var supportsToolCall: Bool
     public var supportsReasoning: Bool
+    public var supportsJsonSchemaOutput: Bool
+    public var supportsNativeWebSearch: Bool
+    public var supportsMidConversationSystem: Bool
+    public var reasoningLevels: [String]
     public var badge: String?
+    public var connectivityState: ModelConnectivityState
+    public var connectivityMessage: String?
+
+    public var contextWindowK: Int {
+        get { max(1, contextWindowTokens / 1000) }
+        set { contextWindowTokens = max(1024, newValue * 1000) }
+    }
+
+    public var formattedContextWindow: String {
+        if contextWindowTokens >= 1_000_000 {
+            let m = Double(contextWindowTokens) / 1_000_000.0
+            return m.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(m))M" : String(format: "%.1fM", m)
+        }
+        return "\(max(1, contextWindowTokens / 1000))K"
+    }
+
+    public init(
+        id: String,
+        modelId: String? = nil,
+        name: String,
+        providerId: String,
+        providerName: String,
+        enabled: Bool = true,
+        builtin: Bool = true,
+        useRecommendedConfig: Bool = true,
+        contextWindowK: Int = 200,
+        contextWindowTokens: Int? = nil,
+        maxOutputTokens: Int = 16_384,
+        supportsVision: Bool = true,
+        supportsVideo: Bool = false,
+        supportsAudio: Bool = false,
+        supportsPdf: Bool = false,
+        supportsToolCall: Bool = true,
+        supportsReasoning: Bool = true,
+        supportsJsonSchemaOutput: Bool = true,
+        supportsNativeWebSearch: Bool = false,
+        supportsMidConversationSystem: Bool = true,
+        reasoningLevels: [String] = ["off", "low", "medium", "high", "max"],
+        badge: String? = nil,
+        connectivityState: ModelConnectivityState = .untested,
+        connectivityMessage: String? = nil
+    ) {
+        self.id = id
+        let resolvedRawId = modelId ?? (id.contains("/") ? String(id.split(separator: "/", maxSplits: 1).last ?? Substring(id)) : id)
+        self.modelId = resolvedRawId
+        self.name = name
+        self.providerId = providerId
+        self.providerName = providerName
+        self.enabled = enabled
+        self.builtin = builtin
+        self.useRecommendedConfig = useRecommendedConfig
+        self.contextWindowTokens = contextWindowTokens ?? (contextWindowK * 1000)
+        self.maxOutputTokens = maxOutputTokens
+        self.supportsVision = supportsVision
+        self.supportsVideo = supportsVideo
+        self.supportsAudio = supportsAudio
+        self.supportsPdf = supportsPdf
+        self.supportsToolCall = supportsToolCall
+        self.supportsReasoning = supportsReasoning
+        self.supportsJsonSchemaOutput = supportsJsonSchemaOutput
+        self.supportsNativeWebSearch = supportsNativeWebSearch
+        self.supportsMidConversationSystem = supportsMidConversationSystem
+        self.reasoningLevels = reasoningLevels
+        self.badge = badge
+        self.connectivityState = connectivityState
+        self.connectivityMessage = connectivityMessage
+    }
 }
 
 public struct ModelProviderConfig: Identifiable, Codable, Equatable {
     public var id: String
     public var name: String
     public var baseURL: String
-    public var protocolKind: String // "zai", "anthropic", "openai"
+    public var protocolKind: String // "anthropic-messages", "openai-chat-completions", "openai-responses", "zhipu-account"
+    public var group: String // "zai-family", "bigmodel-family", "standard-personal"
+    public var templateId: String?
+    public var apiKeyManagementURL: String?
+    public var hasConfiguredAPIKey: Bool
     public var enabled: Bool
     public var isBuiltin: Bool
+    public var entitled: Bool
+    public var accountAvailability: String // "available", "unavailable", "pending"
     public var statusText: String
+    public var logoKey: String
+    public var revision: Int
     public var models: [ModelDescriptor]
+
+    public var apiFormat: ProviderAPIFormat {
+        get {
+            switch protocolKind {
+            case "anthropic", "anthropic-messages", "zai":
+                return .anthropicMessages
+            case "openai-responses":
+                return .openaiResponses
+            default:
+                return .openaiChatCompletions
+            }
+        }
+        set {
+            protocolKind = newValue.rawValue
+        }
+    }
+
+    public var isAccountProvider: Bool {
+        id.hasPrefix("account:") || group == "zai-family" || group == "bigmodel-family" || isBuiltin
+    }
+
+    public init(
+        id: String,
+        name: String,
+        baseURL: String,
+        protocolKind: String = ProviderAPIFormat.anthropicMessages.rawValue,
+        group: String? = nil,
+        templateId: String? = nil,
+        apiKeyManagementURL: String? = nil,
+        hasConfiguredAPIKey: Bool = false,
+        enabled: Bool = true,
+        isBuiltin: Bool = false,
+        entitled: Bool = true,
+        accountAvailability: String = "available",
+        statusText: String = "Ready",
+        logoKey: String = "custom",
+        revision: Int = 1,
+        models: [ModelDescriptor] = []
+    ) {
+        self.id = id
+        self.name = name
+        self.baseURL = baseURL
+        self.protocolKind = protocolKind
+        self.group = group ?? (isBuiltin ? "zai-family" : "standard-personal")
+        self.templateId = templateId
+        self.apiKeyManagementURL = apiKeyManagementURL
+        self.hasConfiguredAPIKey = hasConfiguredAPIKey
+        self.enabled = enabled
+        self.isBuiltin = isBuiltin
+        self.entitled = entitled
+        self.accountAvailability = accountAvailability
+        self.statusText = statusText
+        self.logoKey = logoKey
+        self.revision = revision
+        self.models = models
+    }
+}
+
+public struct ProviderTemplateDescriptor: Identifiable, Equatable {
+    public let id: String // exact templateId in zcode-builtin.json
+    public let name: String
+    public let category: String // "zhipu" | "other"
+    public let apiFormat: ProviderAPIFormat
+    public let defaultBaseURL: String
+    public let apiKeyURL: String?
+    public let logoSymbol: String
+    public let accentHex: UInt32
+    public let defaultModelIds: [String]
+
+    public static let officialCatalog: [ProviderTemplateDescriptor] = [
+        // Z.ai & BigModel Official Group
+        ProviderTemplateDescriptor(
+            id: "zai-api",
+            name: "Z.ai Coding Plan",
+            category: "zhipu",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://api.z.ai/api/anthropic",
+            apiKeyURL: "https://z.ai/manage-apikey/apikey-list",
+            logoSymbol: "sparkles",
+            accentHex: 0x3B82F6,
+            defaultModelIds: ["GLM-5.3", "GLM-5.3-Flash"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "zai-standard-api",
+            name: "Z.ai API",
+            category: "zhipu",
+            apiFormat: .openaiChatCompletions,
+            defaultBaseURL: "https://api.z.ai/api/paas/v4",
+            apiKeyURL: "https://z.ai/manage-apikey/apikey-list",
+            logoSymbol: "bolt.horizontal.circle.fill",
+            accentHex: 0x2563EB,
+            defaultModelIds: ["GLM-5.3", "GLM-5.3-Flash", "GLM-5V-Turbo", "GLM-5.1", "GLM-5.1-Highspeed", "GLM-5", "GLM-5-Turbo", "GLM-4.7"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "bigmodel-api",
+            name: "BigModel Coding Plan",
+            category: "zhipu",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://open.bigmodel.cn/api/anthropic",
+            apiKeyURL: "https://bigmodel.cn/coding-plan/personal/overview",
+            logoSymbol: "cpu.fill",
+            accentHex: 0x4F46E5,
+            defaultModelIds: ["GLM-5.3", "GLM-5.3-Flash"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "bigmodel-standard-api",
+            name: "BigModel API",
+            category: "zhipu",
+            apiFormat: .openaiChatCompletions,
+            defaultBaseURL: "https://open.bigmodel.cn/api/paas/v4",
+            apiKeyURL: "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+            logoSymbol: "server.rack",
+            accentHex: 0x6366F1,
+            defaultModelIds: ["GLM-5.3", "GLM-5.3-Flash", "GLM-5V-Turbo", "GLM-5.1", "GLM-5-Turbo", "GLM-4.7"]
+        ),
+        // Other Official Provider Templates (zcode-builtin.json)
+        ProviderTemplateDescriptor(
+            id: "anthropic",
+            name: "Anthropic",
+            category: "other",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://api.anthropic.com/v1",
+            apiKeyURL: "https://console.anthropic.com/settings/keys",
+            logoSymbol: "a.circle.fill",
+            accentHex: 0xD97757,
+            defaultModelIds: ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "openai",
+            name: "OpenAI",
+            category: "other",
+            apiFormat: .openaiResponses,
+            defaultBaseURL: "https://api.openai.com/v1",
+            apiKeyURL: "https://platform.openai.com/api-keys",
+            logoSymbol: "circle.hexagongrid.fill",
+            accentHex: 0x10A37F,
+            defaultModelIds: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6", "gpt-5.4", "gpt-5.4-pro", "gpt-5.4-mini", "gpt-5.3-codex"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "openrouter",
+            name: "OpenRouter",
+            category: "other",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://openrouter.ai/api",
+            apiKeyURL: "https://openrouter.ai/keys",
+            logoSymbol: "arrow.triangle.branch",
+            accentHex: 0x8B5CF6,
+            defaultModelIds: ["anthropic/claude-opus-5", "anthropic/claude-sonnet-5", "openai/gpt-5.6", "deepseek/deepseek-v4-pro", "z-ai/glm-5.3", "moonshotai/kimi-k3", "qwen/qwen3.8-max"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "deepseek",
+            name: "DeepSeek",
+            category: "other",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://api.deepseek.com/anthropic",
+            apiKeyURL: "https://platform.deepseek.com/api_keys",
+            logoSymbol: "waveform.path.ecg",
+            accentHex: 0x3B82F6,
+            defaultModelIds: ["deepseek-v4-pro", "deepseek-flash"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "moonshot-kimi",
+            name: "Kimi (Moonshot)",
+            category: "other",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://api.moonshot.cn/anthropic",
+            apiKeyURL: "https://platform.kimi.com/console/api-keys",
+            logoSymbol: "moon.stars.fill",
+            accentHex: 0x0EA5E9,
+            defaultModelIds: ["kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6", "k3-256k"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "minimax",
+            name: "MiniMax",
+            category: "other",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://api.minimaxi.com/anthropic",
+            apiKeyURL: "https://platform.minimaxi.com/console/access?tab=api-keys",
+            logoSymbol: "waveform.circle.fill",
+            accentHex: 0xEC4899,
+            defaultModelIds: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "xai",
+            name: "xAI (Grok)",
+            category: "other",
+            apiFormat: .openaiResponses,
+            defaultBaseURL: "https://api.x.ai/v1",
+            apiKeyURL: "https://console.x.ai",
+            logoSymbol: "xmark.diamond.fill",
+            accentHex: 0xA1A1AA,
+            defaultModelIds: ["grok-4.6", "grok-build-0.1", "grok-4.3"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "qwen-alibaba-model-studio-intl",
+            name: "Alibaba Cloud (Global)",
+            category: "other",
+            apiFormat: .openaiChatCompletions,
+            defaultBaseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            apiKeyURL: "https://modelstudio.console.aliyun.com/ap-southeast-1?tab=dashboard",
+            logoSymbol: "cloud.fill",
+            accentHex: 0xF97316,
+            defaultModelIds: ["qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3-vl-plus"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "qwen-alibaba-model-studio-cn",
+            name: "Alibaba Cloud (China)",
+            category: "other",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://dashscope.aliyuncs.com/apps/anthropic",
+            apiKeyURL: "https://bailian.console.aliyun.com/cn-beijing?tab=model",
+            logoSymbol: "cloud.bolt.fill",
+            accentHex: 0xFB923C,
+            defaultModelIds: ["qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3-vl-plus"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "xiaomi-mimo",
+            name: "Xiaomi MiMo API",
+            category: "other",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://api.xiaomimimo.com/anthropic",
+            apiKeyURL: "https://platform.xiaomimimo.com/",
+            logoSymbol: "bolt.circle.fill",
+            accentHex: 0xFF6900,
+            defaultModelIds: ["mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.5-pro", "mimo-v2.5"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "xiaomi-mimo-token-plan",
+            name: "Xiaomi MiMo Token Plan",
+            category: "other",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://token-plan-cn.xiaomimimo.com/anthropic",
+            apiKeyURL: "https://platform.xiaomimimo.com/",
+            logoSymbol: "bolt.badge.clock.fill",
+            accentHex: 0xFB923C,
+            defaultModelIds: ["mimo-v2.6-pro", "mimo-v2.6-flash"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "opencode-zen-messages",
+            name: "OpenCode Zen (Anthropic)",
+            category: "other",
+            apiFormat: .anthropicMessages,
+            defaultBaseURL: "https://opencode.ai/zen/v1",
+            apiKeyURL: "https://opencode.ai/zen",
+            logoSymbol: "terminal.fill",
+            accentHex: 0x14B8A6,
+            defaultModelIds: ["claude-sonnet-5", "claude-opus-5"]
+        ),
+        ProviderTemplateDescriptor(
+            id: "opencode-zen-responses",
+            name: "OpenCode Zen (Responses)",
+            category: "other",
+            apiFormat: .openaiResponses,
+            defaultBaseURL: "https://opencode.ai/zen/v1",
+            apiKeyURL: "https://opencode.ai/zen",
+            logoSymbol: "terminal",
+            accentHex: 0x0D9488,
+            defaultModelIds: ["gpt-5.4", "gpt-5.3-codex"]
+        )
+    ]
 }
 
 // MARK: - Sessions, Turns, Tools & Interactive Prompts
@@ -820,26 +1199,254 @@ public struct WorkflowGraphNode: Identifiable, Codable, Equatable {
     public var yRatio: Double
 }
 
-// MARK: - Enterprise Ecosystem & Settings Models
+// MARK: - Enterprise Ecosystem & Settings Models (1:1 ZCode v3.16.3)
+
+public enum SubagentColor: String, Codable, CaseIterable, Identifiable {
+    case yellow
+    case red
+    case orange
+    case green
+    case cyan
+    case blue
+    case purple
+    case pink
+
+    public var id: String { rawValue }
+
+    public var hex: UInt32 {
+        switch self {
+        case .yellow: return 0xEAB308
+        case .red: return 0xEF4444
+        case .orange: return 0xF97316
+        case .green: return 0x22C55E
+        case .cyan: return 0x06B6D4
+        case .blue: return 0x3B82F6
+        case .purple: return 0xA855F7
+        case .pink: return 0xEC4899
+        }
+    }
+}
+
+public enum SubagentPermissionMode: String, Codable, CaseIterable, Identifiable {
+    case `default` = "default"
+    case acceptEdits = "acceptEdits"
+    case plan = "plan"
+    case auto = "auto"
+    case dontAsk = "dontAsk"
+    case bypassPermissions = "bypassPermissions"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .default: return "Default"
+        case .acceptEdits: return "Accept Edits"
+        case .plan: return "Plan Only"
+        case .auto: return "Auto"
+        case .dontAsk: return "Don't Ask"
+        case .bypassPermissions: return "Bypass Permissions"
+        }
+    }
+}
+
+public struct SubagentBuiltInToolSpec: Identifiable, Equatable {
+    public let id: String
+    public let name: String
+    public let summary: String
+    public let isDestructiveOrMutating: Bool
+
+    /// Exact ZCode v3.16.3 `J7` built-in subagent tool catalog
+    public static let officialTools: [SubagentBuiltInToolSpec] = [
+        SubagentBuiltInToolSpec(id: "Read", name: "Read", summary: "Read files, images, and PDFs", isDestructiveOrMutating: false),
+        SubagentBuiltInToolSpec(id: "Grep", name: "Grep", summary: "Fast regex content search", isDestructiveOrMutating: false),
+        SubagentBuiltInToolSpec(id: "Glob", name: "Glob", summary: "Find files by path pattern", isDestructiveOrMutating: false),
+        SubagentBuiltInToolSpec(id: "Bash", name: "Bash", summary: "Execute shell commands", isDestructiveOrMutating: true),
+        SubagentBuiltInToolSpec(id: "Edit", name: "Edit", summary: "Modify existing files", isDestructiveOrMutating: true),
+        SubagentBuiltInToolSpec(id: "Write", name: "Write", summary: "Create or overwrite files", isDestructiveOrMutating: true),
+        SubagentBuiltInToolSpec(id: "WebFetch", name: "WebFetch", summary: "Fetch web documentation", isDestructiveOrMutating: false),
+        SubagentBuiltInToolSpec(id: "WebSearch", name: "WebSearch", summary: "Search live web sources", isDestructiveOrMutating: false),
+        SubagentBuiltInToolSpec(id: "TodoWrite", name: "TodoWrite", summary: "Track multi-step checklists", isDestructiveOrMutating: false)
+    ]
+}
+
+public struct SubagentDefinitionItem: Identifiable, Codable, Equatable {
+    public var id: String
+    public var name: String
+    public var description: String
+    public var systemPrompt: String
+    public var color: SubagentColor
+    public var scope: String // "built-in" | "user" | "workspace"
+    public var source: String // "built-in" | "user" | "plugin"
+    public var readOnly: Bool
+    public var enabled: Bool
+    /// Empty or `"inherit"` means inherit main conversation model
+    public var modelOverride: String
+    public var reasoningOverride: String // "inherit" | "off" | "low" | "medium" | "high" | "max"
+    /// Empty or contains `"*"` means All tools
+    public var allowedTools: [String]
+    public var permissionMode: SubagentPermissionMode
+    public var injectAgentsMd: Bool
+    public var runInBackground: Bool
+    public var filePath: String
+    public var pluginId: String?
+    public var pluginName: String?
+
+    public var isAllTools: Bool {
+        allowedTools.isEmpty || allowedTools.contains("*")
+    }
+
+    public var toolsSummary: String {
+        if isAllTools {
+            return "All tools"
+        }
+        if allowedTools.count <= 3 {
+            return allowedTools.joined(separator: ", ")
+        }
+        return "\(allowedTools.count) tools"
+    }
+
+    public var canOverrideModelInline: Bool {
+        if source == "built-in" {
+            let lower = name.lowercased()
+            return lower == "general-purpose" || lower == "explore"
+        }
+        return source == "plugin"
+    }
+
+    public var displayName: String {
+        if source == "plugin", let colonIdx = name.lastIndex(of: ":") {
+            return String(name[name.index(after: colonIdx)...])
+        }
+        return name
+    }
+
+    public init(
+        id: String,
+        name: String,
+        description: String,
+        systemPrompt: String = "You are a focused specialist subagent invoked by ZCode.",
+        color: SubagentColor = .blue,
+        scope: String = "user",
+        source: String = "user",
+        readOnly: Bool = false,
+        enabled: Bool = true,
+        modelOverride: String = "inherit",
+        reasoningOverride: String = "inherit",
+        allowedTools: [String] = ["*"],
+        toolsSummary: String? = nil,
+        permissionMode: SubagentPermissionMode = .default,
+        injectAgentsMd: Bool = true,
+        runInBackground: Bool = false,
+        filePath: String = "",
+        pluginId: String? = nil,
+        pluginName: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.description = description
+        self.systemPrompt = systemPrompt
+        self.color = color
+        self.scope = scope
+        self.source = source
+        self.readOnly = readOnly
+        self.enabled = enabled
+        self.modelOverride = modelOverride.isEmpty ? "inherit" : modelOverride
+        self.reasoningOverride = reasoningOverride
+        if let toolsSummary, allowedTools == ["*"], toolsSummary != "All tools" {
+            self.allowedTools = toolsSummary.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        } else {
+            self.allowedTools = allowedTools
+        }
+        self.permissionMode = permissionMode
+        self.injectAgentsMd = injectAgentsMd
+        self.runInBackground = runInBackground
+        self.filePath = filePath.isEmpty ? "~/.zcode/agents/\(name).md" : filePath
+        self.pluginId = pluginId
+        self.pluginName = pluginName
+    }
+}
 
 public struct MCPServerItem: Identifiable, Codable, Equatable {
     public var id: String
     public var name: String
+    public var scope: String // "user" | "workspace" | "plugin"
     public var transport: String // "stdio", "http", "sse"
     public var endpointOrCommand: String
+    public var args: [String]
+    public var protocolVersion: String // "auto" | "legacy" | "2026-07-28"
+    public var timeoutMs: Int
+    public var envOrHeadersJSON: String
     public var enabled: Bool
     public var connected: Bool
+    public var statusText: String
     public var tools: [String]
     public var resourcesCount: Int
+
+    public init(
+        id: String,
+        name: String,
+        scope: String = "user",
+        transport: String,
+        endpointOrCommand: String,
+        args: [String] = [],
+        protocolVersion: String = "auto",
+        timeoutMs: Int = 30_000,
+        envOrHeadersJSON: String = "{}",
+        enabled: Bool,
+        connected: Bool,
+        statusText: String? = nil,
+        tools: [String],
+        resourcesCount: Int
+    ) {
+        self.id = id
+        self.name = name
+        self.scope = scope
+        self.transport = transport
+        self.endpointOrCommand = endpointOrCommand
+        self.args = args
+        self.protocolVersion = protocolVersion
+        self.timeoutMs = timeoutMs
+        self.envOrHeadersJSON = envOrHeadersJSON
+        self.enabled = enabled
+        self.connected = connected
+        self.statusText = statusText ?? (connected ? "Connected" : (enabled ? "Disconnected" : "Disabled"))
+        self.tools = tools
+        self.resourcesCount = resourcesCount
+    }
 }
 
 public struct SkillCatalogItem: Identifiable, Codable, Equatable {
     public var id: String
     public var name: String
     public var summary: String
-    public var scope: String // "Built-in", "User", "Workspace", "Plugin"
+    public var scope: String // "Workspace", "User", "Plugin", "Built-in"
+    public var pluginName: String?
+    public var filePath: String
+    public var diagnosticWarning: String?
     public var enabled: Bool
     public var markdownBody: String
+
+    public init(
+        id: String,
+        name: String,
+        summary: String,
+        scope: String,
+        pluginName: String? = nil,
+        filePath: String = "",
+        diagnosticWarning: String? = nil,
+        enabled: Bool,
+        markdownBody: String
+    ) {
+        self.id = id
+        self.name = name
+        self.summary = summary
+        self.scope = scope
+        self.pluginName = pluginName
+        self.filePath = filePath.isEmpty ? "~/.zcode/skills/\(name)/SKILL.md" : filePath
+        self.diagnosticWarning = diagnosticWarning
+        self.enabled = enabled
+        self.markdownBody = markdownBody
+    }
 }
 
 public struct PluginCatalogItem: Identifiable, Codable, Equatable {
@@ -847,34 +1454,161 @@ public struct PluginCatalogItem: Identifiable, Codable, Equatable {
     public var name: String
     public var version: String
     public var marketplace: String
+    public var scope: String // "user" | "workspace"
+    public var author: String
     public var summary: String
+    public var componentBadges: [String] // e.g. ["Skills", "MCP", "Commands"]
+    public var updateAvailableVersion: String?
     public var installed: Bool
     public var enabled: Bool
-}
 
-public struct SubagentDefinitionItem: Identifiable, Codable, Equatable {
-    public var id: String
-    public var name: String
-    public var description: String
-    public var modelOverride: String
-    public var toolsSummary: String
-    public var enabled: Bool
+    public init(
+        id: String,
+        name: String,
+        version: String,
+        marketplace: String,
+        scope: String = "user",
+        author: String = "ZCode Official",
+        summary: String,
+        componentBadges: [String] = ["Skills", "MCP"],
+        updateAvailableVersion: String? = nil,
+        installed: Bool,
+        enabled: Bool
+    ) {
+        self.id = id
+        self.name = name
+        self.version = version
+        self.marketplace = marketplace
+        self.scope = scope
+        self.author = author
+        self.summary = summary
+        self.componentBadges = componentBadges
+        self.updateAvailableVersion = updateAvailableVersion
+        self.installed = installed
+        self.enabled = enabled
+    }
 }
 
 public struct SlashCommandItem: Identifiable, Codable, Equatable {
     public var id: String
     public var trigger: String // e.g. "/compact"
     public var summary: String
-    public var scope: String // "System", "User", "Project"
+    public var argumentHint: String
+    public var scope: String // "System", "User", "Project", "Plugin"
+    public var enabled: Bool
+    public var filePath: String
     public var promptTemplate: String
+
+    public init(
+        id: String,
+        trigger: String,
+        summary: String,
+        argumentHint: String = "",
+        scope: String,
+        enabled: Bool = true,
+        filePath: String = "",
+        promptTemplate: String
+    ) {
+        self.id = id
+        self.trigger = trigger.hasPrefix("/") || scope == "System" ? trigger : "/\(trigger)"
+        self.summary = summary
+        self.argumentHint = argumentHint
+        self.scope = scope
+        self.enabled = enabled
+        let cleanSlug = trigger.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        self.filePath = filePath.isEmpty ? "~/.zcode/commands/\(cleanSlug).md" : filePath
+        self.promptTemplate = promptTemplate
+    }
 }
 
 public struct HookRuleItem: Identifiable, Codable, Equatable {
+    public static let officialEvents: [String] = [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop"
+    ]
+
     public var id: String
-    public var event: String // "PreToolUse", "PostToolUse", "Stop"
+    public var event: String
     public var matcher: String
+    public var hookType: String // "command" | "process"
+    public var scope: String // "user" | "project" | "plugin"
     public var command: String
+    public var argsLines: String
+    public var shell: String
+    public var runAsync: Bool
+    public var timeoutSec: Int
+    public var statusMessage: String
+    public var editable: Bool
     public var enabled: Bool
+
+    public init(
+        id: String,
+        event: String,
+        matcher: String,
+        hookType: String = "command",
+        scope: String = "user",
+        command: String,
+        argsLines: String = "",
+        shell: String = "/bin/zsh",
+        runAsync: Bool = false,
+        timeoutSec: Int = 60,
+        statusMessage: String = "",
+        editable: Bool = true,
+        enabled: Bool
+    ) {
+        self.id = id
+        self.event = event
+        self.matcher = matcher
+        self.hookType = hookType
+        self.scope = scope
+        self.command = command
+        self.argsLines = argsLines
+        self.shell = shell
+        self.runAsync = runAsync
+        self.timeoutSec = timeoutSec
+        self.statusMessage = statusMessage
+        self.editable = editable
+        self.enabled = enabled
+    }
+}
+
+public struct ShortcutBindingItem: Identifiable, Codable, Equatable {
+    public var id: String
+    public var title: String
+    public var category: String // "Window", "Composer", "Workspace"
+    public var defaultBinding: String
+    public var customBinding: String?
+
+    public var activeBinding: String {
+        customBinding ?? defaultBinding
+    }
+
+    public static let officialDefaults: [ShortcutBindingItem] = [
+        ShortcutBindingItem(id: "openCommandCenter", title: "Open Command Center", category: "Window", defaultBinding: "⌘ K"),
+        ShortcutBindingItem(id: "openSettings", title: "Open Settings", category: "Window", defaultBinding: "⌘ ,"),
+        ShortcutBindingItem(id: "newTask", title: "New Task", category: "Workspace", defaultBinding: "⌘ N"),
+        ShortcutBindingItem(id: "openWorkspace", title: "Open Workspace", category: "Workspace", defaultBinding: "⌘ O"),
+        ShortcutBindingItem(id: "findInTask", title: "Find in Conversation", category: "Window", defaultBinding: "⌘ F"),
+        ShortcutBindingItem(id: "toggleSidebar", title: "Toggle Sidebar", category: "Window", defaultBinding: "⌘ B"),
+        ShortcutBindingItem(id: "toggleSidePane", title: "Toggle Side Pane", category: "Window", defaultBinding: "⌘ ⌥ B"),
+        ShortcutBindingItem(id: "toggleTerminal", title: "Toggle Integrated Terminal", category: "Window", defaultBinding: "⌘ J"),
+        ShortcutBindingItem(id: "switchTheme", title: "Switch Theme", category: "Window", defaultBinding: "⌘ ⇧ L"),
+        ShortcutBindingItem(id: "previousConversation", title: "Previous Conversation", category: "Workspace", defaultBinding: "⌘ ⇧ ["),
+        ShortcutBindingItem(id: "nextConversation", title: "Next Conversation", category: "Workspace", defaultBinding: "⌘ ⇧ ]"),
+        ShortcutBindingItem(id: "openModelMenu", title: "Open Model Selector", category: "Composer", defaultBinding: "⌃ M"),
+        ShortcutBindingItem(id: "cycleSessionMode", title: "Cycle Execution Mode", category: "Composer", defaultBinding: "⌃ ⇧ M"),
+        ShortcutBindingItem(id: "cycleThoughtLevel", title: "Cycle Reasoning Effort", category: "Composer", defaultBinding: "⌃ T"),
+        ShortcutBindingItem(id: "composerSend", title: "Send Prompt", category: "Composer", defaultBinding: "↩"),
+        ShortcutBindingItem(id: "composerInsertNewline", title: "Insert Newline in Composer", category: "Composer", defaultBinding: "⇧ ↩"),
+        ShortcutBindingItem(id: "zoomIn", title: "Zoom In", category: "Window", defaultBinding: "⌘ ="),
+        ShortcutBindingItem(id: "zoomOut", title: "Zoom Out", category: "Window", defaultBinding: "⌘ -"),
+        ShortcutBindingItem(id: "resetZoom", title: "Reset Zoom", category: "Window", defaultBinding: "⌘ 0")
+    ]
 }
 
 public struct MemoryNoteItem: Identifiable, Codable, Equatable {
