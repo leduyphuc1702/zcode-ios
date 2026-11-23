@@ -643,6 +643,15 @@ extension AppStore {
             guard let data = attachment.previewPNGData ?? attachment.filePath.flatMap({ try? Data(contentsOf: URL(fileURLWithPath: $0)) }),
                   !data.isEmpty else { continue }
             let mime = Self.mimeType(for: attachment, data: data)
+            if Self.needsHostFileCopy(kind: attachment.kind, data: data) {
+                do {
+                    let path = try await copyFileToHost(name: attachment.name, data: data)
+                    refs.append(["ref": path, "fileName": attachment.name, "mime": mime, "bytes": data.count])
+                    continue
+                } catch {
+                    showToast("Couldn't copy \(attachment.name) to the Mac: \(error.localizedDescription)")
+                }
+            }
             let totalChunks = max(1, Int((Double(data.count) / Double(Self.attachmentChunkBytes)).rounded(.up)))
             var base = v4WorkspaceArg(workspacePath, workspaceIdentityByPath[workspacePath])
             base["uploadId"] = "upl-\(UUID().uuidString.lowercased())"
@@ -923,6 +932,12 @@ extension AppStore {
             return stored
         }
         var mimeType = (refs[index]["mime"] as? String) ?? "application/octet-stream"
+        if ref.hasPrefix("/") {
+            let expected = ZCodeV4.int(refs[index]["bytes"]) ?? 0
+            let data = try await readFileBytesInRanges(path: ref, expectedSize: expected, maxBytes: Self.attachmentReadMaxBytes)
+            v4Sync.attachmentData[ref] = (data, mimeType)
+            return (data, mimeType)
+        }
         var arg = v4WorkspaceArg(v4Sync.conversationWorkspacePath, v4Sync.conversationWorkspaceIdentity)
         arg["sessionId"] = conv.sessionId
         arg["ref"] = ref

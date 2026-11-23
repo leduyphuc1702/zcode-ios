@@ -25,6 +25,7 @@
 		46A433FEB480BC3E8E1EBF85 /* SecurityLockAndPatternView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7FA08E0EA1DAE1C411E5E04 /* SecurityLockAndPatternView.swift */; };
 		4ACFF218AC976DCBC02095BA /* AppStore+TaskActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 083D3B036D45CF6C26DA4DD8 /* AppStore+TaskActivity.swift */; };
 		5356AFDEA782B7D7503BB95C /* ComposerPopoverUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44BE42D2921209F9F8768B95 /* ComposerPopoverUITests.swift */; };
+		5605B2B9D0D8E9CE5FB43278 /* AppStore+HostUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D4EF12E3C5A16D5FE4F2482 /* AppStore+HostUpload.swift */; };
 		573ECAD4B418BD6C3F0C6827 /* ToolCallRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CC03E7B38AE5C47F6668C48 /* ToolCallRowView.swift */; };
 		621AB09C4D015045CE6844F3 /* GitChangesAndDiffViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15A40B491EB56F3AE7155E1C /* GitChangesAndDiffViewer.swift */; };
 		676715276F3B14BC813F3BFF /* ConnectionURLParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 125718F257068BE4B56577A0 /* ConnectionURLParser.swift */; };
@@ -119,6 +120,7 @@
 		5488EF76DB8324D0A7407DD8 /* ZCode.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = ZCode.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		554C9AD2E62028B3EDF81784 /* SelectableMessageText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectableMessageText.swift; sourceTree = "<group>"; };
 		6B3A5C708941170C81CB0711 /* AppStore+ComposerCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppStore+ComposerCatalog.swift"; sourceTree = "<group>"; };
+		6D4EF12E3C5A16D5FE4F2482 /* AppStore+HostUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppStore+HostUpload.swift"; sourceTree = "<group>"; };
 		73C64FAD71928A73EA3A7019 /* ModelProviderSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelProviderSettingsView.swift; sourceTree = "<group>"; };
 		7627E9AA18A7E1A3D5DFCE5D /* ZCodeOnboardingAndHubView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeOnboardingAndHubView.swift; sourceTree = "<group>"; };
 		78029FC612DF7ACCAFC3A918 /* ZCodeModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZCodeModels.swift; sourceTree = "<group>"; };
@@ -155,6 +157,7 @@
 				BEEF67AED666A980DECF571A /* AppStore.swift */,
 				D041FD9000D2C96F8FB523C8 /* AppStore+AutomationsAndMarketplace.swift */,
 				6B3A5C708941170C81CB0711 /* AppStore+ComposerCatalog.swift */,
+				6D4EF12E3C5A16D5FE4F2482 /* AppStore+HostUpload.swift */,
 				0D2F70C50DC1875B9476E22D /* AppStore+Inspector.swift */,
 				085607869B2EC5917323082D /* AppStore+Live.swift */,
 				2128D27D251B616D8EE3E03E /* AppStore+PreviewTabs.swift */,
@@ -485,6 +488,7 @@
 				86C553DFBE825356589D7E7E /* AgentChatCanvasView.swift in Sources */,
 				2F2E6BB94A765EC11617BEA2 /* AppStore+AutomationsAndMarketplace.swift in Sources */,
 				1873203F0DAEA3DF88D5CF95 /* AppStore+ComposerCatalog.swift in Sources */,
+				5605B2B9D0D8E9CE5FB43278 /* AppStore+HostUpload.swift in Sources */,
 				16DA12BB2D613A83BA8E8241 /* AppStore+Inspector.swift in Sources */,
 				DB51EFE049A0DF9E91641E18 /* AppStore+Live.swift in Sources */,
 				EBE03949BA0666E1DF175628 /* AppStore+PreviewTabs.swift in Sources */,
@@ -606,7 +610,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 31616;
+				CURRENT_PROJECT_VERSION = 31617;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -715,7 +719,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 31616;
+				CURRENT_PROJECT_VERSION = 31617;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

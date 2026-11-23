@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Debug-only load timing harness. Inert unless launched with `ZCM_BENCH_URL` + `ZCM_BENCH_TOKEN`;
 /// release builds compile every hook to a no-op.
@@ -130,6 +131,19 @@ extension AppStore {
                 LoadBench.mark("refresh \(round) end tasks=\(self.sidebarVisibleTasks.count) lowest=\(lowest) tree=\(self.sidebarTreeLoaded)")
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 LoadBench.mark("refresh \(round) +3s tasks=\(self.sidebarVisibleTasks.count) tree=\(self.sidebarTreeLoaded) active=\(self.activeSessionId)")
+            }
+            for size in (LoadBench.environment["ZCM_BENCH_UPLOAD"] ?? "").split(separator: "|").compactMap({ Int($0) }) {
+                var bytes = [UInt8](repeating: 0, count: size)
+                for i in bytes.indices { bytes[i] = UInt8.random(in: 0...255) }
+                let data = Data(bytes)
+                let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                let begin = Date()
+                do {
+                    let path = try await self.copyFileToHost(name: "zcm-bench \(size).bin", data: data)
+                    LoadBench.mark("upload \(size) ok ms=\(Int(Date().timeIntervalSince(begin) * 1000)) sha=\(sha) path=\(path)")
+                } catch {
+                    LoadBench.mark("upload \(size) failed ms=\(Int(Date().timeIntervalSince(begin) * 1000)) error=\(error.localizedDescription)")
+                }
             }
             LoadBench.mark("done")
         }

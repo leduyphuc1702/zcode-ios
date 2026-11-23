@@ -484,3 +484,30 @@ final class V4ConversationCacheTests: XCTestCase {
         XCTAssertEqual(V4LocalCache.key("a", "b"), V4LocalCache.key("a", "b"))
     }
 }
+
+final class HostUploadTests: XCTestCase {
+    func testOnlyBinaryOrLargeFilesAreCopiedToTheMac() {
+        XCTAssertTrue(AppStore.needsHostFileCopy(kind: "file", data: Data([0x50, 0x4B, 0x03, 0x04, 0xFF, 0xFE])))
+        XCTAssertTrue(AppStore.needsHostFileCopy(kind: "file", data: Data(repeating: 0x61, count: 70_000)))
+        XCTAssertFalse(AppStore.needsHostFileCopy(kind: "file", data: Data("print(1)\n".utf8)))
+        XCTAssertFalse(AppStore.needsHostFileCopy(kind: "image", data: Data([0xFF, 0xD8, 0xFF, 0xE0])))
+        XCTAssertFalse(AppStore.needsHostFileCopy(kind: "pdf", data: Data(repeating: 0xFF, count: 70_000)))
+    }
+
+    func testUploadFileNameCannotEscapeTheFolder() {
+        XCTAssertEqual(AppStore.hostUploadFileName("../../etc/passwd"), "_.._etc_passwd")
+        XCTAssertEqual(AppStore.hostUploadFileName(".hidden.zip"), "hidden.zip")
+        XCTAssertEqual(AppStore.hostUploadFileName("  "), "attachment")
+        XCTAssertEqual(AppStore.hostUploadFileName("Báo cáo 1.xlsx"), "Báo cáo 1.xlsx")
+    }
+
+    func testUploadCommandIsSingleQuotedAndHidesMarkersFromEcho() {
+        let command = AppStore.hostUploadCommand(fileName: "it's.zip", base64Length: 12, sha256: String(repeating: "a", count: 64))
+        XCTAssertTrue(command.hasPrefix("exec /bin/sh -c '"))
+        XCTAssertTrue(command.hasSuffix("'\r"))
+        XCTAssertEqual(command.filter { $0 == "'" }.count, 2)
+        XCTAssertFalse(command.contains("__ZCM_READY"))
+        XCTAssertFalse(command.contains("__ZCM_DONE"))
+        XCTAssertTrue(command.contains("head -c 12 "))
+    }
+}
