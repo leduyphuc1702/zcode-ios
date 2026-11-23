@@ -8,6 +8,8 @@ public struct ChatTurnCardView: View {
     @Environment(\.zcodePalette) private var palette
     @State private var isThoughtExpanded: Bool = false
     @State private var showSelectTextSheet: Bool = false
+    @State private var showEditMessageSheet: Bool = false
+    @State private var editDraft: String = ""
 
     private enum MarkdownBlock: Identifiable {
         case paragraph(String)
@@ -29,6 +31,10 @@ public struct ChatTurnCardView: View {
         Group {
             if message.role == "user" {
                 userTurnBubble
+                    .sheet(isPresented: $showEditMessageSheet) {
+                        EditUserMessageSheet(store: store, message: message, initialText: editDraft)
+                            .environment(\.zcodePalette, palette)
+                    }
             } else {
                 assistantTurnView
             }
@@ -60,6 +66,17 @@ public struct ChatTurnCardView: View {
 
     private var hasQuotableContent: Bool {
         !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Desktop parity: the host marks editable user rows with `actions.canEdit`; the client never guesses.
+    private var canEditMessage: Bool {
+        guard !readOnly, message.role == "user", message.canEdit == true else { return false }
+        return store.v4CanEditUserMessage(message.id)
+    }
+
+    private func beginEditingMessage() {
+        editDraft = message.content
+        showEditMessageSheet = true
     }
 
     private func quoteText(_ text: String) {
@@ -138,6 +155,24 @@ public struct ChatTurnCardView: View {
                 .contextMenu {
                     messageContextMenuItems
                 }
+
+                if canEditMessage {
+                    HStack {
+                        Spacer(minLength: 0)
+                        Button {
+                            beginEditingMessage()
+                        } label: {
+                            Image(systemName: "pencil")
+                                .font(.system(size: 13, weight: .regular))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .frame(width: 32, height: 30)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Edit")
+                        .accessibilityIdentifier("editUserMessageButton_\(message.id)")
+                    }
+                }
             }
         }
     }
@@ -176,6 +211,16 @@ public struct ChatTurnCardView: View {
 
     @ViewBuilder
     private var messageContextMenuItems: some View {
+        if canEditMessage {
+            Button {
+                beginEditingMessage()
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+
+            Divider()
+        }
+
         if hasQuotableContent {
             Button {
                 quoteText(message.content)
@@ -511,5 +556,222 @@ public struct ChatTurnCardView: View {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "hh:mm a"
         return formatter.string(from: date)
+    }
+}
+
+// MARK: - Edit Sent Prompt (desktop `editUserQuery` parity)
+
+/// The desktop replaces the user bubble with its composer and offers Cancel / Send plus a "Reset chat + files"
+/// action (`chat.message.edit`, `chat.send`, `common.cancel`, `chat.edit.resetConversationAndFiles`). The mobile
+/// adaptation is a sheet with the same strings and the same host command.
+private struct EditUserMessageSheet: View {
+    @Bindable var store: AppStore
+    let message: ChatTurnMessage
+    @State private var draft: String
+    @State private var isSubmitting: Bool = false
+    @State private var errorText: String?
+    @State private var blockedConflict: BlockedEdit?
+    @State private var didFocusEditor: Bool = false
+    @FocusState private var isEditorFocused: Bool
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.zcodePalette) private var palette
+
+    private struct BlockedEdit: Identifiable {
+        let id = UUID()
+        let text: String
+    }
+
+    init(store: AppStore, message: ChatTurnMessage, initialText: String) {
+        self.store = store
+        self.message = message
+        _draft = State(initialValue: initialText)
+    }
+
+    private var rewindAvailability: String { message.editRewindAvailability ?? "unavailable" }
+
+    private var canRewindFiles: Bool { rewindAvailability == "available" }
+
+    private var rewindDisabledReason: String? {
+        switch rewindAvailability {
+        case "available":
+            return nil
+        case "noFiles":
+            return "This turn has no reversible file changes"
+        case "reverted":
+            return "This turn's file changes are already undone"
+        case "running":
+            return "Wait for the current work to stop"
+        default:
+            return "File reset is unavailable while compacting or an interaction is pending"
+        }
+    }
+
+    private var canSend: Bool {
+        guard !isSubmitting else { return false }
+        return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !message.attachments.isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if !message.attachments.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(message.attachments) { attachment in
+                                    HStack(spacing: 5) {
+                                        Image(systemName: attachment.kind == "comment" ? "text.bubble" : "paperclip")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(palette.foregroundSubtle)
+                                        Text(attachment.name)
+                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                            .foregroundStyle(palette.foreground)
+                                            .lineLimit(1)
+                                    }
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 5)
+                                    .background(palette.panel, in: Capsule())
+                                    .overlay(Capsule().strokeBorder(palette.borderStrong, lineWidth: 1))
+                                }
+                            }
+                        }
+                    }
+
+                    TextEditor(text: $draft)
+                        .font(.system(size: 15))
+                        .foregroundStyle(palette.foreground)
+                        .scrollContentBackground(.hidden)
+                        .focused($isEditorFocused)
+                        .frame(minHeight: 170, maxHeight: 320)
+                        .padding(8)
+                        .background(palette.inputBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(palette.borderStrong, lineWidth: 1)
+                        )
+                        .accessibilityIdentifier("editUserMessageEditor")
+
+                    if let errorText {
+                        Text(errorText)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(palette.destructive)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("editUserMessageError")
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button {
+                            submit(workspaceMode: "rewind")
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(.system(size: 13, weight: .medium))
+                                Text("Reset chat + files")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                Spacer()
+                                if isSubmitting {
+                                    ProgressView().controlSize(.mini)
+                                }
+                            }
+                            .foregroundStyle(canRewindFiles ? palette.foreground : palette.foregroundMuted)
+                            .padding(.horizontal, 12)
+                            .frame(height: 40)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(palette.surfaceHover, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .strokeBorder(palette.borderStrong, lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canRewindFiles || isSubmitting)
+                        .accessibilityLabel("Reset with files")
+                        .accessibilityIdentifier("editUserMessageRewindButton")
+
+                        if let rewindDisabledReason {
+                            Text(rewindDisabledReason)
+                                .font(.system(size: 12))
+                                .foregroundStyle(palette.foregroundMuted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(16)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .background(palette.background)
+            .navigationTitle("Edit")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(isSubmitting)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Send") { submit(workspaceMode: "preserve") }
+                        .disabled(!canSend)
+                        .accessibilityIdentifier("editUserMessageSendButton")
+                }
+            }
+        }
+        .task {
+            guard !didFocusEditor else { return }
+            didFocusEditor = true
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            isEditorFocused = true
+        }
+        .alert("Files could not be safely reset", isPresented: blockedConflictBinding) {
+            Button("Cancel", role: .cancel) { blockedConflict = nil }
+            Button("Reset chat only and send") {
+                let text = blockedConflict?.text ?? draft
+                blockedConflict = nil
+                submit(text: text, workspaceMode: "preserve")
+            }
+        } message: {
+            Text("No conversation history was changed. Review the conflicting or ignored files, then reset only the conversation or cancel.")
+        }
+    }
+
+    private var blockedConflictBinding: Binding<Bool> {
+        Binding(
+            get: { blockedConflict != nil },
+            set: { if !$0 { blockedConflict = nil } }
+        )
+    }
+
+    private func submit(workspaceMode: String) {
+        submit(text: draft, workspaceMode: workspaceMode)
+    }
+
+    private func submit(text: String, workspaceMode: String) {
+        guard !isSubmitting else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !message.attachments.isEmpty else { return }
+        isSubmitting = true
+        errorText = nil
+        isEditorFocused = false
+        Task { @MainActor in
+            do {
+                let result = try await store.v4EditUserQuery(
+                    messageId: message.id,
+                    newText: text,
+                    workspaceMode: workspaceMode,
+                    quotes: message.quotes ?? []
+                )
+                isSubmitting = false
+                if result.isBlocked {
+                    blockedConflict = BlockedEdit(text: text)
+                    return
+                }
+                store.playImpactHaptic(.light)
+                if result.disposition == .fork {
+                    await store.loadAllWorkspaceTasks(preferredActiveTaskId: nil)
+                }
+                dismiss()
+            } catch {
+                isSubmitting = false
+                errorText = "Couldn't edit message: \(error.localizedDescription)"
+            }
+        }
     }
 }

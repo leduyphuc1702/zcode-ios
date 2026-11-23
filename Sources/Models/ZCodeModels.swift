@@ -1007,6 +1007,10 @@ public struct ChatTurnMessage: Identifiable, Codable, Equatable {
     public var durationMs: Int
     public var feedback: Int // 0 none, 1 up, -1 down
     public var quotes: [ConversationQuote]? = nil
+    /// Host row action (`snapshot.rows.window[].actions.canEdit`); only the host decides which prompts are editable.
+    public var canEdit: Bool? = nil
+    /// Turn-level file rewind availability: "available" | "noFiles" | "reverted" | "running" | "unavailable".
+    public var editRewindAvailability: String? = nil
 }
 
 /// Host `snapshot.usage.contextWindow` (+ cumulative totals). Breakdown fractions sum to ~1.
@@ -1208,6 +1212,9 @@ public struct AgentTaskSession: Identifiable, Codable, Equatable {
     /// Count of pending permission / user-input interactions from the sessions index.
     public var pendingInteractionCount: Int = 0
     public var pendingInteractionIsUserInput: Bool = false
+    /// Live session activity (`__zcodeSessionActivity.phase`); nil when the host reports no activity.
+    public var activityPhase: String? = nil
+    public var hasBackgroundWork: Bool = false
 
     /// `task.title || (forkedFromTaskId ? "Forked task" : "New task")`.
     public var displayTitle: String {

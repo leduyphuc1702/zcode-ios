@@ -10,6 +10,7 @@ public struct WorkspaceSidebarView: View {
     @State private var searchQuery: String = ""
     @State private var showArchivedOnly: Bool = false
     @State private var renamingSession: AgentTaskSession?
+    @State private var deletingSession: AgentTaskSession?
     @State private var renameText: String = ""
     @State private var showAddProjectAlert: Bool = false
     @State private var newProjectName: String = ""
@@ -53,6 +54,18 @@ public struct WorkspaceSidebarView: View {
                 }
                 renamingSession = nil
             }
+        }
+        .alert("Delete task?", isPresented: Binding(
+            get: { deletingSession != nil },
+            set: { if !$0 { deletingSession = nil } }
+        ), presenting: deletingSession) { session in
+            Button("Cancel", role: .cancel) { deletingSession = nil }
+            Button("Delete", role: .destructive) {
+                store.deleteSession(session.id)
+                deletingSession = nil
+            }
+        } message: { session in
+            Text("\u{201C}\(session.displayTitle)\u{201D} and its conversation will be permanently deleted. This can't be undone.")
         }
         .alert("New project", isPresented: $showAddProjectAlert) {
             TextField("Folder path on your computer", text: $newProjectPath)
@@ -820,13 +833,11 @@ public struct WorkspaceSidebarView: View {
                     Label("Copy path", systemImage: "doc.on.doc")
                 }
             }
-            if session.archived {
-                Divider()
-                Button(role: .destructive) {
-                    store.deleteSession(session.id)
-                } label: {
-                    Label("Delete task", systemImage: "trash")
-                }
+            Divider()
+            Button(role: .destructive) {
+                deletingSession = session
+            } label: {
+                Label("Delete task", systemImage: "trash")
             }
         }
     }
@@ -856,9 +867,19 @@ public struct WorkspaceSidebarView: View {
                 .tint(palette.foregroundSubtle)
         case .none:
             if session.pinned {
-                Image(systemName: "pin")
-                    .font(.system(size: 11.5, weight: .regular))
-                    .foregroundStyle(palette.foregroundMuted)
+                Button {
+                    store.togglePinSession(session.id)
+                } label: {
+                    Image(systemName: "pin")
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(palette.foregroundSubtle)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .frame(width: 16, height: 16)
+                .accessibilityLabel("Unpin task")
+                .accessibilityIdentifier("taskPinButton_\(session.id)")
             } else {
                 Color.clear
             }

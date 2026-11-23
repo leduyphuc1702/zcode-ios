@@ -94,8 +94,10 @@ final class LiveSyncState {
     var backgroundedAt: Date?
     var rebootstrapTask: Task<Void, Never>?
     var bridgeRecoveryTask: Task<Void, Never>?
+    let controller = ControllerTaskIndexState()
 
     func reset() {
+        controller.reset()
         workspaceSubs.removeAll()
         activeTaskId = nil
         activeTaskSubId = nil
@@ -506,7 +508,9 @@ extension AppStore {
             for subId in [hostSettings.broadcastSubId, hostSettings.providerSubId].compactMap({ $0 }) {
                 await rpcClient.unlisten(subId)
             }
+            if let controllerSub = liveSync.controller.frameSubId { await rpcClient.unlisten(controllerSub) }
         }
+        liveSync.controller.reset()
         v4Sync.resetConnection()
         resetHostSettingsSubscriptions()
         liveSync.workspaceSubs.removeAll()
@@ -530,6 +534,7 @@ extension AppStore {
             await subscribeActiveTask(session)
         }
         await subscribeSessionsIndexes()
+        await subscribeControllerTaskIndex()
     }
 
     /// Live status badges for every session; over the relay only the bridged workspace is reachable.

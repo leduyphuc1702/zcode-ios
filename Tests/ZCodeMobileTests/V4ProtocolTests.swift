@@ -191,4 +191,125 @@ final class V4ConversationMapperTests: XCTestCase {
         XCTAssertEqual(messages[1].tokensOut, 99)
         XCTAssertEqual(ZCodeV4.int(targets[messages[1].id]?["rowId"]), 4)
     }
+
+    // MARK: Edit a sent prompt (`editUserQuery`)
+
+    private func makeConversation(rows: [[String: Any]]) -> V4ConversationState {
+        var conv = V4ConversationState(sessionId: "s1")
+        _ = conv.apply(frame: [
+            "payload": [
+                "kind": "snapshot",
+                "snapshot": [
+                    "seq": 1,
+                    "logEpoch": "E",
+                    "revision": 3,
+                    "rows": ["window": rows, "totalCount": rows.count, "firstRowId": 1]
+                ]
+            ]
+        ])
+        return conv
+    }
+
+    func testUserRowEditabilityComesOnlyFromHostActions() {
+        let conv = makeConversation(rows: [
+            ["rowId": 1, "turnId": "t1", "kind": "userInput", "origin": "realUser", "text": "First",
+             "entityId": "e1", "actions": ["canEdit": true, "canRewindFiles": true]],
+            ["rowId": 2, "turnId": "t1", "kind": "userInput", "origin": "realUser", "text": "Second",
+             "entityId": "e2"],
+            ["rowId": 3, "turnId": "t1", "kind": "turnHeader", "state": "completedSuccess",
+             "fileChanges": ["files": 2, "additions": 10, "deletions": 1, "state": "active"],
+             "actions": ["canRewindFiles": true]]
+        ])
+        let projection = V4ConversationMapper.project(conv) { _ in 0 }
+        let userMessages = projection.messages.filter { $0.role == "user" }
+        XCTAssertEqual(userMessages.map(\.content), ["First", "Second"])
+        XCTAssertEqual(userMessages[0].canEdit, true)
+        XCTAssertEqual(userMessages[0].editRewindAvailability, "available")
+        // The host did not advertise `canEdit` for the second row: the client must not invent it.
+        XCTAssertEqual(userMessages[1].canEdit, false)
+        XCTAssertEqual(projection.rowTargets["r1"]?["entityId"] as? String, "e1")
+    }
+
+    func testEditRewindAvailabilityMirrorsDesktopReasons() {
+        XCTAssertEqual(V4ConversationMapper.rewindAvailability(nil), "noFiles")
+        XCTAssertEqual(
+            V4ConversationMapper.rewindAvailability(["state": "completedSuccess", "fileChanges": ["files": 0]]),
+            "noFiles"
+        )
+        XCTAssertEqual(
+            V4ConversationMapper.rewindAvailability([
+                "state": "completedSuccess", "fileChanges": ["files": 1, "state": "reverted"]
+            ]),
+            "reverted"
+        )
+        XCTAssertEqual(
+            V4ConversationMapper.rewindAvailability([
+                "state": "running", "fileChanges": ["files": 1, "state": "active"],
+                "actions": ["canRewindFiles": true]
+            ]),
+            "running"
+        )
+        XCTAssertEqual(
+            V4ConversationMapper.rewindAvailability([
+                "state": "completedSuccess", "fileChanges": ["files": 1, "state": "active"]
+            ]),
+            "unavailable"
+        )
+        XCTAssertEqual(
+            V4ConversationMapper.rewindAvailability([
+                "state": "completedSuccess", "fileChanges": ["files": 1, "state": "active"],
+                "actions": ["canRewindFiles": true]
+            ]),
+            "available"
+        )
+    }
+
+    func testUserAttachmentRefsArePreservedForEditReplay() {
+        let rowAttachments: [[String: Any]] = [
+            ["ref": "upl-1", "fileName": "shot.png", "mime": "image/png", "bytes": 42]
+        ]
+        let conv = makeConversation(rows: [
+            ["rowId": 7, "turnId": "t1", "kind": "userInput", "origin": "realUser", "text": "Look",
+             "entityId": "e7", "actions": ["canEdit": true], "attachments": rowAttachments]
+        ])
+        let projection = V4ConversationMapper.project(conv) { _ in 0 }
+        XCTAssertEqual(projection.userAttachmentRefs["r7"]?.count, 1)
+        XCTAssertEqual(projection.userAttachmentRefs["r7"]?.first?["ref"] as? String, "upl-1")
+        XCTAssertEqual(projection.userAttachmentRefs["r7"]?.first?["mime"] as? String, "image/png")
+    }
+
+    func testEditUserQueryPayloadMatchesDesktopHelper() throws {
+        let payload = AppStore.editUserQueryPayload(
+            target: ["rowId": 7, "entityId": "e7"],
+            newText: "Edited prompt",
+            workspaceMode: "rewind",
+            quotes: [ConversationQuote(text: "quoted", path: "a.swift", senderName: "user", messageId: "r3")],
+            attachmentRefs: [["ref": "upl-1", "fileName": "shot.png", "mime": "image/png", "bytes": 42]],
+            selection: LiveModelSelection(providerId: "zai", modelId: "glm-5.1", reasoningLevel: "high")
+        )
+        XCTAssertEqual(payload["workspaceMode"] as? String, "rewind")
+        XCTAssertEqual(payload["newText"] as? String, "Edited prompt")
+        let target = try XCTUnwrap(payload["target"] as? [String: Any])
+        XCTAssertEqual(target["rowId"] as? Int, 7)
+        XCTAssertEqual(target["entityId"] as? String, "e7")
+        let attachments = try XCTUnwrap(payload["attachments"] as? [[String: Any]])
+        XCTAssertEqual(attachments.first?["ref"] as? String, "upl-1")
+        let quotes = try XCTUnwrap(payload["conversationQuotes"] as? [[String: Any]])
+        XCTAssertEqual(quotes.first?["text"] as? String, "quoted")
+        XCTAssertEqual(quotes.first?["path"] as? String, "a.swift")
+        let selection = try XCTUnwrap(payload["modelSelection"] as? [String: Any])
+        XCTAssertEqual(selection["providerId"] as? String, "zai")
+        XCTAssertEqual((selection["options"] as? [String: Any])?["reasoningLevel"] as? String, "high")
+    }
+
+    func testEditUserQueryResultClassifiesBlockedDisposition() {
+        var outcome = AppStore.V4EditUserQueryResult()
+        outcome.disposition = .blocked
+        outcome.reasonCode = "workspace.rewindConflict"
+        XCTAssertTrue(outcome.isBlocked)
+        outcome.disposition = .rewind
+        XCTAssertFalse(outcome.isBlocked)
+        outcome.disposition = nil
+        XCTAssertFalse(outcome.isBlocked)
+    }
 }

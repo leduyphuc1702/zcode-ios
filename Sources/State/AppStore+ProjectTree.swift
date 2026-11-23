@@ -57,6 +57,8 @@ extension AppStore {
                 }
                 task.pendingInteractionCount = existing.pendingInteractionCount
                 task.pendingInteractionIsUserInput = existing.pendingInteractionIsUserInput
+                task.activityPhase = existing.activityPhase
+                task.hasBackgroundWork = existing.hasBackgroundWork
                 task.subagentRuns = existing.subagentRuns
                 task.contextUsage = existing.contextUsage
                 task.goals = existing.goals
@@ -73,6 +75,10 @@ extension AppStore {
         }
         sessions = next
         sidebarTreeLoaded = true
+        applyControllerActivities()
+        if liveSync.controller.subscriptionId != nil {
+            Task { @MainActor in await self.registerControllerSources() }
+        }
 
         if let preferredActiveTaskId, next.contains(where: { $0.id == preferredActiveTaskId }) {
             activeSessionId = preferredActiveTaskId
@@ -366,15 +372,25 @@ extension AppStore {
 
 extension AgentTaskSession {
     /// `P7e`: session phase running/prewarming (or background work).
-    var isWorking: Bool { status == .running }
+    var isWorking: Bool { isPhaseRunning || hasBackgroundWork }
+
+    /// `N7e`: activity phase running/prewarming; the local conversation status covers hosts without activity.
+    var isPhaseRunning: Bool {
+        if let activityPhase { return activityPhase == "running" || activityPhase == "prewarming" }
+        return status == .running || status == .waitingApproval || status == .waitingQuestion || status == .waitingPlan
+    }
 
     /// `hit`: error > unread > loading > none.
     enum SidebarIndicator { case error, unread, loading, none }
 
     var sidebarIndicator: SidebarIndicator {
-        if status == .error || (status != .running && lastOutcomeError) { return .error }
+        if let activityPhase {
+            if activityPhase == "error" { return .error }
+        } else if status == .error || (!isPhaseRunning && lastOutcomeError) {
+            return .error
+        }
         if unread { return .unread }
-        if status == .running { return .loading }
+        if isPhaseRunning { return .loading }
         return .none
     }
 

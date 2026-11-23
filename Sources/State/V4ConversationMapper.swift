@@ -20,6 +20,8 @@ struct V4SessionProjection {
     var statusNotice: String?
     /// Row targets (`rowId`, `entityId`) for row-scoped commands, keyed by message id.
     var rowTargets: [String: [String: Any]] = [:]
+    /// Raw `userInput.attachments` refs keyed by message id; replayed verbatim by `editUserQuery`.
+    var userAttachmentRefs: [String: [[String: Any]]] = [:]
     var foregroundExecutionId: String?
     /// Running subagents (`snapshot.subagents.running` merged with `backgroundWorks`).
     var subagentRuns: [SubagentSessionRun] = []
@@ -81,6 +83,10 @@ enum V4ConversationMapper {
 
         applyInteractions((state["pendingInteractions"] as? [[String: Any]]) ?? [], into: &out, elicitationIndex: elicitationIndex)
         out.messages = messages(conv.rows, rowTargets: &out.rowTargets)
+        for row in conv.rows where (row["kind"] as? String) == "userInput" {
+            guard let rowId = ZCodeV4.int(row["rowId"]) else { continue }
+            out.userAttachmentRefs["r\(rowId)"] = (row["attachments"] as? [[String: Any]]) ?? []
+        }
         out.subagentRuns = runningSubagents(state)
         return out
     }
@@ -348,6 +354,10 @@ enum V4ConversationMapper {
                                              senderName: q["senderName"] as? String, messageId: q["messageId"] as? String)
                 }
                 msg.quotes = quotes.isEmpty ? nil : quotes
+                // Desktop gates the pencil on `row.actions.canEdit` plus an `entityId` row target (`Afn` in renderer).
+                let actions = row["actions"] as? [String: Any]
+                msg.canEdit = ((actions?["canEdit"] as? Bool) == true) && target["entityId"] != nil
+                msg.editRewindAvailability = turnId.map { rewindAvailability(turnHeaders[$0]) }
                 result.append(msg)
 
             case "reasoning", "assistantText", "toolCall", "subagent":
@@ -406,6 +416,18 @@ enum V4ConversationMapper {
     }
 
     static let agentToolNames: Set<String> = ["Agent", "Task", "subagent"]
+
+    /// Desktop renderer `re` (`editWorkspaceRewindAvailability`): turn file-change summary + header actions decide
+    /// whether "Reset chat + files" is offered inside the inline editor.
+    static func rewindAvailability(_ turnHeader: [String: Any]?) -> String {
+        let fileChanges = turnHeader?["fileChanges"] as? [String: Any]
+        let files = ZCodeV4.int(fileChanges?["files"]) ?? 0
+        if files <= 0 { return "noFiles" }
+        if (fileChanges?["state"] as? String) == "reverted" { return "reverted" }
+        if (turnHeader?["state"] as? String) == "running" { return "running" }
+        if ((turnHeader?["actions"] as? [String: Any])?["canRewindFiles"] as? Bool) == true { return "available" }
+        return "unavailable"
+    }
 
     /// `$sn`: subagent rows attach to the Agent tool call with the same `(turnId, toolCallId)`;
     /// a parentless row pairs only when its turn has exactly one unpaired Agent call and one unpaired subagent row.

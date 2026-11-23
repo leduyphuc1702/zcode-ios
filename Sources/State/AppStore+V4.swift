@@ -24,6 +24,8 @@ final class V4SyncState {
     var lifecycleAttempt = 0
     var publishTask: Task<Void, Never>?
     var rowTargets: [String: [String: Any]] = [:]
+    /// Raw attachment refs of user rows keyed by message id, replayed by `editUserQuery`.
+    var userAttachmentRefs: [String: [[String: Any]]] = [:]
     var foregroundExecutionId: String?
     var loadingOlder = false
     /// Read-only child conversation shown in the subagent pane (`subscribeConversationV4` on `childSessionId`).
@@ -254,6 +256,7 @@ extension AppStore {
         v4Sync.staged.removeAll()
         v4Sync.subscribeInFlight = session.id
         v4Sync.rowTargets.removeAll()
+        v4Sync.userAttachmentRefs.removeAll()
         v4Sync.assembler.reset(topic: conv.topic)
         defer { if v4Sync.subscribeInFlight == session.id { v4Sync.subscribeInFlight = nil } }
 
@@ -400,6 +403,7 @@ extension AppStore {
             liveSync.elicitations[id] = request
         }
         v4Sync.rowTargets = projection.rowTargets
+        v4Sync.userAttachmentRefs = projection.userAttachmentRefs
         v4Sync.foregroundExecutionId = projection.foregroundExecutionId
         if session != sessions[idx] { sessions[idx] = session }
     }
@@ -675,6 +679,104 @@ extension AppStore {
         v4Fire("retryTurn", payload: ["target": target], session: session, rowTarget: true, failure: "Couldn't retry")
     }
 
+    // MARK: - Edit a sent user prompt (`editUserQuery`)
+
+    /// Host ACK result of `editUserQuery`. `blocked` means the file rewind was refused and nothing was changed.
+    struct V4EditUserQueryResult: Equatable {
+        enum Disposition: String {
+            case rewind
+            case fork
+            case blocked
+        }
+
+        var disposition: Disposition?
+        var reasonCode: String?
+        /// Session that now owns the edited turn (a new id when the host chose to fork).
+        var sessionId: String?
+
+        init(disposition: Disposition? = nil, reasonCode: String? = nil, sessionId: String? = nil) {
+            self.disposition = disposition
+            self.reasonCode = reasonCode
+            self.sessionId = sessionId
+        }
+
+        var isBlocked: Bool { disposition == .blocked }
+    }
+
+    /// Desktop parity: the edit action only appears for `row.actions.canEdit` rows that carry an `entityId` target.
+    func v4CanEditUserMessage(_ messageId: String) -> Bool {
+        guard let session = activeSession, v4Owns(session.id) else { return false }
+        return v4Sync.rowTargets[messageId]?["entityId"] != nil
+    }
+
+    /// Pure `editUserQuery` payload builder, mirroring the desktop renderer's `Sa` helper.
+    static func editUserQueryPayload(
+        target: [String: Any],
+        newText: String,
+        workspaceMode: String,
+        quotes: [ConversationQuote],
+        attachmentRefs: [[String: Any]],
+        selection: LiveModelSelection?
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "target": target,
+            "newText": newText,
+            "workspaceMode": workspaceMode,
+            "attachments": attachmentRefs
+        ]
+        if !quotes.isEmpty {
+            payload["conversationQuotes"] = quotes.map { quote -> [String: Any] in
+                var q: [String: Any] = ["text": quote.text]
+                if let path = quote.path { q["path"] = path }
+                if let sender = quote.senderName { q["senderName"] = sender }
+                if let messageId = quote.messageId { q["messageId"] = messageId }
+                return q
+            }
+        }
+        if let selection { payload["modelSelection"] = selection.jsonObject }
+        return payload
+    }
+
+    /// Rewrites a sent prompt on the host. `workspaceMode` is `"preserve"` (conversation only, the desktop "Send"
+    /// button) or `"rewind"` (also restores the turn's files, "Reset chat + files").
+    ///
+    /// Returns only after the host ACK; the caller must not truncate local rows itself — the host snapshot after the
+    /// command is authoritative (`editUserQuery` rewinds host-side turns, so following rows disappear on next publish).
+    func v4EditUserQuery(
+        messageId: String,
+        newText: String,
+        workspaceMode: String,
+        quotes: [ConversationQuote]
+    ) async throws -> V4EditUserQueryResult {
+        guard let session = activeSession, v4Owns(session.id),
+              let target = v4Sync.rowTargets[messageId], target["entityId"] != nil else {
+            throw V4CommandError(status: "unavailable", reasonCode: nil, message: "This message can't be edited on the host right now.")
+        }
+        let payload = Self.editUserQueryPayload(
+            target: target,
+            newText: newText,
+            workspaceMode: workspaceMode,
+            quotes: quotes,
+            attachmentRefs: v4Sync.userAttachmentRefs[messageId] ?? [],
+            selection: modelSelection(for: session)
+        )
+        let ack = try await v4Command(
+            "editUserQuery",
+            payload: payload,
+            sessionId: session.id,
+            workspacePath: session.workspacePath,
+            cas: true,
+            rowTarget: true
+        )
+        var outcome = V4EditUserQueryResult()
+        if let result = ack["result"] as? [String: Any], (result["type"] as? String) == "editUserQuery" {
+            outcome.disposition = (result["disposition"] as? String).flatMap(V4EditUserQueryResult.Disposition.init(rawValue:))
+            outcome.reasonCode = result["reasonCode"] as? String
+            outcome.sessionId = result["sessionId"] as? String
+        }
+        return outcome
+    }
+
     // MARK: - Subagent child conversation (read-only pane)
 
     /// Opens the read-only transcript of a subagent's child session, like the desktop side pane (`wIn`).
@@ -898,35 +1000,25 @@ extension AppStore {
                 }
                 continue
             }
-            if v4Owns(sessionId) { continue }
             var session = sessions[idx]
-            if let title = (entry["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            if let title = (entry["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
+               !v4Owns(sessionId) {
                 session.title = title
             }
             let pendingKind = (entry["pendingInteraction"] as? [String: Any])?["kind"] as? String
+            var permission = pendingKind == "permission" ? 1 : 0
+            var userInput = pendingKind == "userInput" ? 1 : 0
             if let counts = entry["pendingInteractions"] as? [String: Any] {
-                let permission = Int(ZCodeV4.double(counts["permissionCount"]) ?? 0)
-                let userInput = Int(ZCodeV4.double(counts["userInputCount"]) ?? 0)
-                session.pendingInteractionCount = permission + userInput
-                session.pendingInteractionIsUserInput = userInput > 0
-            } else {
-                session.pendingInteractionCount = pendingKind == nil ? 0 : 1
-                session.pendingInteractionIsUserInput = pendingKind == "userInput"
+                permission = Int(ZCodeV4.double(counts["permissionCount"]) ?? 0)
+                userInput = Int(ZCodeV4.double(counts["userInputCount"]) ?? 0)
             }
-            session.status = {
-                if pendingKind == "permission" { return .waitingApproval }
-                if pendingKind == "userInput" { return .waitingQuestion }
-                switch entry["phase"] as? String {
-                case "running", "prewarming": return .running
-                case "error": return .error
-                case "completedSuccess": return .completed
-                default: return .idle
-                }
-            }()
-            if let activity = ZCodeV4.double(entry["lastActivityAt"]) {
-                let date = Date(timeIntervalSince1970: activity / 1000)
-                if date > session.updatedAt { session.updatedAt = date }
-            }
+            Self.applyActivity(phase: (entry["phase"] as? String) ?? "draft",
+                               hasBackgroundWork: (entry["hasBackgroundWork"] as? Bool) ?? false,
+                               permissionCount: permission,
+                               userInputCount: userInput,
+                               lastActivityAt: ZCodeV4.double(entry["lastActivityAt"]) ?? 0,
+                               ownsStatus: v4Owns(sessionId),
+                               to: &session)
             if session != sessions[idx] { sessions[idx] = session }
         }
         if unknown {

@@ -10,6 +10,19 @@ public struct AgentChatCanvasView: View {
     @State private var showRenameTaskAlert: Bool = false
     @State private var renameDraft: String = ""
 
+    /// Transcript stickiness: true while the reader is parked at the newest content (streaming follows it),
+    /// false once the reader deliberately scrolls up into history.
+    @State private var isPinnedToTranscriptBottom: Bool = true
+    /// Geometry used to tell "content grew" (keep following) from "reader scrolled up" (stop following).
+    @State private var transcriptViewportBottomY: CGFloat = 0
+    @State private var transcriptContentBottomY: CGFloat = 0
+    @State private var transcriptContentHeight: CGFloat = 0
+    @State private var transcriptLastDistance: CGFloat?
+    @State private var transcriptLastContentHeight: CGFloat?
+    @State private var transcriptLastViewportBottomY: CGFloat?
+    /// Session whose transcript the last recorded message diff belongs to (prevents cross-session id collisions).
+    @State private var transcriptMessagesSessionId: String?
+
     public init(store: AppStore, isWideLayout: Bool) {
         self.store = store
         self.isWideLayout = isWideLayout
@@ -48,13 +61,19 @@ public struct AgentChatCanvasView: View {
                                             }
                                         }
 
-                                        if session.status == .running && Self.isAwaitingFirstOutput(session) {
-                                            HStack(spacing: 8) {
-                                                ProgressView()
-                                                    .controlSize(.small)
-                                                Text("Working…")
-                                                    .font(.system(size: 13))
-                                                    .foregroundStyle(palette.foregroundSubtle)
+                                        if session.status == .running {
+                                            let turnStart = AppStore.runningTurnStart(session)
+                                            TimelineView(.periodic(from: .now, by: 1)) { context in
+                                                HStack(spacing: 8) {
+                                                    ProgressView()
+                                                        .controlSize(.small)
+                                                    Text(turnStart.map {
+                                                        "Working for \(AppStore.workDurationText(milliseconds: max(0, context.date.timeIntervalSince($0)) * 1000))"
+                                                    } ?? "Working…")
+                                                        .font(.system(size: 13))
+                                                        .foregroundStyle(palette.foregroundSubtle)
+                                                        .monospacedDigit()
+                                                }
                                             }
                                             .accessibilityIdentifier("chatWorkingIndicator")
                                         }
@@ -92,25 +111,62 @@ public struct AgentChatCanvasView: View {
 
                                         Color.clear
                                             .frame(height: 8)
-                                            .id("chat-bottom-anchor")
+                                            .id(Self.chatBottomAnchorID)
                                     }
                                     .padding(.horizontal, 16)
                                     .padding(.top, store.gitChanges.isEmpty ? 14 : 46)
-                                    .padding(.bottom, (store.showTodoTracker && session.todos.contains(where: { $0.status != "completed" })) ? 46 : 12)
+                                    .padding(.bottom, chatBottomContentInset(session))
                                     .frame(maxWidth: 820)
                                     .frame(maxWidth: .infinity)
+                                    .background(
+                                        GeometryReader { proxy in
+                                            Color.clear.preference(
+                                                key: ChatTranscriptContentMetricsKey.self,
+                                                value: ChatTranscriptMetrics(
+                                                    contentBottomY: proxy.frame(in: .global).maxY,
+                                                    contentHeight: proxy.size.height
+                                                )
+                                            )
+                                        }
+                                    )
                                 }
                                 .scrollDismissesKeyboard(.interactively)
-                                .onChange(of: session.messages.count) { _, _ in
-                                    withAnimation(.easeOut(duration: 0.2)) {
-                                        proxy.scrollTo("chat-bottom-anchor", anchor: .bottom)
+                                .background(
+                                    GeometryReader { proxy in
+                                        Color.clear.preference(
+                                            key: ChatTranscriptViewportBottomKey.self,
+                                            value: proxy.frame(in: .global).maxY
+                                        )
+                                    }
+                                )
+                                .onPreferenceChange(ChatTranscriptViewportBottomKey.self) { value in
+                                    transcriptViewportBottomY = value
+                                    refreshTranscriptPinState()
+                                }
+                                .onPreferenceChange(ChatTranscriptContentMetricsKey.self) { metrics in
+                                    transcriptContentBottomY = metrics.contentBottomY
+                                    transcriptContentHeight = metrics.contentHeight
+                                    refreshTranscriptPinState()
+                                    // Images / code blocks / syntax highlighting can grow the transcript without a
+                                    // message delta. While parked at the bottom, keep the newest row visible.
+                                    if isPinnedToTranscriptBottom, transcriptContentBottomY + chatBottomContentInset(session) - transcriptViewportBottomY > Self.transcriptPinEnterDistance {
+                                        proxy.scrollTo(Self.chatBottomAnchorID, anchor: .bottom)
                                     }
                                 }
-                                .onChange(of: Self.streamingFingerprint(session)) { _, _ in
-                                    proxy.scrollTo("chat-bottom-anchor", anchor: .bottom)
+                                // Session opens / re-opens: always land on the newest content when the transcript
+                                // (or a late V4 snapshot) finishes laying out.
+                                .task(id: session.id) {
+                                    resetTranscriptScrollTracking(for: session.id)
+                                    scrollTranscriptToBottom(proxy, redrawPasses: 2)
                                 }
-                                .onChange(of: session.id) { _, _ in
-                                    proxy.scrollTo("chat-bottom-anchor", anchor: .bottom)
+                                // Transcript changes: first load, streaming, and history-page prepends.
+                                .onChange(of: session.messages) { oldMessages, newMessages in
+                                    handleTranscriptMessagesChange(
+                                        sessionId: session.id,
+                                        from: oldMessages,
+                                        to: newMessages,
+                                        proxy: proxy
+                                    )
                                 }
                             }
 
@@ -635,9 +691,111 @@ public struct AgentChatCanvasView: View {
         return last.content.isEmpty && (last.thought ?? "").isEmpty && last.tools.isEmpty
     }
 
-    static func streamingFingerprint(_ session: AgentTaskSession) -> Int {
-        guard let last = session.messages.last else { return 0 }
-        return last.content.count &+ (last.thought?.count ?? 0) &* 7 &+ last.tools.count &* 131
+    // MARK: - Transcript scroll anchoring
+
+    private static let chatBottomAnchorID = "chat-bottom-anchor"
+    /// Distance from the viewport bottom within which the transcript counts as parked on the newest content.
+    private static let transcriptPinEnterDistance: CGFloat = 12
+    /// Distance after which a deliberate scroll-up unpins streaming auto-follow (hysteresis avoids flapping).
+    private static let transcriptPinExitDistance: CGFloat = 48
+
+    private func chatBottomContentInset(_ session: AgentTaskSession) -> CGFloat {
+        (store.showTodoTracker && session.todos.contains(where: { $0.status != "completed" })) ? 46 : 12
+    }
+
+    private func resetTranscriptScrollTracking(for sessionId: String) {
+        isPinnedToTranscriptBottom = true
+        transcriptMessagesSessionId = sessionId
+        transcriptViewportBottomY = 0
+        transcriptContentBottomY = 0
+        transcriptContentHeight = 0
+        transcriptLastDistance = nil
+        transcriptLastContentHeight = nil
+        transcriptLastViewportBottomY = nil
+    }
+
+    /// Distinguishes content growth (keep following the stream) from a deliberate scroll-up (stop following).
+    private func refreshTranscriptPinState() {
+        guard transcriptViewportBottomY > 0, transcriptContentBottomY > 0 else { return }
+        let inset = store.activeSession.map(chatBottomContentInset) ?? 12
+        let distance = transcriptContentBottomY + inset - transcriptViewportBottomY
+
+        let previousDistance = transcriptLastDistance
+        let previousHeight = transcriptLastContentHeight
+        let previousViewport = transcriptLastViewportBottomY
+        transcriptLastDistance = distance
+        transcriptLastContentHeight = transcriptContentHeight
+        transcriptLastViewportBottomY = transcriptViewportBottomY
+
+        guard let previousDistance, let previousHeight, let previousViewport else {
+            // First measurement after (re)opening a session: stay pinned; the open-time scroll owns the position.
+            return
+        }
+        // Anchor movement caused by layout (new rows, images, code blocks) is not a user scroll. A user scroll-up
+        // moves the content away from the viewport by more than the content itself grew.
+        let heightGrowth = transcriptContentHeight - previousHeight
+        let viewportDelta = transcriptViewportBottomY - previousViewport
+        let readerScrollUpDelta = (distance - previousDistance) - heightGrowth + viewportDelta
+
+        if distance <= Self.transcriptPinEnterDistance {
+            isPinnedToTranscriptBottom = true
+        } else if distance > Self.transcriptPinExitDistance, readerScrollUpDelta > 0.5 {
+            isPinnedToTranscriptBottom = false
+        }
+    }
+
+    /// Scrolls to the newest content and re-anchors once async layout settles (images, code blocks, deltas).
+    private func scrollTranscriptToBottom(_ proxy: ScrollViewProxy, animated: Bool = false, redrawPasses: Int = 0) {
+        let scroll = { proxy.scrollTo(Self.chatBottomAnchorID, anchor: .bottom) }
+        if animated {
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { scroll() }
+        } else {
+            scroll()
+        }
+        guard redrawPasses > 0 else { return }
+        Task { @MainActor in
+            for delayMs in [140, 420].prefix(redrawPasses) {
+                try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+                guard !Task.isCancelled, isPinnedToTranscriptBottom else { return }
+                proxy.scrollTo(Self.chatBottomAnchorID, anchor: .bottom)
+            }
+        }
+    }
+
+    private func handleTranscriptMessagesChange(
+        sessionId: String,
+        from oldMessages: [ChatTurnMessage],
+        to newMessages: [ChatTurnMessage],
+        proxy: ScrollViewProxy
+    ) {
+        // First diff for this session: treat it as an open/first load, never as a scrollable delta.
+        if transcriptMessagesSessionId != sessionId {
+            transcriptMessagesSessionId = sessionId
+            isPinnedToTranscriptBottom = true
+            scrollTranscriptToBottom(proxy, redrawPasses: 2)
+            return
+        }
+        guard !newMessages.isEmpty else { return }
+        // First load: an empty transcript becomes the session history (initial cache or a late V4 snapshot).
+        if oldMessages.isEmpty {
+            if isPinnedToTranscriptBottom {
+                scrollTranscriptToBottom(proxy, redrawPasses: 2)
+            }
+            return
+        }
+        // Older history page prepended (`conversationRowsRangeV4`): hold the reader's place on the old first row.
+        let prependedOlderPage = newMessages.count > oldMessages.count
+            && newMessages.last?.id == oldMessages.last?.id
+            && newMessages.first?.id != oldMessages.first?.id
+        if prependedOlderPage {
+            if let anchor = oldMessages.first?.id {
+                proxy.scrollTo(anchor, anchor: .top)
+            }
+            return
+        }
+        guard isPinnedToTranscriptBottom else { return }
+        let appendedRows = newMessages.count > oldMessages.count
+        scrollTranscriptToBottom(proxy, animated: appendedRows, redrawPasses: appendedRows ? 2 : 0)
     }
 
     private func planCard(_ plan: PlanReviewPrompt) -> some View {
@@ -839,3 +997,23 @@ public struct AgentChatCanvasView: View {
         }
     }
 }
+
+// MARK: - Transcript geometry probes
+
+/// Bottom edge of the transcript viewport in global coordinates.
+private struct ChatTranscriptViewportBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+private struct ChatTranscriptMetrics: Equatable {
+    var contentBottomY: CGFloat
+    var contentHeight: CGFloat
+}
+
+/// Bottom edge and height of the transcript content (before the bottom padding), in global coordinates.
+private struct ChatTranscriptContentMetricsKey: PreferenceKey {
+    static var defaultValue = ChatTranscriptMetrics(contentBottomY: 0, contentHeight: 0)
+    static func reduce(value: inout ChatTranscriptMetrics, nextValue: () -> ChatTranscriptMetrics) { value = nextValue() }
+}
+
