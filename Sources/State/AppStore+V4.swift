@@ -589,16 +589,24 @@ extension AppStore {
                     config["model"] = selection.modelId
                     if let level = selection.reasoningLevel { config["thought"] = level }
                 }
+                let treeProjectId = treeProjectIdForNewTask(session)
                 let ack = try await v4Command(
                     "createSession",
                     payload: ["workspaceId": ZCodeRPCClient.resolveWorkspaceKey(workspacePath: path, workspaceIdentity: identity), "config": config],
                     sessionId: nil,
-                    workspacePath: path
+                    workspacePath: path,
+                    projectId: treeProjectId
                 )
                 guard let created = (ack["result"] as? [String: Any])?["sessionId"] as? String, !created.isEmpty else {
                     throw V4CommandError(status: "failed", reasonCode: nil, message: "Host did not return a session id.")
                 }
-                if let sIdx = sessions.firstIndex(where: { $0.id == sessionId }) { sessions[sIdx].id = created }
+                if let sIdx = sessions.firstIndex(where: { $0.id == sessionId }) {
+                    sessions[sIdx].id = created
+                    if let treeProjectId {
+                        sessions[sIdx].treeProjectId = treeProjectId
+                        sessions[sIdx].inProjectTree = true
+                    }
+                }
                 if activeSessionId == sessionId { activeSessionId = created }
                 targetId = created
                 if let fresh = sessions.first(where: { $0.id == created }) { _ = await v4SubscribeConversation(fresh) }

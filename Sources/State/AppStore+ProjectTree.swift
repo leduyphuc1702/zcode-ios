@@ -359,6 +359,16 @@ extension AppStore {
         )
     }
 
+    /// Project a new task is created in: its sidebar project, else the project on the task's host rooted at its
+    /// workspace. The host files tasks created without one outside every project (`reserveCreatedTask`).
+    func treeProjectIdForNewTask(_ session: AgentTaskSession) -> String? {
+        if let id = session.treeProjectId { return id }
+        let path = session.workspacePath
+        guard !path.isEmpty, session.workspacePurpose != "conversation", !Self.isConversationWorkspace(path) else { return nil }
+        let candidates = sidebarProjects.filter { $0.hostId == session.hostId && $0.roots.contains(path) }
+        return (candidates.first { $0.primaryRoot == path } ?? candidates.first)?.id
+    }
+
     /// "New task" for a ZCode project (`treeProjectId`) or, with nil, a project-less conversation draft.
     public func createNewTask(treeProjectId: String?) {
         let project = treeProjectId.flatMap { id in sidebarProjects.first(where: { $0.id == id }) }

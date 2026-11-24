@@ -138,4 +138,25 @@ final class ProjectTreeTests: XCTestCase {
         XCTAssertEqual(WorkspaceSidebarView.timelineBucket(now.addingTimeInterval(-2 * 86_400), now: now), "2 days ago")
         XCTAssertEqual(WorkspaceSidebarView.timelineBucket(now.addingTimeInterval(-400 * 86_400), now: now), "Older")
     }
+    func testNewTaskIsCreatedInTheLocalProjectRootedAtItsWorkspace() throws {
+        let store = AppStore(seedDemoWorkspace: false)
+        store.sidebarProjects = [
+            SidebarProject(id: "remote", hostId: "remote:server:x", name: "app", roots: ["/Users/me/code/app"], primaryRoot: "/Users/me/code/app"),
+            SidebarProject(id: "multi", name: "mono", roots: ["/Users/me/code", "/Users/me/code/app"], primaryRoot: "/Users/me/code"),
+            SidebarProject(id: "local", name: "app", roots: ["/Users/me/code/app"], primaryRoot: "/Users/me/code/app")
+        ]
+        var draft = try XCTUnwrap(AppStore.treeTaskSession(from: rawTask("task-1", updated: 1_000)))
+        draft.treeProjectId = nil
+        XCTAssertEqual(store.treeProjectIdForNewTask(draft), "local")
+
+        draft.treeProjectId = "multi"
+        XCTAssertEqual(store.treeProjectIdForNewTask(draft), "multi", "a sidebar project choice wins")
+
+        draft.treeProjectId = nil
+        draft.workspacePath = "/Users/me/.zcode/workspace/draft-1"
+        XCTAssertNil(store.treeProjectIdForNewTask(draft), "conversation drafts stay outside projects")
+
+        draft.workspacePath = "/Users/me/elsewhere"
+        XCTAssertNil(store.treeProjectIdForNewTask(draft))
+    }
 }

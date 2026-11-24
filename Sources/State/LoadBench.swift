@@ -145,6 +145,52 @@ extension AppStore {
                     LoadBench.mark("upload \(size) failed ms=\(Int(Date().timeIntervalSince(begin) * 1000)) error=\(error.localizedDescription)")
                 }
             }
+            for spec in (LoadBench.environment["ZCM_BENCH_MOVE"] ?? "").split(separator: "|") {
+                let parts = spec.split(separator: ">").map(String.init)
+                guard parts.count == 3 else { continue }
+                do {
+                    _ = try await self.rpcClient.call(channel: "project", method: "moveTask", args: [.fromJSONObject(["task": ["taskId": parts[0], "workspacePath": parts[2]], "projectId": parts[1]])], timeoutSec: 15)
+                    LoadBench.mark("move \(parts[0]) ok")
+                } catch {
+                    LoadBench.mark("move \(parts[0]) failed \(error.localizedDescription)")
+                }
+            }
+            if let projectId = LoadBench.environment["ZCM_BENCH_CREATE"], !projectId.isEmpty {
+                self.createNewTask(treeProjectId: projectId)
+                if let idx = self.sessions.firstIndex(where: { $0.id == self.activeSessionId }) {
+                    self.sessions[idx].treeProjectId = nil
+                    let draft = self.sessions[idx]
+                    let resolved = self.treeProjectIdForNewTask(draft)
+                    LoadBench.mark("create resolved=\(resolved ?? "-") path=\(draft.workspacePath)")
+                    do {
+                        do { try await self.openBridge(for: draft) } catch { LoadBench.mark("create bridge failed \(error.localizedDescription)") }
+                        var shaken = await self.v4EnsureHandshake()
+                        if !shaken { try? await Task.sleep(nanoseconds: 3_000_000_000); shaken = await self.v4EnsureHandshake() }
+                        LoadBench.mark("create handshake=\(shaken) bridge=\(String(describing: await self.rpcClient.currentBridge()?.workspaceKey))")
+                        guard shaken else { throw V4CommandError(status: "failed", reasonCode: nil, message: "handshake") }
+                        let ack = try await self.v4Command(
+                            "createSession",
+                            payload: ["workspaceId": ZCodeRPCClient.resolveWorkspaceKey(workspacePath: draft.workspacePath, workspaceIdentity: self.workspaceIdentityByPath[draft.workspacePath]), "config": ["mode": "build"]],
+                            sessionId: nil,
+                            workspacePath: draft.workspacePath,
+                            projectId: resolved
+                        )
+                        LoadBench.mark("create session=\(((ack["result"] as? [String: Any])?["sessionId"] as? String) ?? "-")")
+                    } catch {
+                        LoadBench.mark("create failed \(error.localizedDescription)")
+                    }
+                }
+            }
+            for spec in (LoadBench.environment["ZCM_BENCH_DELETE"] ?? "").split(separator: "|") {
+                let parts = spec.split(separator: ">").map(String.init)
+                guard parts.count == 2 else { continue }
+                do {
+                    _ = try await self.rpcClient.call(channel: "zcode-task", method: "deleteTask", args: [.fromJSONObject(["taskId": parts[0], "workspacePath": parts[1]])], timeoutSec: 15)
+                    LoadBench.mark("delete \(parts[0]) ok")
+                } catch {
+                    LoadBench.mark("delete \(parts[0]) failed \(error.localizedDescription)")
+                }
+            }
             LoadBench.mark("done")
         }
     }

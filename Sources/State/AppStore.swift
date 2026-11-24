@@ -1087,6 +1087,7 @@ public final class AppStore {
                             "v4Create": true
                         ]
                         if let wsIdentity, !wsIdentity.isEmpty { createReq["workspaceIdentity"] = wsIdentity }
+                        if let projectId = treeProjectIdForNewTask(current) { createReq["projectId"] = projectId }
                         if let selection { createReq["modelSelection"] = selection.jsonObject }
                         let created = try await rpcClient.call(
                             channel: "zcode-task",
