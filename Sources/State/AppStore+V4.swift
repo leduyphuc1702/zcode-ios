@@ -414,6 +414,10 @@ extension AppStore {
     func v4Publish() {
         guard let conv = v4Sync.conversation, conv.hasSnapshot,
               let idx = sessions.firstIndex(where: { $0.id == conv.sessionId }) else { return }
+        #if DEBUG
+        let benchStart = Date()
+        defer { LoadBench.notePublish(Date().timeIntervalSince(benchStart) * 1000, messages: sessions.indices.contains(idx) ? sessions[idx].messages.count : 0) }
+        #endif
         let projection = V4ConversationMapper.project(conv) { [liveSync] id in liveSync.elicitationIndex[id] ?? 0 }
         var session = sessions[idx]
 

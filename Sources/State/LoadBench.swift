@@ -40,6 +40,15 @@ enum LoadBench {
         Task { @MainActor in mark(event) }
     }
 
+    static var publishCount = 0
+    static var publishMs = 0.0
+    static var publishMaxMs = 0.0
+    static var publishMsgs = 0
+    static func notePublish(_ ms: Double, messages: Int) {
+        guard enabled else { return }
+        publishCount += 1; publishMs += ms; publishMaxMs = max(publishMaxMs, ms); publishMsgs = messages
+    }
+
     /// Forced `project.readTree` failures, to exercise the slow-link fallbacks.
     static var failTreeLoads = 0
     static func consumeTreeFailure() -> Bool {
@@ -52,6 +61,7 @@ enum LoadBench {
     static func mark(_ event: String) {}
     nonisolated static func markAsync(_ event: String) {}
     static func noteLive(_ sessionId: String, _ how: String) {}
+    static func notePublish(_ ms: Double, messages: Int) {}
     #endif
 }
 
@@ -83,6 +93,21 @@ extension AppStore {
                 LoadBench.mark("select \(title) sameWorkspace=\(sameBridge) cachedMsgs=\(session.messages.count)")
                 self.selectSession(session)
                 await self.benchWaitForContent(session.id, label: title)
+            }
+            if let watch = Int(LoadBench.environment["ZCM_BENCH_WATCH"] ?? ""), watch > 0 {
+                for window in 0..<(watch / 5) {
+                    LoadBench.publishCount = 0; LoadBench.publishMs = 0; LoadBench.publishMaxMs = 0
+                    var stallMs = 0.0, maxStall = 0.0
+                    let end = Date().addingTimeInterval(5)
+                    while Date() < end {
+                        let t = Date()
+                        try? await Task.sleep(nanoseconds: 20_000_000)
+                        let late = Date().timeIntervalSince(t) * 1000 - 20
+                        if late > 30 { stallMs += late }
+                        maxStall = max(maxStall, late)
+                    }
+                    LoadBench.mark("watch \(window) publishes=\(LoadBench.publishCount) publishMs=\(Int(LoadBench.publishMs)) maxPublish=\(Int(LoadBench.publishMaxMs)) msgs=\(LoadBench.publishMsgs) mainStallMs=\(Int(stallMs)) maxStall=\(Int(maxStall)) status=\(self.activeSession?.status.rawValue ?? "-")")
+                }
             }
             for path in (LoadBench.environment["ZCM_BENCH_PREVIEW"] ?? "").split(separator: "|").map(String.init) {
                 for attempt in 0..<2 {

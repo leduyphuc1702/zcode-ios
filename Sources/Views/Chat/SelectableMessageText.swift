@@ -8,18 +8,40 @@ struct SelectableMessageText: UIViewRepresentable {
     var onQuote: ((String) -> Void)?
 
     init(markdown: String, font: UIFont, color: UIColor, lineSpacing: CGFloat, codeBackground: UIColor, linkColor: UIColor, onQuote: ((String) -> Void)? = nil) {
-        self.attributed = Self.render(markdown: markdown, font: font, color: color, lineSpacing: lineSpacing, codeBackground: codeBackground)
+        let key = "md|\(font.fontName)|\(font.pointSize)|\(Self.colorKey(color))|\(lineSpacing)|\(Self.colorKey(codeBackground))|\(markdown)" as NSString
+        if let cached = Self.renderCache.object(forKey: key) {
+            self.attributed = cached
+        } else {
+            let rendered = Self.render(markdown: markdown, font: font, color: color, lineSpacing: lineSpacing, codeBackground: codeBackground)
+            Self.renderCache.setObject(rendered, forKey: key, cost: markdown.utf16.count)
+            self.attributed = rendered
+        }
         self.linkColor = linkColor
         self.onQuote = onQuote
     }
 
     init(plain: String, font: UIFont, color: UIColor, lineSpacing: CGFloat, linkColor: UIColor, onQuote: ((String) -> Void)? = nil) {
-        self.attributed = NSAttributedString(string: plain, attributes: Self.baseAttributes(font: font, color: color, lineSpacing: lineSpacing))
+        let key = "txt|\(font.fontName)|\(font.pointSize)|\(Self.colorKey(color))|\(lineSpacing)|\(plain)" as NSString
+        if let cached = Self.renderCache.object(forKey: key) {
+            self.attributed = cached
+        } else {
+            let rendered = NSAttributedString(string: plain, attributes: Self.baseAttributes(font: font, color: color, lineSpacing: lineSpacing))
+            Self.renderCache.setObject(rendered, forKey: key, cost: plain.utf16.count)
+            self.attributed = rendered
+        }
         self.linkColor = linkColor
         self.onQuote = onQuote
     }
 
     private let linkColor: UIColor
+
+    /// Chat bodies are re-evaluated on every relayout (the running timer ticks each second), so parsed
+    /// markdown is reused instead of re-rendered for every message on every pass.
+    private static let renderCache: NSCache<NSString, NSAttributedString> = {
+        let cache = NSCache<NSString, NSAttributedString>()
+        cache.totalCostLimit = 8_000_000
+        return cache
+    }()
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -43,25 +65,42 @@ struct SelectableMessageText: UIViewRepresentable {
         context.coordinator.onQuote = onQuote
         tv.linkTextAttributes = [.foregroundColor: linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
         tv.tintColor = linkColor
-        if tv.attributedText != attributed {
+        if context.coordinator.text !== attributed {
+            context.coordinator.text = attributed
+            context.coordinator.measured.removeAll()
             tv.attributedText = attributed
         }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
-        let maxWidth = proposal.width ?? UIScreen.main.bounds.width
-        guard maxWidth > 0, maxWidth.isFinite else { return nil }
+        let proposed = proposal.width ?? UIScreen.main.bounds.width
+        guard proposed > 0, proposed.isFinite else { return nil }
+        // Proposals jitter by fractions of a point between passes; measuring at whole points keeps the
+        // answer stable, so the cache hits and the result can't feed back into another layout pass.
+        let maxWidth = max(1, floor(proposed))
+        let coordinator = context.coordinator
+        if coordinator.text !== attributed {
+            coordinator.text = attributed
+            coordinator.measured.removeAll()
+            uiView.attributedText = attributed
+        }
+        if let size = coordinator.measured[maxWidth] { return size }
         let bounds = attributed.boundingRect(
             with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             context: nil
         )
         let fitted = uiView.sizeThatFits(CGSize(width: maxWidth, height: .greatestFiniteMagnitude))
-        return CGSize(width: min(maxWidth, ceil(bounds.width) + 1), height: ceil(fitted.height))
+        let size = CGSize(width: min(maxWidth, ceil(bounds.width) + 1), height: ceil(fitted.height))
+        if coordinator.measured.count > 8 { coordinator.measured.removeAll() }
+        coordinator.measured[maxWidth] = size
+        return size
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var onQuote: ((String) -> Void)?
+        var text: NSAttributedString?
+        var measured: [CGFloat: CGSize] = [:]
 
         func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
             guard let onQuote, range.length > 0, let text = textView.text, let swiftRange = Range(range, in: text) else {
@@ -77,6 +116,12 @@ struct SelectableMessageText: UIViewRepresentable {
     }
 
     // MARK: - Rendering
+
+    private static func colorKey(_ color: UIColor) -> String {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        return String(format: "%.3f,%.3f,%.3f,%.3f", r, g, b, a)
+    }
 
     private static func baseAttributes(font: UIFont, color: UIColor, lineSpacing: CGFloat) -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
