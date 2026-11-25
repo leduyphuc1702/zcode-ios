@@ -8,7 +8,15 @@ public struct FileExplorerAndCodeViewer: View {
     @State private var expandedDirIds: Set<String> = ["dir-src", "dir-src-rpc", "dir-assets"]
     @State private var inFileSearch: String = ""
     @State private var showSearchField: Bool = false
-    @State private var commentingLineNumber: Int?
+    @State private var commentTarget: CommentTarget?
+
+    private struct CommentTarget {
+        let start: Int
+        let end: Int
+        let snippet: String
+
+        var label: String { start == end ? "\(start)" : "\(start)-\(end)" }
+    }
     @State private var commentDraft: String = ""
 
     @MainActor
@@ -148,32 +156,30 @@ public struct FileExplorerAndCodeViewer: View {
             }
         }
         .alert("Add Inline Code Comment", isPresented: Binding(
-            get: { commentingLineNumber != nil },
-            set: { if !$0 { commentingLineNumber = nil } }
+            get: { commentTarget != nil },
+            set: { if !$0 { commentTarget = nil } }
         )) {
-            TextField("Ask ZCode about this line...", text: $commentDraft)
+            TextField("Ask ZCode about this code...", text: $commentDraft)
             Button("Cancel", role: .cancel) {
-                commentingLineNumber = nil
+                commentTarget = nil
                 commentDraft = ""
             }
             Button("Attach to Chat") {
-                if let lineNum = commentingLineNumber, let file = currentFile {
-                    let lines = (file.textContent ?? "").components(separatedBy: "\n")
-                    let snippet = (lineNum - 1 < lines.count) ? lines[lineNum - 1] : ""
+                if let target = commentTarget, let file = currentFile {
                     store.addInlineCodeComment(
                         filePath: file.path,
-                        startLine: lineNum,
-                        endLine: lineNum,
-                        comment: commentDraft.isEmpty ? "Review line \(lineNum)" : commentDraft,
-                        snippet: snippet
+                        startLine: target.start,
+                        endLine: target.end,
+                        comment: commentDraft.isEmpty ? "Review line \(target.label)" : commentDraft,
+                        snippet: target.snippet
                     )
                 }
-                commentingLineNumber = nil
+                commentTarget = nil
                 commentDraft = ""
             }
         } message: {
-            if let ln = commentingLineNumber, let file = currentFile {
-                Text("\(file.path):\(ln)")
+            if let target = commentTarget, let file = currentFile {
+                Text("\(file.path):\(target.label)")
             }
         }
     }
@@ -510,53 +516,19 @@ public struct FileExplorerAndCodeViewer: View {
     // MARK: - Syntax Highlighted Code Canvas
 
     private func codeLinesView(file: WorkspaceFileNode, text: String) -> some View {
-        let syntaxColors = SyntaxColors.palette(for: store.syntaxTheme)
-        let lines = text.components(separatedBy: "\n")
-        let lang = SyntaxHighlighter.detectLanguage(for: file.path)
-
-        return ScrollView([.vertical, store.wrapCodeLines ? [] : .horizontal]) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(lines.enumerated()), id: \.offset) { idx, line in
-                    let lineNo = idx + 1
-                    HStack(alignment: .top, spacing: 0) {
-                        if store.showLineNumbers {
-                            Button {
-                                commentingLineNumber = lineNo
-                            } label: {
-                                HStack(spacing: 3) {
-                                    Text("\(lineNo)")
-                                        .font(.system(size: CGFloat(store.codeFontSize - 1), design: .monospaced))
-                                        .foregroundStyle(syntaxColors.gutterText)
-                                        .frame(width: 38, alignment: .trailing)
-                                    Image(systemName: "plus.bubble")
-                                        .font(.system(size: 9))
-                                        .foregroundStyle(syntaxColors.gutterText.opacity(0.6))
-                                }
-                                .padding(.trailing, 8)
-                                .padding(.vertical, 2.5)
-                                .background(syntaxColors.gutterBackground)
-                            }
-                            .buttonStyle(.plain)
-                        }
-
-                        Text(SyntaxHighlighter.highlightLine(
-                            line,
-                            language: lang,
-                            theme: store.syntaxTheme,
-                            fontSize: CGFloat(store.codeFontSize),
-                            searchQuery: inFileSearch
-                        ))
-                        .fixedSize(horizontal: !store.wrapCodeLines, vertical: true)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 2.5)
-                        .textSelection(.enabled)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+        SelectableCodeView(
+            text: text,
+            language: SyntaxHighlighter.detectLanguage(for: file.path),
+            theme: store.syntaxTheme,
+            fontSize: CGFloat(store.codeFontSize),
+            wrapLines: store.wrapCodeLines,
+            showLineNumbers: store.showLineNumbers,
+            searchQuery: inFileSearch,
+            onComment: { start, end, snippet in
+                commentTarget = CommentTarget(start: start, end: end, snippet: snippet)
             }
-            .padding(.vertical, 8)
-        }
-        .background(syntaxColors.background)
+        )
+        .background(SyntaxColors.palette(for: store.syntaxTheme).background)
     }
 
     // MARK: - Recursive File Tree Row

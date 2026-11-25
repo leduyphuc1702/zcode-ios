@@ -142,6 +142,11 @@ extension AppStore {
         }) {
             return exact
         }
+        let root = inspectorWorkspacePath
+        if !root.isEmpty, rawPath.hasPrefix(root + "/") {
+            let relative = String(rawPath.dropFirst(root.count + 1))
+            if let node = all.first(where: { !$0.isDirectory && $0.path == relative }) { return node }
+        }
         guard !rawPath.hasPrefix("/"), !rawPath.hasPrefix("~") else { return nil }
         let normalized = rawPath.hasPrefix("./") ? String(rawPath.dropFirst(2)) : rawPath
         return all.first(where: {
@@ -350,6 +355,20 @@ extension AppStore {
             if cached == nil { current.errorMessage = previewErrorMessage(for: error, path: current.displayPath) }
             previewTabs.replace(current)
         }
+    }
+
+    /// Bytes of a host image referenced from an assistant message (desktop `readMediaPreview`), shared with
+    /// the preview tab's on-device cache so opening it afterwards is instant.
+    func chatImageData(path: String) async -> Data? {
+        if let node = workspaceFileMatch(rawPath: path), let data = node.binaryData, !data.isEmpty { return data }
+        let cacheKey = V4LocalCache.key("file-preview", activeConnectionId, path)
+        if let cached = await V4LocalCache.loadAttachment(key: cacheKey) { return cached.data }
+        guard isLiveHostConnected, !isUITestSeededMode else { return nil }
+        guard let info = try? await statHostFileInfo(path: path), info.size <= Self.inspectorMaxImagePreviewBytes,
+              let data = try? await readFileBytesInRanges(path: path, expectedSize: info.size, maxBytes: Self.inspectorMaxImagePreviewBytes),
+              !data.isEmpty else { return nil }
+        V4LocalCache.saveAttachment(data, mimeType: Self.previewCacheStamp(info), key: cacheKey)
+        return data
     }
 
     private static func previewCacheStamp(_ info: (size: Int, mtimeMs: Double?)) -> String {

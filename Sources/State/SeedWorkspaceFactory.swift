@@ -434,7 +434,7 @@ public enum SeedWorkspaceFactory {
                 ChatTurnMessage(
                     id: "msg-2",
                     role: "assistant",
-                    content: "> 13-byte Big-Endian SocketFrameHeader + IEEE 802.3 CRC32 verification enabled across Direct WS and Cloud Relay V2.\n\nKey changes completed:\n\n- Implemented deterministic `SocketFrameHeader` encoding in `src/rpc/SocketProtocol.swift` with zero-copy payload framing.\n- Added multi-fragment `rpc-frame` assembly in `src/rpc/RelayMultiplexer.ts` and rendered the diagram at `assets/architecture-overview.png`.\n\nTap `Changes` above or the right side-pane toggle to inspect files, images, PDFs, or Git diffs.",
+                    content: "> 13-byte Big-Endian SocketFrameHeader + IEEE 802.3 CRC32 verification enabled across Direct WS and Cloud Relay V2.\n\nKey changes completed:\n\n- Implemented deterministic `SocketFrameHeader` encoding in `src/rpc/SocketProtocol.swift` with zero-copy payload framing.\n- Added multi-fragment `rpc-frame` assembly in [RelayMultiplexer.ts](src/rpc/RelayMultiplexer.ts) and rendered the diagram:\n\n![Architecture overview](assets/architecture-overview.png)\n\nTap `Changes` above or the right side-pane toggle to inspect files, images, PDFs, or Git diffs.",
                     thought: "Inspecting server-core.js SocketProtocol framing: 1-byte messageType (0x01 Regular), 4-byte sequenceId BE, 4-byte acknowledgeId BE, and 4-byte payload byteLength BE. Relay V2 wraps chunks in base64 with lowercase 8-char IEEE 802.3 CRC32 verification.",
                     thoughtDurationMs: 1840,
                     tools: [

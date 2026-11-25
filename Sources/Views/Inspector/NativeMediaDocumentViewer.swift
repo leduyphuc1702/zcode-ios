@@ -433,40 +433,14 @@ public struct NativeMediaDocumentViewer: View {
     // MARK: - Native Syntax Text Viewer with Line Numbers
 
     private func nativeTextWithLineNumbers(tab: InspectorPreviewTab, text: String) -> some View {
-        let syntaxColors = SyntaxColors.palette(for: store.syntaxTheme)
-        let lines = text.components(separatedBy: "\n")
-        let lang = SyntaxHighlighter.detectLanguage(for: tab.path)
-
-        return ScrollView([.vertical, store.wrapCodeLines ? [] : .horizontal]) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(lines.enumerated()), id: \.offset) { idx, line in
-                    HStack(alignment: .top, spacing: 0) {
-                        Text("\(idx + 1)")
-                            .font(.system(size: CGFloat(store.codeFontSize - 1), design: .monospaced))
-                            .foregroundStyle(syntaxColors.gutterText)
-                            .frame(width: 42, alignment: .trailing)
-                            .padding(.trailing, 8)
-                            .padding(.vertical, 2.5)
-                            .background(syntaxColors.gutterBackground)
-
-                        Text(SyntaxHighlighter.highlightLine(
-                            line,
-                            language: lang,
-                            theme: store.syntaxTheme,
-                            fontSize: CGFloat(store.codeFontSize),
-                            searchQuery: ""
-                        ))
-                        .fixedSize(horizontal: !store.wrapCodeLines, vertical: true)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 2.5)
-                        .textSelection(.enabled)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            .padding(.vertical, 8)
-        }
-        .background(syntaxColors.background)
+        SelectableCodeView(
+            text: text,
+            language: SyntaxHighlighter.detectLanguage(for: tab.path),
+            theme: store.syntaxTheme,
+            fontSize: CGFloat(store.codeFontSize),
+            wrapLines: store.wrapCodeLines
+        )
+        .background(SyntaxColors.palette(for: store.syntaxTheme).background)
     }
 
     // MARK: - Native Pinch-Zoom Image Inspector

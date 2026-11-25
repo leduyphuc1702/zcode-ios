@@ -6,8 +6,10 @@ import UIKit
 struct SelectableMessageText: UIViewRepresentable {
     let attributed: NSAttributedString
     var onQuote: ((String) -> Void)?
+    /// Handles a tapped link (file paths open the preview pane, web links the browser).
+    var onOpenLink: ((URL) -> Void)?
 
-    init(markdown: String, font: UIFont, color: UIColor, lineSpacing: CGFloat, codeBackground: UIColor, linkColor: UIColor, onQuote: ((String) -> Void)? = nil) {
+    init(markdown: String, font: UIFont, color: UIColor, lineSpacing: CGFloat, codeBackground: UIColor, linkColor: UIColor, onQuote: ((String) -> Void)? = nil, onOpenLink: ((URL) -> Void)? = nil) {
         let key = "md|\(font.fontName)|\(font.pointSize)|\(Self.colorKey(color))|\(lineSpacing)|\(Self.colorKey(codeBackground))|\(markdown)" as NSString
         if let cached = Self.renderCache.object(forKey: key) {
             self.attributed = cached
@@ -18,6 +20,7 @@ struct SelectableMessageText: UIViewRepresentable {
         }
         self.linkColor = linkColor
         self.onQuote = onQuote
+        self.onOpenLink = onOpenLink
     }
 
     init(plain: String, font: UIFont, color: UIColor, lineSpacing: CGFloat, linkColor: UIColor, onQuote: ((String) -> Void)? = nil) {
@@ -63,6 +66,7 @@ struct SelectableMessageText: UIViewRepresentable {
 
     func updateUIView(_ tv: UITextView, context: Context) {
         context.coordinator.onQuote = onQuote
+        context.coordinator.onOpenLink = onOpenLink
         tv.linkTextAttributes = [.foregroundColor: linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
         tv.tintColor = linkColor
         if context.coordinator.text !== attributed {
@@ -99,6 +103,7 @@ struct SelectableMessageText: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var onQuote: ((String) -> Void)?
+        var onOpenLink: ((URL) -> Void)?
         var text: NSAttributedString?
         var measured: [CGFloat: CGSize] = [:]
 
@@ -112,6 +117,11 @@ struct SelectableMessageText: UIViewRepresentable {
                 textView.selectedTextRange = nil
             }
             return UIMenu(children: [quote] + suggestedActions)
+        }
+
+        func textView(_ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction) -> UIAction? {
+            guard case .link(let url) = textItem.content, let onOpenLink else { return defaultAction }
+            return UIAction(title: defaultAction.title, image: defaultAction.image) { _ in onOpenLink(url) }
         }
     }
 
@@ -152,7 +162,7 @@ struct SelectableMessageText: UIViewRepresentable {
             if intent.contains(.strikethrough) {
                 attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
             }
-            if let link = run.link {
+            if let link = run.link ?? run.imageURL {
                 attrs[.link] = link
             }
             out.append(NSAttributedString(string: String(parsed[run.range].characters), attributes: attrs))

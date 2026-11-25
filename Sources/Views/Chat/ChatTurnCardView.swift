@@ -18,6 +18,7 @@ public struct ChatTurnCardView: View {
         case blockquote(String)
         case bulletList([String])
         case codeBlock(String)
+        case images([(alt: String, source: String)])
 
         var id: String {
             switch self {
@@ -25,6 +26,7 @@ public struct ChatTurnCardView: View {
             case .blockquote(let s): return "q-\(s.hashValue)"
             case .bulletList(let items): return "ul-\(items.joined().hashValue)"
             case .codeBlock(let c): return "code-\(c.hashValue)"
+            case .images(let items): return "img-\(items.map(\.source).joined().hashValue)"
             }
         }
     }
@@ -270,8 +272,25 @@ public struct ChatTurnCardView: View {
             lineSpacing: lineSpacing,
             codeBackground: codeSpanBackground,
             linkColor: UIColor(palette.accentBlue),
-            onQuote: selectionQuoteHandler
+            onQuote: selectionQuoteHandler,
+            onOpenLink: openMessageLink
         )
+    }
+
+    /// Desktop transcript links: targets that resolve to a host file open in the preview pane, web links open
+    /// in the browser, anything else stays inert text.
+    private func openMessageLink(_ url: URL) {
+        if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+            UIApplication.shared.open(url)
+            return
+        }
+        guard let target = resolveMessageFile(url.absoluteString) else { return }
+        store.openFileInInspector(pathOrId: target.path, preferPreview: true)
+    }
+
+    private func resolveMessageFile(_ href: String) -> ChatFileLink.Target? {
+        let workspace = store.activeSession?.workspacePath
+        return ChatFileLink.resolve(href, workspacePath: workspace, homePath: ChatFileLink.homePath(forWorkspace: workspace))
     }
 
     // MARK: - Assistant Turn (Official ZCode Editorial Typography & Action Row)
@@ -386,6 +405,15 @@ public struct ChatTurnCardView: View {
 
                         case .paragraph(let paragraphText):
                             selectableMarkdown(paragraphText, size: 15.5, color: palette.foreground, lineSpacing: 4.5)
+
+                        case .images(let items):
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                                        ChatMarkdownImage(store: store, alt: item.alt, source: item.source, path: resolveMessageFile(item.source)?.path)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -474,6 +502,19 @@ public struct ChatTurnCardView: View {
                 continue
             }
 
+            if Self.markdownImage(trimmed) != nil {
+                var items: [(alt: String, source: String)] = []
+                while idx < lines.count {
+                    let t = lines[idx].trimmingCharacters(in: .whitespaces)
+                    if t.isEmpty { idx += 1; continue }
+                    guard let image = Self.markdownImage(t) else { break }
+                    items.append(image)
+                    idx += 1
+                }
+                blocks.append(.images(items))
+                continue
+            }
+
             if trimmed.hasPrefix(">") {
                 var quoteLines: [String] = []
                 while idx < lines.count && lines[idx].trimmingCharacters(in: .whitespaces).hasPrefix(">") {
@@ -504,7 +545,7 @@ public struct ChatTurnCardView: View {
             var paraLines: [String] = []
             while idx < lines.count {
                 let t = lines[idx].trimmingCharacters(in: .whitespaces)
-                if t.isEmpty || t.hasPrefix(">") || t.hasPrefix("```") || t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("• ") {
+                if t.isEmpty || t.hasPrefix(">") || t.hasPrefix("```") || t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("• ") || Self.markdownImage(t) != nil {
                     break
                 }
                 paraLines.append(lines[idx])
@@ -515,6 +556,19 @@ public struct ChatTurnCardView: View {
             }
         }
         return blocks
+    }
+
+    /// A line holding only `![alt](source)` renders as an image, like the desktop's standalone image paragraphs.
+    static func markdownImage(_ line: String) -> (alt: String, source: String)? {
+        guard line.hasPrefix("!["), line.hasSuffix(")"), let close = line.range(of: "](") else { return nil }
+        let alt = String(line[line.index(line.startIndex, offsetBy: 2)..<close.lowerBound])
+        var source = String(line[close.upperBound..<line.index(before: line.endIndex)]).trimmingCharacters(in: .whitespaces)
+        if let titleStart = source.range(of: " \"", options: .backwards), source.hasSuffix("\"") {
+            source = String(source[..<titleStart.lowerBound])
+        }
+        if source.hasPrefix("<"), source.hasSuffix(">") { source = String(source.dropFirst().dropLast()) }
+        guard !alt.contains("]"), !source.isEmpty, !source.contains("\n") else { return nil }
+        return (alt, source)
     }
 }
 
@@ -877,5 +931,93 @@ struct UserAttachmentThumbnail: View {
         } else {
             failed = true
         }
+    }
+}
+
+/// Image from an assistant message (`![alt](source)`, desktop `MarkdownImage`): host paths are read through
+/// the file service, web and data URLs directly. Tapping opens it in the preview pane.
+struct ChatMarkdownImage: View {
+    let store: AppStore
+    let alt: String
+    let source: String
+    /// Host file the source resolves to, if any.
+    let path: String?
+    @Environment(\.zcodePalette) private var palette
+    @State private var data: Data?
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        Button(action: open) {
+            Group {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 280, maxHeight: 240)
+                } else {
+                    VStack(spacing: 6) {
+                        if failed {
+                            Image(systemName: "photo")
+                                .font(.system(size: 20))
+                                .foregroundStyle(palette.foregroundMuted)
+                        } else {
+                            ProgressView().controlSize(.small)
+                        }
+                        if !displayName.isEmpty {
+                            Text(displayName)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(palette.foregroundSubtle)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    .padding(10)
+                    .frame(width: 160, height: 110)
+                    .background(palette.panel)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(alt.isEmpty ? "Image" : alt)
+        .accessibilityIdentifier("chatMarkdownImage")
+        .task(id: source) { await load() }
+    }
+
+    private var displayName: String {
+        alt.isEmpty ? ((path ?? source) as NSString).lastPathComponent : alt
+    }
+
+    private func open() {
+        if let path {
+            store.openFileInInspector(pathOrId: path, preferPreview: true)
+        } else if let data {
+            let name = (source as NSString).lastPathComponent
+            store.openDataPreviewTab(id: "chat-image-\(source.hashValue)", fileName: name.isEmpty ? "Image" : name, mimeType: "image/png", data: data)
+        } else if let url = URL(string: source), url.scheme == "http" || url.scheme == "https" {
+            UIApplication.shared.open(url)
+        }
+    }
+
+    private func load() async {
+        guard image == nil else { return }
+        var loaded: Data?
+        if let path {
+            loaded = await store.chatImageData(path: path)
+        } else if source.hasPrefix("data:"), let comma = source.firstIndex(of: ",") {
+            loaded = Data(base64Encoded: String(source[source.index(after: comma)...]), options: .ignoreUnknownCharacters)
+        } else if let url = URL(string: source), url.scheme == "http" || url.scheme == "https" {
+            loaded = try? await URLSession.shared.data(from: url).0
+        }
+        guard let loaded, let decoded = UIImage(data: loaded) else {
+            failed = true
+            return
+        }
+        data = loaded
+        let longest = max(1, max(decoded.size.width, decoded.size.height))
+        let scale = min(1, 720 / longest)
+        image = await decoded.byPreparingThumbnail(ofSize: CGSize(width: decoded.size.width * scale, height: decoded.size.height * scale)) ?? decoded
     }
 }

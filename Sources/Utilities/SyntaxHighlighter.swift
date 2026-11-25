@@ -225,3 +225,92 @@ public enum SyntaxHighlighter {
         }
     }
 }
+
+// MARK: - Whole-document highlighting (selectable code canvas)
+
+extension SyntaxHighlighter {
+    struct DocumentPalette {
+        let plain, keyword, string, comment, type, number, function, attribute: UIColor
+
+        init(colors: SyntaxColors) {
+            plain = UIColor(colors.plain)
+            keyword = UIColor(colors.keyword)
+            string = UIColor(colors.string)
+            comment = UIColor(colors.comment)
+            type = UIColor(colors.type)
+            number = UIColor(colors.number)
+            function = UIColor(colors.function)
+            attribute = UIColor(colors.attribute)
+        }
+    }
+
+    private static let documentRules: [(NSRegularExpression, KeyPath<DocumentPalette, UIColor>)] = [
+        ("@[A-Za-z_][A-Za-z0-9_]*", \.attribute),
+        ("\\b\\d+(\\.\\d+)?\\b", \.number),
+        ("\\b[A-Z][A-Za-z0-9_]*\\b", \.type),
+        ("\\b[a-z_][A-Za-z0-9_]*(?=[ \\t]*\\()", \.function),
+    ].compactMap { pattern, color in (try? NSRegularExpression(pattern: pattern)).map { ($0, color) } }
+    private static let wordRegex = try? NSRegularExpression(pattern: "\\b[A-Za-z_][A-Za-z0-9_]*\\b")
+    private static let stringRegex = try? NSRegularExpression(pattern: "\"([^\"\\\\\\n]|\\\\.)*\"|'([^'\\\\\\n]|\\\\.)*'|`([^`\\\\\\n]|\\\\.)*`")
+    private static let trailingCommentRegex = try? NSRegularExpression(pattern: "//.*$", options: .anchorsMatchLines)
+    private static let commentLineRegex = try? NSRegularExpression(pattern: "^[ \\t]*(//|--|#).*$", options: .anchorsMatchLines)
+    private static let commentLineNoHashRegex = try? NSRegularExpression(pattern: "^[ \\t]*(//|--).*$", options: .anchorsMatchLines)
+
+    static func documentAttributes(palette: DocumentPalette, fontSize: CGFloat) -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 5
+        return [
+            .font: UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular),
+            .foregroundColor: palette.plain,
+            .paragraphStyle: paragraph,
+        ]
+    }
+
+    static func plainDocument(_ text: String, palette: DocumentPalette, fontSize: CGFloat) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: documentAttributes(palette: palette, fontSize: fontSize))
+    }
+
+    /// Same rules as `highlightLine`, applied once over the whole file so it can be one selectable text.
+    static func highlightDocument(_ text: String, language: String, palette: DocumentPalette, fontSize: CGFloat, searchQuery: String = "") -> NSAttributedString {
+        let base = documentAttributes(palette: palette, fontSize: fontSize)
+        let out = NSMutableAttributedString(string: text, attributes: base)
+        let ns = text as NSString
+        let full = NSRange(location: 0, length: ns.length)
+        guard full.length > 0 else { return out }
+        out.beginEditing()
+        for (regex, color) in documentRules {
+            for match in regex.matches(in: text, range: full) {
+                out.addAttribute(.foregroundColor, value: palette[keyPath: color], range: match.range)
+            }
+        }
+        if let wordRegex {
+            let bold = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .semibold)
+            for match in wordRegex.matches(in: text, range: full) where keywords.contains(ns.substring(with: match.range)) {
+                out.addAttributes([.foregroundColor: palette.keyword, .font: bold], range: match.range)
+            }
+        }
+        for match in stringRegex?.matches(in: text, range: full) ?? [] {
+            out.addAttribute(.foregroundColor, value: palette.string, range: match.range)
+        }
+        for match in trailingCommentRegex?.matches(in: text, range: full) ?? [] {
+            out.addAttribute(.foregroundColor, value: palette.comment, range: match.range)
+        }
+        let commentLines = language == "markdown" ? commentLineNoHashRegex : commentLineRegex
+        for match in commentLines?.matches(in: text, range: full) ?? [] {
+            out.addAttributes([.foregroundColor: palette.comment, .font: base[.font] as Any], range: match.range)
+        }
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty {
+            var searchRange = full
+            while searchRange.length > 0 {
+                let found = ns.range(of: query, options: .caseInsensitive, range: searchRange)
+                guard found.location != NSNotFound else { break }
+                out.addAttributes([.backgroundColor: UIColor(red: 0.96, green: 0.62, blue: 0.04, alpha: 0.42), .foregroundColor: UIColor.white], range: found)
+                let next = NSMaxRange(found)
+                searchRange = NSRange(location: next, length: full.length - next)
+            }
+        }
+        out.endEditing()
+        return out
+    }
+}

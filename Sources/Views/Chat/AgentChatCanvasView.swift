@@ -270,7 +270,8 @@ public struct AgentChatCanvasView: View {
                         .simultaneousGesture(
                             DragGesture(minimumDistance: 28, coordinateSpace: .local)
                                 .onEnded { value in
-                                    if value.translation.width > 76 && abs(value.translation.height) < 64 {
+                                    // Edge swipe only: drags inside the pane select text or scroll code sideways.
+                                    if value.startLocation.x < 44 && value.translation.width > 76 && abs(value.translation.height) < 64 {
                                         store.playImpactHaptic(.light)
                                         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
                                             store.showInspectorSheet = false
